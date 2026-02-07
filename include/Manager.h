@@ -1,0 +1,60 @@
+#pragma once
+
+#include <string>
+#include <vector>
+#include <map>
+#include <functional>
+#include "ClibUtil/editorID.hpp"
+
+namespace RE {
+    class TESForm;
+    class BGSKeyword;
+    class TESFaction;
+    class BGSPerk;
+    class SpellItem;
+    class TESShout;
+    class TESNPC;
+    class BGSListForm;
+}
+
+struct InternalFormInfo {
+    RE::FormID formID;
+    std::string editorID;
+    std::string name;
+    std::string pluginName;
+    std::string formType; 
+
+    // Helper for UI
+    std::string GetDisplayName() const {
+        if (!name.empty()) return name;
+        if (!editorID.empty()) return editorID;
+        return std::to_string(formID);
+    }
+};
+
+class Manager {
+public:
+    static Manager* GetSingleton() {
+        static Manager singleton;
+        return &singleton;
+    }
+
+    void PopulateAllLists();
+
+    // Data Store: Map of "TypeName" -> List of InternalFormInfo
+    // We use this to feed the UI
+    const std::vector<InternalFormInfo>& GetList(const std::string& typeName);
+    
+    // Register callback for when population is done
+    void RegisterReadyCallback(std::function<void()> callback);
+
+private:
+    Manager() = default;
+    
+    template <typename T>
+    void PopulateList(const std::string& a_typeName);
+
+    bool _isPopulated = false;
+    std::map<std::string, std::vector<InternalFormInfo>> _dataStore;
+    std::vector<std::function<void()>> _readyCallbacks;
+};
