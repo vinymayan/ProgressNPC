@@ -1,74 +1,95 @@
 #include "logger.h"
-#include "Rule.h"
+#include "SaveState.h"
 #include "UI.h"
+
 
 
 void OnMessage(SKSE::MessagingInterface::Message* message) {
     if (message->type == SKSE::MessagingInterface::kDataLoaded) {
         // Init Rules
         RuleManager::GetSingleton()->LoadRules();
-        
-        // Populate Forms (Async? Or direct?)
-        // Manager::GetSingleton()->PopulateAllLists(); // Maybe wait for user request or thread it?
-        // For now, let's just populate.
         Manager::GetSingleton()->PopulateAllLists();
-
-        // Register UI
+        RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
+		Manager::GetSingleton()->ConvertAllNPCOutfitsToInventory();
+        LoadEventHandler::Register();
         SPIDUI::Register();
     }
-    if (message->type == SKSE::MessagingInterface::kPostLoadGame) {
-        auto taskInterface = SKSE::GetTaskInterface();
-        if (taskInterface) {
-            taskInterface->AddTask([]() {
-                auto manager = RE::BGSSaveLoadManager::GetSingleton();
-                if (!manager || manager->lastFileName.empty()) {
-                    return;
-                }
+    if (message->type == SKSE::MessagingInterface::kPreLoadGame) {
+        SaveStateManager::GetSingleton()->ClearContext();
+        const char* saveName = static_cast<const char*>(message->data);
+        
+        if (!saveName) {
+            logger::warn("PreLoadGame: Nome do save é nulo.");
+            return;
+        }
 
-                // Criamos o objeto na stack e limpamos a memória inicial
-                RE::BGSSaveLoadFileEntry tempEntry;
-                std::memset(&tempEntry, 0, sizeof(RE::BGSSaveLoadFileEntry));
-                tempEntry.fileName = manager->lastFileName;
+        logger::info("Iniciando pré-carregamento para o save: {}", saveName);
 
-                bool success = false;
-                // Tenta até 5 vezes caso o arquivo esteja bloqueado pela engine
-                for (int i = 0; i < 5; ++i) {
-                    if (tempEntry.PopulateFileEntryData()) {
-						logger::debug("Tentativa {}: Sucesso ao ler o cabeçalho do save: {}", i + 1, tempEntry.fileName.c_str());
-                        success = true;
-                        break;
-                    }
-                    // Se falhar, aguarda 200ms antes da próxima tentativa
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                }
+        RE::BGSSaveLoadFileEntry tempEntry{};
+        tempEntry.fileName = saveName;
 
-                if (success) {
-                    SKSE::log::info("--- Save Atual Detectado (Sucesso na tentativa) ---");
-                    SKSE::log::info("Arquivo: {}", tempEntry.fileName.c_str());
-                    SKSE::log::info("Personagem: {}", tempEntry.characterName.c_str());
-                    SKSE::log::info("Nível: {}", tempEntry.characterLevel);
-                    SKSE::log::info("Número do Save: {}", tempEntry.saveNumber);
-                    SKSE::log::info("Tempo de Jogo: {}", tempEntry.playTime.c_str());
-                    SKSE::log::info("ID do Personagem: {:X}", tempEntry.characterID);
+        bool success = false;
+        for (int i = 0; i < 5; ++i) {
+            if (tempEntry.PopulateFileEntryData()) {
+                // 3. CORREÇÃO: Use .data() em vez de .c_str() para evitar o assert !wide()
+                logger::debug("Sucesso ao ler cabeçalho na tentativa {}: {}", i + 1, tempEntry.fileName.data());
+                success = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        if (success) {
+            std::string fileName = saveName;
+            uint32_t charID = 0;
+
+            try {
+                size_t firstUnderscore = fileName.find('_');
+                size_t secondUnderscore = fileName.find('_', firstUnderscore + 1);
+
+                if (firstUnderscore != std::string::npos && secondUnderscore != std::string::npos) {
+                    std::string charIdStr = fileName.substr(firstUnderscore + 1, secondUnderscore - firstUnderscore - 1);
+                    charID = static_cast<uint32_t>(std::stoul(charIdStr, nullptr, 16));
                 }
                 else {
-                    SKSE::log::error("Erro persistente: Falha ao ler o cabeçalho após várias tentativas: {}", manager->lastFileName.c_str());
+                    charID = tempEntry.characterID;
+                    logger::warn("Padrão de nome não detectado. Usando ID interno: {:X}", charID);
                 }
+            }
+            catch (const std::exception& e) {
+                charID = tempEntry.characterID;
+                logger::error("Erro no processamento do nome: {}", e.what());
+            }
 
-                // Limpeza de segurança para evitar o crash !wide() no destruidor
-                std::memset(&tempEntry, 0, sizeof(RE::BGSSaveLoadFileEntry));
-                });
+            SaveStateManager::GetSingleton()->LoadCharacterData(charID);
+            SaveStateManager::GetSingleton()->SetCurrentContext(charID, tempEntry.saveNumber, "");
+
+            logger::info("Contexto carregado: Personagem {:X}, Save {}", charID, tempEntry.saveNumber);
         }
+        else {
+            logger::error("Falha crítica ao ler o cabeçalho do arquivo: {}", saveName);
+        }
+
+
+    }
+    if (message->type == SKSE::MessagingInterface::kPostLoadGame) {
+        // O jogo terminou de carregar o save e os objetos estão prontos
+        logger::info("PostLoadGame detectado. Sincronizando atores próximos...");
+
+        // Chamamos a função de varredura manual
+        //LoadEventHandler::GetSingleton()->ForceApplyToLoadedActors();
+    }
+    if (message->type == SKSE::MessagingInterface::kSaveGame) {
+        // O data do kSaveGame contém o nome do arquivo de save
+        const char* saveName = static_cast<const char*>(message->data);
+        
+        logger::info("Salvamento detectado: {}. Sincronizando banco de dados JSON...", saveName);
+        SaveStateManager::GetSingleton()->PersistCurrentSave(saveName);
     }
 
     
     if (message->type == SKSE::MessagingInterface::kNewGame) {
-        SaveStateManager::GetSingleton()->LoadData("NewGame");
-        const char* saveName = (const char*)message->data; // kSaveGame data is the save name string?
-        // Actually kSaveGame data consists of the save name string (const char*)
-        if (saveName) {
-            SaveStateManager::GetSingleton()->SaveData(saveName);
-        }
+
     }
 }
 

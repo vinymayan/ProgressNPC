@@ -6,16 +6,7 @@
 #include <functional>
 #include "ClibUtil/editorID.hpp"
 
-namespace RE {
-    class TESForm;
-    class BGSKeyword;
-    class TESFaction;
-    class BGSPerk;
-    class SpellItem;
-    class TESShout;
-    class TESNPC;
-    class BGSListForm;
-}
+
 
 struct InternalFormInfo {
     RE::FormID formID;
@@ -47,6 +38,8 @@ public:
     
     // Register callback for when population is done
     void RegisterReadyCallback(std::function<void()> callback);
+
+    void ConvertAllNPCOutfitsToInventory();
 
 private:
     Manager() = default;

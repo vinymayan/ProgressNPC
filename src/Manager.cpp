@@ -84,3 +84,45 @@ void Manager::PopulateList(const std::string& a_typeName) {
     }
     logger::info("Carregados {} itens do tipo {}", list.size(), a_typeName);
 }
+
+void Manager::ConvertAllNPCOutfitsToInventory() {
+    auto dataHandler = RE::TESDataHandler::GetSingleton();
+    if (!dataHandler) return;
+
+    // Obtém todos os NPCs carregados no jogo
+    const auto& npcArray = dataHandler->GetFormArray<RE::TESNPC>();
+
+    uint32_t count = 0;
+    for (auto* npc : npcArray) {
+        // Verifica se o NPC existe e se possui um Outfit padrão (DOFT)
+        if (npc && npc->defaultOutfit) {
+            RE::BGSOutfit* outfit = npc->defaultOutfit;
+
+            // Transfere cada item do Outfit para o container fixo do NPC
+            for (auto* item : outfit->outfitItems) {
+                if (item) {
+                    auto* boundItem = item->As<RE::TESBoundObject>();
+                    if (boundItem) {
+                        if (npc->GetObjectCount(boundItem) == 0) {
+                            npc->AddObjectToContainer(boundItem, 1, nullptr);
+                        }
+                    }
+
+                    logger::info("Item '{}' transferido do Outfit para o inventário base de '{}'",
+                        item->GetName(), npc->GetName());
+                }
+            }
+            RE::BGSOutfit* rdoEmptyOutfit = nullptr;
+
+                rdoEmptyOutfit = dataHandler->LookupForm<RE::BGSOutfit>(0x800, "RDO.esp");
+            // Remove o Outfit padrão para evitar que o jogo sobrescreva o inventário
+            npc->defaultOutfit = rdoEmptyOutfit;
+
+            // Opcional: Repetir para o Sleep Outfit (SOFT) se desejar
+            // npc->sleepOutfit = nullptr; 
+
+            count++;
+        }
+    }
+    logger::info("Processados {} NPCs: Outfits convertidos em itens de inventário.", count);
+}
