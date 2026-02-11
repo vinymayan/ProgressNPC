@@ -97,7 +97,7 @@ void Manager::ConvertAllNPCOutfitsToInventory() {
         // Verifica se o NPC existe e se possui um Outfit padrão (DOFT)
         if (npc && npc->defaultOutfit) {
             RE::BGSOutfit* outfit = npc->defaultOutfit;
-
+            std::string editorID = clib_util::editorID::get_editorID(outfit);
             // Transfere cada item do Outfit para o container fixo do NPC
             for (auto* item : outfit->outfitItems) {
                 if (item) {
@@ -107,22 +107,21 @@ void Manager::ConvertAllNPCOutfitsToInventory() {
                             npc->AddObjectToContainer(boundItem, 1, nullptr);
                         }
                     }
-
-                    logger::info("Item '{}' transferido do Outfit para o inventário base de '{}'",
-                        item->GetName(), npc->GetName());
                 }
             }
             RE::BGSOutfit* rdoEmptyOutfit = nullptr;
 
-                rdoEmptyOutfit = dataHandler->LookupForm<RE::BGSOutfit>(0x800, "RDO.esp");
+            rdoEmptyOutfit = dataHandler->LookupForm<RE::BGSOutfit>(0x800, "RDO.esp");
             // Remove o Outfit padrão para evitar que o jogo sobrescreva o inventário
-            npc->defaultOutfit = rdoEmptyOutfit;
-
+            npc->SetDefaultOutfit(rdoEmptyOutfit);
+            RE::BGSOutfit* newoutFit = npc->defaultOutfit;
+            std::string novoOut = clib_util::editorID::get_editorID(newoutFit);
+            //logger::debug("[NOVO] '{}': Outfit '{}'",npc->GetName(), novoOut);
             // Opcional: Repetir para o Sleep Outfit (SOFT) se desejar
             // npc->sleepOutfit = nullptr; 
 
             count++;
         }
     }
-    logger::info("Processados {} NPCs: Outfits convertidos em itens de inventário.", count);
+    //logger::info("Processados {} NPCs: Outfits convertidos em itens de inventário.", count);
 }

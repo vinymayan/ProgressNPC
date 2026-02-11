@@ -56,21 +56,6 @@ namespace SPIDUI {
         return nullptr;
     }
 
-    std::string GetRewardDisplayName(const Reward& r) {
-        auto& list = Manager::GetSingleton()->GetList(r.typeReward);
-
-        for (const auto& info : list) {
-            // Formata o ID do Manager no mesmo padrão para comparação
-            std::string infoHex = FormatLocalFormID(info.formID, info.pluginName);
-            std::string compareID = info.pluginName + "|" + infoHex;
-
-            if (compareID == r.formIDStr) {
-                return info.name.empty() ? info.editorID : info.name;
-            }
-        }
-        return r.formIDStr;
-    }
-
     void RenderTypeFilter() {
         const std::vector<std::string> options = { "NPC", "Faction", "Keyword", "Perk" };
 
@@ -274,6 +259,8 @@ namespace SPIDUI {
 
     // --- NOVO: Gerenciador de Grupos de Recompensa ---
     void RenderRewardGroups(Rule& rule) {
+        if (ImGuiMCP::Button("Voltar")) openRewardsModal = false;
+		ImGuiMCP::SameLine();
         if (ImGuiMCP::Button("+ Novo Grupo")) {
             rule.rewardGroups.push_back({ "Novo Grupo", false, {} });
         }
@@ -332,7 +319,23 @@ namespace SPIDUI {
                     for (const auto& r : group.rewards) {
                         ImGuiMCP::TableNextRow();
                         ImGuiMCP::TableSetColumnIndex(0); ImGuiMCP::Text(r.typeReward.c_str());
-                        ImGuiMCP::TableSetColumnIndex(1); ImGuiMCP::Text(GetRewardDisplayName(r).c_str());
+                        ImGuiMCP::TableSetColumnIndex(1);
+                        auto [plugin, fID] = r.ParseFormID();
+                        auto form = RE::TESForm::LookupByID(fID);
+
+                        if (form) {
+                            std::string dName = "";
+                            if (auto fullName = form->As<RE::TESFullName>()) {
+                                dName = fullName->GetFullName();
+                            }
+                            if (dName.empty()) {
+                                dName = clib_util::editorID::get_editorID(form);
+                            }
+                            ImGuiMCP::Text(dName.empty() ? r.formIDStr.c_str() : dName.c_str());
+                        }
+                        else {
+                            ImGuiMCP::TextDisabled(r.formIDStr.c_str());
+                        }
                         ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text("%d", r.amount);
                         ImGuiMCP::TableSetColumnIndex(3); ImGuiMCP::Text("%.1f%%", r.chanceReward);
                     }

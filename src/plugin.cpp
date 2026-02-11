@@ -11,7 +11,12 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         Manager::GetSingleton()->PopulateAllLists();
         RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
 		Manager::GetSingleton()->ConvertAllNPCOutfitsToInventory();
-        LoadEventHandler::Register();
+       // CellAttachHandler::Register();
+        //CellFullyLoadedHandler::Register();
+        //LoadEventHandler::Register();
+        
+        //LocationChangeHandler::Register();
+        //HeadPartCreator::TestCreateHeadPart();
         SPIDUI::Register();
     }
     if (message->type == SKSE::MessagingInterface::kPreLoadGame) {
@@ -73,11 +78,8 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
 
     }
     if (message->type == SKSE::MessagingInterface::kPostLoadGame) {
-        // O jogo terminou de carregar o save e os objetos estão prontos
-        logger::info("PostLoadGame detectado. Sincronizando atores próximos...");
-
-        // Chamamos a função de varredura manual
         //LoadEventHandler::GetSingleton()->ForceApplyToLoadedActors();
+        //AplicaGeral();
     }
     if (message->type == SKSE::MessagingInterface::kSaveGame) {
         // O data do kSaveGame contém o nome do arquivo de save
@@ -98,6 +100,7 @@ SKSEPluginLoad(const SKSE::LoadInterface *skse) {
     SetupLog();
     logger::info("Plugin loaded");
     SKSE::Init(skse);
+    BackgroundCloneHook::Install();
     SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
     return true;
 }
