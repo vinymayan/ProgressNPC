@@ -19,7 +19,7 @@ struct Reward {
 };
 
 struct RewardGroup {
-    std::string name = "Novo Grupo";
+    std::string name = "New Group";
     bool isExclusive = false; // Modo Rolagem: Independente vs Exclusivo
     std::vector<Reward> rewards;
 };
@@ -124,7 +124,9 @@ private:
     std::vector<Rule> _rules;
     std::map<std::string, std::vector<Rule>> _ruleHistories;
     std::map<RE::FormID, AffectedNPC> _affectedNPCsDatabase;
-    const std::string _rulesDir = "Data/SKSE/Plugins/ProgressNPC/Rules/";
+    std::map<std::string, std::string> _ruleIdToFileName;
+    std::vector<std::string> _rulesToDelete;
+    const std::string _rulesDir = "Data/SKSE/Plugins/EDF/Rules/";
 };
 
 std::string FormatLocalFormID(uint32_t a_formID, const std::string& a_pluginName);

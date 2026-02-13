@@ -51,6 +51,24 @@ std::pair<std::string, RE::FormID> Reward::ParseFormID() const {
     }
     return { "", 0 };
 }
+
+std::string SanitizeFilename(std::string name) {
+    if (name.empty()) return "Unnamed_Rule";
+
+    // Caracteres proibidos em sistemas de arquivos
+    std::string illegalChars = "<>:\"/\\|?*";
+    for (char& c : name) {
+        if (illegalChars.find(c) != std::string::npos) {
+            c = '_'; // Substitui por underscore
+        }
+    }
+    // Remove espaços no fim ou pontos que podem causar problemas
+    while (!name.empty() && (name.back() == ' ' || name.back() == '.')) {
+        name.pop_back();
+    }
+    return name;
+}
+
 void to_json(json& j, const Reward& p) {
     j = json{
         {"typeReward", p.typeReward},
@@ -172,6 +190,7 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist) {
 void RuleManager::LoadRules() {
     _rules.clear();
     _ruleHistories.clear();
+    _ruleIdToFileName.clear();
 
     if (!fs::exists(_rulesDir)) {
         fs::create_directories(_rulesDir);
@@ -191,6 +210,7 @@ void RuleManager::LoadRules() {
                     std::string id = history[0].id;
                     _ruleHistories[id] = history;
                     _rules.push_back(history[0]);
+                    _ruleIdToFileName[id] = entry.path().stem().string();
                 }
             }
             catch (const std::exception& e) {
@@ -204,11 +224,32 @@ void RuleManager::LoadRules() {
 void RuleManager::SaveRules() {
     int updatedTotal = 0;
 
+    for (const auto& filePath : _rulesToDelete) {
+        if (fs::exists(filePath)) {
+            fs::remove(filePath);
+            logger::info("Arquivo deletado permanentemente: {}", filePath);
+            updatedTotal++;
+        }
+    }
+    _rulesToDelete.clear(); // Limpa a fila de espera
+
     for (auto& currentRule : _rules) {
         std::string currentContentHash = currentRule.CalculateHash();
 
         // Se o hash atual for diferente do último salvo
         if (currentRule.lastSavedHash != currentContentHash) {
+
+            std::string newFileName = SanitizeFilename(currentRule.name);
+            std::string oldFileName = _ruleIdToFileName[currentRule.id];
+
+            // 2. Se o nome mudou, deleta o arquivo antigo para evitar duplicatas
+            if (!oldFileName.empty() && oldFileName != newFileName) {
+                std::string oldPath = _rulesDir + oldFileName + ".json";
+                if (fs::exists(oldPath)) {
+                    fs::remove(oldPath);
+                    logger::info("Renomeando regra: deletando arquivo antigo '{}'", oldFileName);
+                }
+            }
 
             // 1. Incrementa a versão numérica
             currentRule.version++;
@@ -219,7 +260,7 @@ void RuleManager::SaveRules() {
             history.insert(history.begin(), currentRule); // Adiciona a nova versão no topo
 
             // 3. Salva o arquivo individual com o histórico completo
-            std::string filePath = _rulesDir + currentRule.id + ".json";
+            std::string filePath = _rulesDir + newFileName + ".json";
             std::ofstream o(filePath);
             json j = history; // O arquivo contém o array de versões
             o << std::setw(4) << j << std::endl;
@@ -256,7 +297,25 @@ Rule& RuleManager::CreateRule() {
 }
 
 void RuleManager::DeleteRule(const std::string& id) {
+    // 1. Localiza o nome do arquivo antes de limpar os mapas
+    if (_ruleIdToFileName.contains(id)) {
+        std::string fileName = _ruleIdToFileName[id];
+        std::string filePath = _rulesDir + fileName + ".json";
+
+        // Adiciona à lista de pendências para deletar do disco no Save
+        _rulesToDelete.push_back(filePath);
+
+        // Limpa o rastro nos mapas
+        _ruleIdToFileName.erase(id);
+    }
+
+    // 2. Remove do histórico
+    _ruleHistories.erase(id);
+
+    // 3. Remove do vetor principal
     std::erase_if(_rules, [&](const Rule& r) { return r.id == id; });
+
+    logger::info("Regra {} marcada para deleção física.", id);
 }
 
 std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {
@@ -387,9 +446,7 @@ std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, cons
 }
 
 void RuleManager::InitializeAffectedNPCsDatabase() {
-    logger::info("======================================================");
-    logger::info("Iniciando Mapeamento de NPCs Afetados por Regras...");
-    logger::info("======================================================");
+
 
     _affectedNPCsDatabase.clear();
     auto& rules = GetRules();

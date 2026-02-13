@@ -5,6 +5,34 @@ std::vector<SaveHistoryEntry>& SaveStateManager::GetCharacterHistory(uint32_t ch
     return _characterHistory[characterID];
 }
 
+void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) {
+    _currentContext.charID = a_charID;
+    _currentContext.saveNumber = a_saveNum;
+    _currentContext.isValid = true;
+
+    // 1. Inicializa sessão limpa
+    _sessionData = SaveHistoryEntry{};
+    _sessionData.saveNumber = a_saveNum;
+
+    // 2. Tenta herdar o progresso do save carregado ou do anterior mais próximo
+    auto& history = _characterHistory[a_charID];
+    SaveHistoryEntry* bestSnapshot = nullptr;
+
+    for (auto& entry : history) {
+        if (entry.saveNumber == a_saveNum) {
+            _sessionData.npcRuleVersions = entry.npcRuleVersions; // Clone exato
+            return;
+        }
+        if (entry.saveNumber < a_saveNum && (!bestSnapshot || entry.saveNumber > bestSnapshot->saveNumber)) {
+            bestSnapshot = &entry;
+        }
+    }
+
+    if (bestSnapshot) {
+        _sessionData.npcRuleVersions = bestSnapshot->npcRuleVersions; // Herança
+    }
+}
+
 void SaveStateManager::PersistCurrentSave(const std::string& a_saveName) {
     auto& context = _currentContext;
     if (!context.isValid) return;
@@ -28,42 +56,23 @@ void SaveStateManager::PersistCurrentSave(const std::string& a_saveName) {
             newSaveNumber = context.saveNumber; // Fallback para o atual se falhar
         }
     }
-    catch (const std::exception& e) {
-        logger::error("[Persist] Erro ao extrair save number de '{}': {}", a_saveName, e.what());
-        newSaveNumber = context.saveNumber;
-    }
+    catch (...) { newSaveNumber = context.saveNumber; }
 
-    auto& history = _characterHistory[context.charID];
-    SaveHistoryEntry* sessionProgress = nullptr;
-    for (auto& h : history) {
-        if (h.saveNumber == context.saveNumber) {
-            sessionProgress = &h;
-            break;
-        }
-    }
+    _sessionData.saveNumber = newSaveNumber;
 
-    // 3. Cria a nova entrada para o JSON
-    SaveHistoryEntry newEntry;
-    newEntry.saveNumber = newSaveNumber;
+    // 2. Persistimos a sessão no histórico e no disco
+    UpdateSaveEntry(context.charID, _sessionData);
 
-    if (sessionProgress) {
-        newEntry.npcRuleVersions = sessionProgress->npcRuleVersions;
-    }
-
-    // 4. Persiste no histórico e grava no disco
-    UpdateSaveEntry(context.charID, newEntry);
-
-    // 5. Atualiza o contexto para o novo save
-    uint32_t oldNumber = context.saveNumber;
+    // 3. Atualizamos o contexto de runtime
     context.saveNumber = newSaveNumber;
 
-    logger::info("[SaveManager] Sincronização concluída. Progresso de versões transportado para Save {}.", newSaveNumber);
+    logger::info("[SaveManager] Novo save {} registrado. Save original preservado.", newSaveNumber);
 }
 
 std::string SaveStateManager::GetCharacterPath(uint32_t characterID) {
     char hexID[9];
     sprintf_s(hexID, "%08X", characterID);
-    return "Data/SKSE/Plugins/ProgressNPC/Saves/" + std::string(hexID) + ".json";
+    return "Data/SKSE/Plugins/EDF/Saves/" + std::string(hexID) + ".json";
 }
 
 void SaveStateManager::LoadCharacterData(uint32_t characterID) {
@@ -163,27 +172,8 @@ void ApplyRulesToInstance(RE::Actor* a_actor) {
     auto& context = SaveStateManager::GetSingleton()->GetCurrentContext();
     if (!context.isValid || !baseNPC) return;
 
-    auto& history = SaveStateManager::GetSingleton()->GetCharacterHistory(context.charID);
+    auto& session = SaveStateManager::GetSingleton()->GetSessionData();
     std::string actorName = a_actor->GetName();
-
-    // 1. Garantir Entrada Atual e Herança (Mesma lógica funcional anterior)
-    SaveHistoryEntry* currentEntry = nullptr;
-    for (auto& entry : history) {
-        if (entry.saveNumber == context.saveNumber) { currentEntry = &entry; break; }
-    }
-    if (!currentEntry) {
-        SaveHistoryEntry* bestSnapshot = nullptr;
-        for (auto& entry : history) {
-            if (entry.saveNumber < context.saveNumber && (!bestSnapshot || entry.saveNumber > bestSnapshot->saveNumber))
-                bestSnapshot = &entry;
-        }
-        SaveHistoryEntry newE;
-        newE.saveNumber = context.saveNumber;
-        if (bestSnapshot) newE.npcRuleVersions = bestSnapshot->npcRuleVersions;
-        history.push_back(newE);
-        currentEntry = &history.back();
-    }
-
     std::string fileNameStr(baseNPC->GetFile(0)->GetFilename());
     std::string npcKey = fileNameStr + "|" + FormatLocalFormID(a_actor->GetFormID(), fileNameStr);
 
@@ -200,8 +190,8 @@ void ApplyRulesToInstance(RE::Actor* a_actor) {
         if (a_actor->GetLevel() < currentRule.level) continue;
 
         int appliedVersion = 0;
-        if (currentEntry->npcRuleVersions.contains(npcKey) && currentEntry->npcRuleVersions[npcKey].contains(ruleID)) {
-            appliedVersion = currentEntry->npcRuleVersions[npcKey][ruleID];
+        if (session.npcRuleVersions.contains(npcKey) && session.npcRuleVersions[npcKey].contains(ruleID)) {
+            appliedVersion = session.npcRuleVersions[npcKey][ruleID];
         }
 
         if (appliedVersion < currentRule.version) {
@@ -307,7 +297,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor) {
                     }
                 }
             }
-            currentEntry->npcRuleVersions[npcKey][ruleID] = currentRule.version;
+            session.npcRuleVersions[npcKey][ruleID] = currentRule.version;
         }
     }
 }

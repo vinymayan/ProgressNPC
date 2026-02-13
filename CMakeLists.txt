@@ -17,7 +17,7 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 cmake_minimum_required(VERSION 3.21)
 # Set your project name. This will be the name of your SKSE .dll file.
 set(AUTHOR_NAME "viny")
-set(PRODUCT_NAME "ProgressNPC")
+set(PRODUCT_NAME "EasyDistribution")
 project(${PRODUCT_NAME} VERSION 0.1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

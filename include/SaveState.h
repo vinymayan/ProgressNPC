@@ -11,6 +11,7 @@ struct CurrentSaveContext {
     uint32_t charID = 0;
     uint32_t saveNumber = 0;
     bool isValid = false;
+
 };
 
 class SaveStateManager {
@@ -27,17 +28,14 @@ public:
     void UpdateSaveEntry(uint32_t characterID, const SaveHistoryEntry& newEntry);
 
     std::vector<SaveHistoryEntry>& GetCharacterHistory(uint32_t characterID);
-
-    void SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) {
-        _currentContext.charID = a_charID;
-        _currentContext.saveNumber = a_saveNum;
-        _currentContext.isValid = true;
-    }
+    SaveHistoryEntry& GetSessionData() { return _sessionData; }
+    void SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum);
 
     void ClearContext() {
         _currentContext.isValid = false;
         _currentContext.saveNumber = 0;
         _currentContext.charID = 0;
+        _sessionData = SaveHistoryEntry{};
     }
 
     CurrentSaveContext& GetCurrentContext() { return _currentContext; }
@@ -48,6 +46,7 @@ private:
     std::string GetCharacterPath(uint32_t characterID);
     std::map<uint32_t, std::vector<SaveHistoryEntry>> _characterHistory; // Cache em memória
     CurrentSaveContext _currentContext;
+    SaveHistoryEntry _sessionData;
 };
 
 enum class OutfitConversionMode : int {
@@ -199,4 +198,68 @@ public:
         }
     }
 
+};
+
+class PlayerLevel : public RE::BSTEventSink<RE::LevelIncrease::Event> {
+public:
+    static PlayerLevel* GetSingleton() {
+        static PlayerLevel singleton;
+        return &singleton;
+    }
+
+    // A assinatura deve receber 'RE::LevelIncrease::Event'
+    RE::BSEventNotifyControl ProcessEvent(const RE::LevelIncrease::Event* a_event, RE::BSTEventSource<RE::LevelIncrease::Event>*) override {
+        if (!a_event) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        logger::info("Player subiu para o nível {}. Iniciando scan de regras para atores próximos.", a_event->newLevel);
+
+        // 1. Aplicar regras ao próprio Player
+        auto player = RE::PlayerCharacter::GetSingleton();
+        if (player) {
+            logger::debug("[LevelUp] Verificando regras para o Player.");
+            ApplyRulesToInstance(player);
+        }
+
+        // 2. Aplicar regras aos NPCs carregados (próximos)
+        auto processLists = RE::ProcessLists::GetSingleton();
+        if (processLists) {
+            // A lista 'highActorHandles' contém os atores que o motor está processando ativamente perto do player
+            for (auto& handle : processLists->highActorHandles) {
+                auto actorPtr = handle.get();
+                if (actorPtr) {
+                    RE::Actor* npc = actorPtr.get();
+
+                    // Pula o player (já processado acima) e mortos
+                    if (npc && npc != player && !npc->IsDead()) {
+                        auto baseNPC = npc->GetActorBase();
+                        if (baseNPC) {
+                            const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
+
+                            // Verifica se este NPC específico está no banco de dados de regras
+                            if (affectedDB.find(baseNPC->GetFormID()) != affectedDB.end()) {
+                                logger::debug("[LevelUp] NPC '{}' detectado próximo. Aplicando regras.", npc->GetName());
+                                ApplyRulesToInstance(npc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    static void Register() {
+        // CORREÇÃO: Usar a fonte dedicada definida em LevelIncrease.h, não o ScriptEventSourceHolder
+        auto eventSource = RE::LevelIncrease::GetEventSource();
+        if (eventSource) {
+            eventSource->AddEventSink(GetSingleton());
+            logger::info("PlayerLevel sink registrado com sucesso.");
+        }
+        else {
+            logger::error("Falha ao obter RE::LevelIncrease::GetEventSource()!");
+        }
+    }
 };

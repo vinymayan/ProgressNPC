@@ -14,22 +14,23 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
        // CellAttachHandler::Register();
         //CellFullyLoadedHandler::Register();
         LoadEventHandler::Register();
-        auto ui = RE::UI::GetSingleton();
-        if (ui) {
-            ui->AddEventSink(EventSink::GetSingleton());
-            // SKSE::log::info("EventSink de Menu registrado com sucesso.");
-        }
+        PlayerLevel::Register();
+        //auto ui = RE::UI::GetSingleton();
+        //if (ui) {
+        //    ui->AddEventSink(EventSink::GetSingleton());
+        //    // SKSE::log::info("EventSink de Menu registrado com sucesso.");
+        //}
 
-        if (QuickLoot::API::QuickLootAPI::Init("ProgressNPC")) {
-            logger::info("QuickLoot API conectada com sucesso.");
+        //if (QuickLoot::API::QuickLootAPI::Init("ProgressNPC")) {
+        //    logger::info("QuickLoot API conectada com sucesso.");
 
-            // Registrar handlers usando as funções que criamos no Events.cpp
-            QuickLoot::API::QuickLootAPI::RegisterOpenLootMenuHandler(EventSink::OnQuickLootOpen);
-            QuickLoot::API::QuickLootAPI::RegisterCloseLootMenuHandler(EventSink::OnQuickLootClose);
-        }
-        else {
-            logger::warn("QuickLootIE não detectado ou falha na API.");
-        }
+        //    // Registrar handlers usando as funções que criamos no Events.cpp
+        //    QuickLoot::API::QuickLootAPI::RegisterOpenLootMenuHandler(EventSink::OnQuickLootOpen);
+        //    QuickLoot::API::QuickLootAPI::RegisterCloseLootMenuHandler(EventSink::OnQuickLootClose);
+        //}
+        //else {
+        //    logger::warn("QuickLootIE não detectado ou falha na API.");
+        //}
 
         //LocationChangeHandler::Register();
         //HeadPartCreator::TestCreateHeadPart();
@@ -94,8 +95,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
 
     }
     if (message->type == SKSE::MessagingInterface::kPostLoadGame) {
-        //LoadEventHandler::GetSingleton()->ForceApplyToLoadedActors();
-        //AplicaGeral();
+
     }
     if (message->type == SKSE::MessagingInterface::kSaveGame) {
         // O data do kSaveGame contém o nome do arquivo de save
