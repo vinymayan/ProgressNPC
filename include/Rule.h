@@ -13,6 +13,7 @@ struct Reward {
     std::string formIDStr;  // e.g. "Skyrim.esm|D8D4E" (Plugin|FormID) or "D8D4E" (FormID only - unsafe without plugin)
     uint32_t amount = 1;
     float chanceReward = 100.0f;
+    bool lootable = true;
     // Helper to separate Plugin | FormID
     std::pair<std::string, RE::FormID> ParseFormID() const;
 };
@@ -23,39 +24,62 @@ struct RewardGroup {
     std::vector<Reward> rewards;
 };
 
+struct BlacklistFilter {
+    std::string type;      // "NPC", "Faction", "Race", "Keyword"
+    std::string formIDStr; // Plugin|FormID
+};
+
 void to_json(json& j, const Reward& p);
 void from_json(const json& j, Reward& p);
 
-void to_json(json& j, const RewardGroup& p); // Adicionado
-void from_json(const json& j, RewardGroup& p); // Adicionado
+void to_json(json& j, const RewardGroup& p); 
+void from_json(const json& j, RewardGroup& p); 
+
+void to_json(json& j, const BlacklistFilter& p);
+void from_json(const json& j, BlacklistFilter& p);
 
 struct Rule {
     std::string id;
     std::string name;
     std::string type = "NPC";
     int level = 1;
-    std::vector<std::string> filterFormIDs;
+    int version = 0;
+    // Novos campos de Alvos (Substituem type e filterFormIDs)
+    int targetGender = 0;
+    bool targetRequiresAll = false;
+    std::vector<BlacklistFilter> targetFilters; // Usando a mesma struct de filtro
     std::vector<RewardGroup> rewardGroups;
 
-    // Novo: Armazena a versão atual da regra baseada no conteúdo
-    std::string versionHash;
+    int blacklistedGender = 0;       // 0: Nenhum, 1: Male, 2: Female
+    bool blacklistRequiresAll = false;
+    std::vector<BlacklistFilter> blacklistFilters;
+
+    mutable std::string lastSavedHash;
 
     // Calcula um hash baseado no conteúdo estrutural da regra
     std::string CalculateHash() const {
         nlohmann::json j;
-        j["type"] = type;
+        j["name"] = name;
         j["level"] = level;
-        j["targets"] = filterFormIDs;
+        j["t_gender"] = targetGender;
+        j["t_reqAll"] = targetRequiresAll;
+        j["t_filters"] = targetFilters;
         j["groups"] = rewardGroups;
+        j["b_gender"] = blacklistedGender;
+        j["b_reqAll"] = blacklistRequiresAll;
+        j["b_filters"] = blacklistFilters;
         return std::to_string(std::hash<std::string>{}(j.dump()));
     }
+
     bool IsModified() const {
-        return versionHash != CalculateHash();
+        return lastSavedHash != CalculateHash();
     }
 };
 
 void to_json(json& j, const Rule& p);
 void from_json(const json& j, Rule& p);
+
+bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist);
 
 struct AffectedNPC {
     RE::FormID npcFormID;
@@ -82,50 +106,25 @@ public:
     // Apply rules to an NPC (Validation logic)
     // Returns list of rewards to apply
     std::vector<Reward> GetRewardsForNPC(RE::TESNPC* npc);
-    void GenerateDistributionReport();
+    
     // Adicione a declaração na classe RuleManager
     std::vector<Reward> GetRewardsForSpecificRule(RE::TESNPC* npc, const Rule& rule);
 
     void InitializeAffectedNPCsDatabase();
-
+    float GetRandomFloat(float a_min, float a_max) {
+        static thread_local std::mt19937 gen{ std::random_device{}() };
+        std::uniform_real_distribution<float> dis(a_min, a_max);
+        return dis(gen);
+    }
     // Getter para o banco de dados
     const std::map<RE::FormID, AffectedNPC>& GetAffectedNPCsDatabase() { return _affectedNPCsDatabase; }
 
+    Rule* GetRuleVersion(const std::string& ruleID, int version);
 private:
     std::vector<Rule> _rules;
+    std::map<std::string, std::vector<Rule>> _ruleHistories;
     std::map<RE::FormID, AffectedNPC> _affectedNPCsDatabase;
-    const std::string _filename = "Data/SKSE/Plugins/ProgressNPC/_DISTR.json";
+    const std::string _rulesDir = "Data/SKSE/Plugins/ProgressNPC/Rules/";
 };
 
 std::string FormatLocalFormID(uint32_t a_formID, const std::string& a_pluginName);
-
-class RuleProcessor {
-public:
-    // Retorna true se a mudança na regra EXIGE que ela seja redistribuída
-    static bool ShouldReapplyRule(const Rule& oldRule, const Rule& newRule) {
-        if (oldRule.versionHash == newRule.versionHash) return false;
-
-        // Se o nível mudou ou os alvos (filtros) mudaram, deve reaplicar
-        if (oldRule.level != newRule.level || oldRule.filterFormIDs != newRule.filterFormIDs) return true;
-
-        // Regra Especial: Grupos Exclusivos
-        // Se a mudança foi apenas a adição de um item em um grupo exclusivo,
-        // e o grupo já existia, não reaplicamos (conforme seu pedido).
-        if (oldRule.rewardGroups.size() == newRule.rewardGroups.size()) {
-            for (size_t i = 0; i < oldRule.rewardGroups.size(); i++) {
-                if (newRule.rewardGroups[i].isExclusive && oldRule.rewardGroups[i].isExclusive) {
-                    // Mudança em grupo exclusivo ignorada para NPCs que já a possuem
-                    continue;
-                }
-                // Se um grupo NÃO exclusivo mudou, precisamos reaplicar
-                if (oldRule.rewardGroups[i].rewards.size() != newRule.rewardGroups[i].rewards.size()) return true;
-            }
-        }
-        else {
-            return true; // Quantidade de grupos mudou
-        }
-
-        return false;
-    }
-};
-

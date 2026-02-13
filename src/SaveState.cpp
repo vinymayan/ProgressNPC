@@ -1,5 +1,106 @@
 #include "SaveState.h"
 
+std::vector<SaveHistoryEntry>& SaveStateManager::GetCharacterHistory(uint32_t characterID) {
+    // Retorna a referência do histórico ou cria uma entrada vazia caso não exista
+    return _characterHistory[characterID];
+}
+
+void SaveStateManager::PersistCurrentSave(const std::string& a_saveName) {
+    auto& context = _currentContext;
+    if (!context.isValid) return;
+
+    // 1. Extração robusta do NOVO save number do nome do arquivo (ex: "Save5_...")
+    uint32_t newSaveNumber = 0;
+    try {
+        std::string fileName = a_saveName;
+        // Remove caminhos de diretório para focar apenas no nome do arquivo
+        size_t lastSlash = fileName.find_last_of("\\/");
+        std::string baseName = (lastSlash == std::string::npos) ? fileName : fileName.substr(lastSlash + 1);
+
+        size_t savePos = baseName.find("Save");
+        size_t underscorePos = baseName.find('_');
+
+        if (savePos != std::string::npos && underscorePos != std::string::npos) {
+            std::string numStr = baseName.substr(savePos + 4, underscorePos - (savePos + 4));
+            newSaveNumber = std::stoul(numStr);
+        }
+        else {
+            newSaveNumber = context.saveNumber; // Fallback para o atual se falhar
+        }
+    }
+    catch (const std::exception& e) {
+        logger::error("[Persist] Erro ao extrair save number de '{}': {}", a_saveName, e.what());
+        newSaveNumber = context.saveNumber;
+    }
+
+    auto& history = _characterHistory[context.charID];
+    SaveHistoryEntry* sessionProgress = nullptr;
+    for (auto& h : history) {
+        if (h.saveNumber == context.saveNumber) {
+            sessionProgress = &h;
+            break;
+        }
+    }
+
+    // 3. Cria a nova entrada para o JSON
+    SaveHistoryEntry newEntry;
+    newEntry.saveNumber = newSaveNumber;
+
+    if (sessionProgress) {
+        newEntry.npcRuleVersions = sessionProgress->npcRuleVersions;
+    }
+
+    // 4. Persiste no histórico e grava no disco
+    UpdateSaveEntry(context.charID, newEntry);
+
+    // 5. Atualiza o contexto para o novo save
+    uint32_t oldNumber = context.saveNumber;
+    context.saveNumber = newSaveNumber;
+
+    logger::info("[SaveManager] Sincronização concluída. Progresso de versões transportado para Save {}.", newSaveNumber);
+}
+
+std::string SaveStateManager::GetCharacterPath(uint32_t characterID) {
+    char hexID[9];
+    sprintf_s(hexID, "%08X", characterID);
+    return "Data/SKSE/Plugins/ProgressNPC/Saves/" + std::string(hexID) + ".json";
+}
+
+void SaveStateManager::LoadCharacterData(uint32_t characterID) {
+    std::string path = GetCharacterPath(characterID);
+    std::ifstream i(path);
+    if (!i.is_open()) return;
+
+    try {
+        nlohmann::json j;
+        i >> j;
+        _characterHistory[characterID] = j.get<std::vector<SaveHistoryEntry>>();
+        //logger::info("Historico carregado para personagem {:X}: {} entradas.", characterID, _characterHistory[characterID].size());
+    }
+    catch (...) {
+        logger::error("Erro ao ler dados do personagem {:X}", characterID);
+    }
+}
+
+void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEntry& newEntry) {
+    auto& history = _characterHistory[characterID];
+
+    // Tenta encontrar se este saveNumber já existe para atualizar, senão adiciona
+    auto it = std::find_if(history.begin(), history.end(), [&](const SaveHistoryEntry& e) {
+        return e.saveNumber == newEntry.saveNumber;
+        });
+
+    if (it != history.end()) *it = newEntry;
+    else history.push_back(newEntry);
+
+    // Salva o arquivo físico
+    std::string path = GetCharacterPath(characterID);
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream o(path);
+    nlohmann::json j = history;
+    o << j.dump(4) << std::endl;
+}
+
 void EquipBestInventoryItems(RE::Actor* a_actor)
 {
     if (!a_actor) return;
@@ -55,8 +156,7 @@ void EquipBestInventoryItems(RE::Actor* a_actor)
     logger::debug("[OutfitSync] Equipamento para {}. Verificação completa.", a_actor->GetName());
 }
 
-void ApplyRulesToInstance(RE::Actor* a_actor)
-{
+void ApplyRulesToInstance(RE::Actor* a_actor) {
     if (!a_actor || a_actor->IsDead()) return;
 
     auto baseNPC = a_actor->GetActorBase();
@@ -66,31 +166,20 @@ void ApplyRulesToInstance(RE::Actor* a_actor)
     auto& history = SaveStateManager::GetSingleton()->GetCharacterHistory(context.charID);
     std::string actorName = a_actor->GetName();
 
-    logger::debug("[ApplyInstance] Processando Ator: {} (Nivel: {})", actorName, a_actor->GetLevel());
-
-    // 1. Busca Snapshot Retroativo
-    SaveHistoryEntry* bestSnapshot = nullptr;
-    for (auto& entry : history) {
-        if (entry.saveNumber < context.saveNumber) {
-            if (!bestSnapshot || entry.saveNumber > bestSnapshot->saveNumber) {
-                bestSnapshot = &entry;
-            }
-        }
-    }
-    if (bestSnapshot) logger::debug("[ApplyInstance] Snapshot de referencia encontrado: Save {}", bestSnapshot->saveNumber);
-
-    // 2. Garantir Entrada Atual
+    // 1. Garantir Entrada Atual e Herança (Mesma lógica funcional anterior)
     SaveHistoryEntry* currentEntry = nullptr;
     for (auto& entry : history) {
         if (entry.saveNumber == context.saveNumber) { currentEntry = &entry; break; }
     }
     if (!currentEntry) {
+        SaveHistoryEntry* bestSnapshot = nullptr;
+        for (auto& entry : history) {
+            if (entry.saveNumber < context.saveNumber && (!bestSnapshot || entry.saveNumber > bestSnapshot->saveNumber))
+                bestSnapshot = &entry;
+        }
         SaveHistoryEntry newE;
         newE.saveNumber = context.saveNumber;
-        if (bestSnapshot) {
-            newE.npcAppliedRules = bestSnapshot->npcAppliedRules;
-            logger::debug("[ApplyInstance] Herdando {} registros de aplicacao do snapshot anterior.", newE.npcAppliedRules.size());
-        }
+        if (bestSnapshot) newE.npcRuleVersions = bestSnapshot->npcRuleVersions;
         history.push_back(newE);
         currentEntry = &history.back();
     }
@@ -100,234 +189,127 @@ void ApplyRulesToInstance(RE::Actor* a_actor)
 
     const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
     auto it = affectedDB.find(baseNPC->GetFormID());
-    if (it == affectedDB.end()) {
-        logger::debug("[ApplyInstance] NPC {} nao possui regras associadas no banco.", actorName);
-        return;
-    }
+    if (it == affectedDB.end()) return;
 
     for (const auto& ruleID : it->second.ruleIDs) {
-        auto& rules = RuleManager::GetSingleton()->GetRules();
-        auto ruleIt = std::find_if(rules.begin(), rules.end(), [&](const Rule& r) { return r.id == ruleID; });
+        auto& allRules = RuleManager::GetSingleton()->GetRules();
+        auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
+        if (ruleIt == allRules.end()) continue;
 
-        if (ruleIt == rules.end()) continue;
+        const Rule& currentRule = *ruleIt;
+        if (a_actor->GetLevel() < currentRule.level) continue;
 
-        // CHECKAGEM DE NÍVEL: O NPC é mapeado independente do nível, mas só recebe se o Ator tiver nível suficiente
-        if (a_actor->GetLevel() < ruleIt->level) {
-            logger::debug("[ApplyInstance] Ator {} nivel {} insuficiente para Regra '{}' (Req: {})",
-                actorName, a_actor->GetLevel(), ruleIt->name, ruleIt->level);
-            continue;
+        int appliedVersion = 0;
+        if (currentEntry->npcRuleVersions.contains(npcKey) && currentEntry->npcRuleVersions[npcKey].contains(ruleID)) {
+            appliedVersion = currentEntry->npcRuleVersions[npcKey][ruleID];
         }
 
-        bool needsApplication = false;
-        auto& appliedRulesInSave = currentEntry->npcAppliedRules[npcKey];
-        bool alreadyApplied = std::find(appliedRulesInSave.begin(), appliedRulesInSave.end(), ruleID) != appliedRulesInSave.end();
+        if (appliedVersion < currentRule.version) {
+            std::vector<Reward> rewardsToApply;
 
-        if (!alreadyApplied) {
-            if (bestSnapshot) {
-                auto oldRuleIt = std::find_if(bestSnapshot->appliedRulesSnapshot.begin(),
-                    bestSnapshot->appliedRulesSnapshot.end(),
-                    [&](const Rule& r) { return r.id == ruleID; });
+            if (appliedVersion == 0) {
+                // APLICAÇÃO TOTAL: Primeira vez que o NPC vê esta regra
+                rewardsToApply = RuleManager::GetSingleton()->GetRewardsForSpecificRule(baseNPC, currentRule);
+                logger::debug("[ApplyRules] Aplicando nova regra '{}' v{} em {}", currentRule.name, currentRule.version, actorName);
+            }
+            else {
+                // ATUALIZAÇÃO INCREMENTAL: Comparar com a versão antiga
+                Rule* oldRule = RuleManager::GetSingleton()->GetRuleVersion(ruleID, appliedVersion);
 
-                if (oldRuleIt != bestSnapshot->appliedRulesSnapshot.end()) {
-                    // Usa o HASH e a estrutura de grupos para decidir se reaplica
-                    if (RuleProcessor::ShouldReapplyRule(*oldRuleIt, *ruleIt)) {
-                        needsApplication = true;
-                        logger::debug("[ApplyInstance] REAPLICANDO: Regra '{}' foi modificada no banco de dados.", ruleIt->name);
+                if (oldRule) {
+                    logger::debug("[ApplyRules] Atualizando '{}' (v{} -> v{}) em {}", currentRule.name, appliedVersion, currentRule.version, actorName);
+
+                    for (const auto& currentGroup : currentRule.rewardGroups) {
+                        // Se o grupo for exclusivo e mudou, não aplicamos incrementalmente para não quebrar a lógica de "um por grupo"
+                        if (currentGroup.isExclusive) continue;
+
+                        // Localiza o grupo correspondente na regra antiga por nome
+                        auto oldGroupIt = std::find_if(oldRule->rewardGroups.begin(), oldRule->rewardGroups.end(),
+                            [&](const RewardGroup& g) { return g.name == currentGroup.name; });
+
+                        for (const auto& reward : currentGroup.rewards) {
+                            bool isNewReward = true;
+                            if (oldGroupIt != oldRule->rewardGroups.end()) {
+                                // Verifica se esse item específico já existia na versão anterior desse grupo
+                                for (const auto& oldReward : oldGroupIt->rewards) {
+                                    if (oldReward.formIDStr == reward.formIDStr) {
+                                        isNewReward = false;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (isNewReward) {
+                                float roll = RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f);
+                                if (roll <= reward.chanceReward) {
+                                    rewardsToApply.push_back(reward);
+                                    logger::debug("  [+] Novo Reward detectado e sorteado: {}", reward.formIDStr);
+                                }
+                            }
+                        }
                     }
                 }
                 else {
-                    needsApplication = true; // Nova regra adicionada desde o último save
+                    // Fallback: Se não achar o histórico, aplica tudo (segurança)
+                    rewardsToApply = RuleManager::GetSingleton()->GetRewardsForSpecificRule(baseNPC, currentRule);
                 }
             }
-            else {
-                needsApplication = true; // Novo personagem ou primeiro registro
-            }
-        }
 
-        if (needsApplication) {
-            // Aplica os rewards e registra
-            logger::debug("[ApplyInstance] Aplicando Regra '{}' ao Ator '{}'", ruleIt->name, actorName);
-            std::vector<Reward> rewards = RuleManager::GetSingleton()->GetRewardsForSpecificRule(baseNPC, *ruleIt);
-            for (const auto& reward : rewards) {
+            // APLICAÇÃO DOS ITENS (Correção para Misc/Outros tipos)
+            for (const auto& reward : rewardsToApply) {
                 auto [plugin, fID] = reward.ParseFormID();
                 auto rewardForm = RE::TESForm::LookupByID(fID);
                 if (!rewardForm) continue;
 
                 if (reward.typeReward == "Spell") {
-                    if (auto spell = rewardForm->As<RE::SpellItem>()) a_actor->AddSpell(spell);
-                }
-                else if (reward.typeReward == "Perk") {
-                    if (auto perk = rewardForm->As<RE::BGSPerk>()) a_actor->AddPerk(perk, 0);
-                }
-                else if (reward.typeReward == "Weapon" || reward.typeReward == "Armor") {
-                    if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
-                        // 1. Adiciona o item ao inventário
-                        a_actor->AddObjectToContainer(bound, nullptr, reward.amount, nullptr);
-
-                        // 2. FORÇA O NPC A EQUIPAR O ITEM IMEDIATAMENTE
-                        auto equipManager = RE::ActorEquipManager::GetSingleton();
-                        if (equipManager) {
-                            // O parâmetro 'nullptr' usa o slot padrão do item
-                            // O 'true' força a equipagem mesmo se ele tiver algo similar
-                            equipManager->EquipObject(a_actor, bound, nullptr, 1, nullptr, true, false, false, true);
-
-                            logger::debug("[ApplyInstance] Item {} equipado forçadamente em {}",
-                                bound->GetName(), a_actor->GetName());
+                    if (auto spell = rewardForm->As<RE::SpellItem>()) {
+                        if (!a_actor->HasSpell(spell)) {
+                            a_actor->AddSpell(spell);
                         }
                     }
                 }
-            }
+                else if (reward.typeReward == "Perk") {
+                    if (auto perk = rewardForm->As<RE::BGSPerk>()) {
+                        if (!a_actor->HasPerk(perk)) {
+                            a_actor->AddPerk(perk, 1);
+                        }
+                    }
+                }
+                else if (reward.typeReward == "Outfit") {
+                    if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
+                        for (auto* form : outfit->outfitItems) {
+                            if (!form) continue;
+                            auto* bound = form->As<RE::TESBoundObject>();
+                            if (bound) {
+                                a_actor->AddObjectToContainer(bound, nullptr, 1, nullptr);
+                            }
+                        }
+                    }
+                }
+                else {
+                    // Weapon, Armor, Misc, Potion, Ingredient, Book, Ammo, etc.
+                    if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
+                        RE::ExtraDataList* xList = nullptr;
+                        if (!reward.lootable) {
+                            a_actor->AddObjectToContainer(bound, xList, reward.amount, nullptr);
+                        }
+                        else {
+                            a_actor->AddObjectToContainer(bound, nullptr, reward.amount, nullptr);
+                        }
 
-            if (std::find(appliedRulesInSave.begin(), appliedRulesInSave.end(), ruleID) == appliedRulesInSave.end()) {
-                appliedRulesInSave.push_back(ruleID);
+                        if (reward.typeReward == "Weapon" || reward.typeReward == "Armor" || reward.typeReward == "Ammo") {
+                            auto equipManager = RE::ActorEquipManager::GetSingleton();
+                            if (equipManager) {
+                                equipManager->EquipObject(a_actor, bound, nullptr, 1, nullptr, false, true, false, true);
+                            }
+                        }
+                        logger::debug("  [Item] Adicionado: {} (Tipo: {})", rewardForm->GetName(), reward.typeReward);
+                    }
+                }
             }
-        }
-        else {
-            logger::debug("[ApplyInstance] Regra '{}' ja consta como aplicada para {} no Save {}", ruleIt->name, actorName, context.saveNumber);
+            currentEntry->npcRuleVersions[npcKey][ruleID] = currentRule.version;
         }
     }
 }
 
-RE::BGSHeadPart* HeadPartCreator::CreateHeadPartFromJson(const json& a_data)
-{
-    std::string targetEDID = a_data.value("editorID", "MISSING_EDID");
-    SKSE::log::info("==============================================");
-    SKSE::log::info("Iniciando criação dinâmica de HeadPart: '{}'", targetEDID);
 
-    // 1. Criação da Instância (Heap)
-    // Utiliza o template helper do ConcreteFormFactory.h
-    auto newPart = RE::IFormFactory::Create<RE::BGSHeadPart>();
-
-    if (!newPart) {
-        SKSE::log::critical("CRITICO: Falha ao obter a ConcreteFormFactory para HeadPart ou falha na alocação de memória.");
-        return nullptr;
-    }
-    SKSE::log::info("Sucesso: Instância base de BGSHeadPart alocada no heap (FormID temporário: {:X})", newPart->GetFormID());
-
-
-    // 2. Configuração do EditorID
-    if (a_data.contains("editorID")) {
-        std::string edid = a_data["editorID"];
-        newPart->SetFormEditorID(edid.c_str());
-        SKSE::log::info(" - EditorID definido para: {}", edid);
-    }
-    else {
-        SKSE::log::warn(" - AVISO: JSON sem 'editorID'. A parte não terá nome interno.");
-    }
-
-
-    // 3. Configuração do Tipo (Hair, Eyes, etc.)
-    if (a_data.contains("type")) {
-        uint32_t typeVal = a_data["type"].get<uint32_t>();
-        newPart->type = static_cast<RE::BGSHeadPart::HeadPartType>(typeVal);
-        // Enum simples para log legível
-        std::string typeStr = "Unknown";
-        switch (newPart->type.get()) {
-        case RE::BGSHeadPart::HeadPartType::kMisc: typeStr = "Misc"; break;
-        case RE::BGSHeadPart::HeadPartType::kFace: typeStr = "Face"; break;
-        case RE::BGSHeadPart::HeadPartType::kEyes: typeStr = "Eyes"; break;
-        case RE::BGSHeadPart::HeadPartType::kHair: typeStr = "Hair"; break;
-        case RE::BGSHeadPart::HeadPartType::kFacialHair: typeStr = "Beard"; break;
-        case RE::BGSHeadPart::HeadPartType::kEyebrows: typeStr = "Eyebrows"; break;
-        }
-        SKSE::log::info(" - Tipo definido para: {} ({})", typeVal, typeStr);
-    }
-    else {
-        SKSE::log::error(" - ERRO: JSON faltando campo obrigatório 'type'.");
-    }
-
-
-    // 4. Configuração do Modelo (.nif)
-    if (a_data.contains("modelPath")) {
-        std::string path = a_data["modelPath"];
-        newPart->SetModel(path.c_str());
-        SKSE::log::info(" - Model Path definido para: '{}'", path);
-        // Verificação básica se o caminho parece válido (não verifica existência do arquivo)
-        if (path.length() < 5 || path.find(".nif") == std::string::npos) {
-            SKSE::log::warn("   - AVISO: O caminho do modelo parece suspeito ou incompleto.");
-        }
-    }
-    else {
-        SKSE::log::error(" - ERRO: JSON faltando campo obrigatório 'modelPath'. A parte será invisível.");
-    }
-
-
-    // 5. Configuração das Flags
-    if (a_data.contains("flags")) {
-        uint8_t flagsVal = a_data["flags"].get<uint8_t>();
-        newPart->flags = static_cast<RE::BGSHeadPart::Flag>(flagsVal);
-        SKSE::log::info(" - Flags bitmask definida para: {:X} (decimal: {})", flagsVal, flagsVal);
-    }
-
-
-    // 6. Configuração da Lista de Raças Válidas
-    if (a_data.contains("validRacesListID") && a_data.contains("validRacesSource")) {
-        std::string formIdStr = a_data["validRacesListID"];
-        std::string sourceMod = a_data["validRacesSource"];
-
-        SKSE::log::info(" - Tentando resolver Lista de Raças: ID '{}' em '{}'", formIdStr, sourceMod);
-
-        auto dataHandler = RE::TESDataHandler::GetSingleton();
-        if (dataHandler) {
-            // Converte string hex para numérico e busca
-            RE::FormID localID = std::stoul(formIdStr, nullptr, 16);
-            auto raceList = dataHandler->LookupForm<RE::BGSListForm>(localID, sourceMod);
-
-            if (raceList) {
-                newPart->validRaces = raceList;
-                SKSE::log::info("   - Sucesso: Lista de raças encontrada e vinculada ({:X}).", raceList->GetFormID());
-            }
-            else {
-                SKSE::log::error("   - FALHA: Não foi possível encontrar o FormList com ID {:X} no plugin '{}'.", localID, sourceMod);
-            }
-        }
-        else {
-            SKSE::log::critical("   - CRITICO: TESDataHandler não está disponível.");
-        }
-    }
-    else {
-        SKSE::log::warn(" - AVISO: Informações de 'validRacesListID' ou 'validRacesSource' ausentes. A parte pode não aparecer para nenhuma raça.");
-    }
-
-    SKSE::log::info("HeadPart dinâmica '{}' criada com sucesso.", targetEDID);
-    SKSE::log::info("==============================================");
-
-    return newPart;
-}
-
-void HeadPartCreator::TestCreateHeadPart()
-{
-    SKSE::log::info("Iniciando Teste de Criação de HeadPart...");
-
-    // Simulando a leitura do arquivo JSON (aqui definido inline para o exemplo)
-    std::string jsonContent = R"(
-        {
-            "editorID": "TESTARONE123A",
-            "type": 3,
-            "modelPath": "Actors\\Character\\Hair\\KS Hairdo's\\Male\\ExampleHair.nif",
-            "flags": 15,
-            "validRacesListID": "0x00013746",
-            "validRacesSource": "Skyrim.esm"
-        }
-    )";
-
-    try {
-        // Parse da string para objeto JSON
-        nlohmann::json jsonData = nlohmann::json::parse(jsonContent);
-
-        // Chama a função criadora
-        RE::BGSHeadPart* myNewPart = HeadPartCreator::CreateHeadPartFromJson(jsonData);
-
-        if (myNewPart) {
-            SKSE::log::info("Teste bem sucedido! O ponteiro para a nova parte é válido.");
-            // Aqui você poderia aplicar 'myNewPart' a um Actor usando a lógica anterior.
-        }
-        else {
-            SKSE::log::error("Teste falhou! A função retornou um ponteiro nulo.");
-        }
-
-    }
-    catch (const nlohmann::json::parse_error& e) {
-        SKSE::log::error("Erro ao fazer parse do JSON de teste: {}", e.what());
-    }
-}

@@ -1,7 +1,7 @@
 #pragma once
 #include "SKSEMCP/SKSEMenuFramework.hpp"
-#include "Manager.h"
-#include "Settings.h"
+#include "SaveState.h"
+
 namespace SPIDUI {
     void Register();
     void Render();

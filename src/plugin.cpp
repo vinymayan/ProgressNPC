@@ -1,7 +1,7 @@
 #include "logger.h"
 #include "SaveState.h"
 #include "UI.h"
-
+#include "Events.h"
 
 
 void OnMessage(SKSE::MessagingInterface::Message* message) {
@@ -13,8 +13,24 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
 		Manager::GetSingleton()->ConvertAllNPCOutfitsToInventory();
        // CellAttachHandler::Register();
         //CellFullyLoadedHandler::Register();
-        //LoadEventHandler::Register();
-        
+        LoadEventHandler::Register();
+        auto ui = RE::UI::GetSingleton();
+        if (ui) {
+            ui->AddEventSink(EventSink::GetSingleton());
+            // SKSE::log::info("EventSink de Menu registrado com sucesso.");
+        }
+
+        if (QuickLoot::API::QuickLootAPI::Init("ProgressNPC")) {
+            logger::info("QuickLoot API conectada com sucesso.");
+
+            // Registrar handlers usando as funções que criamos no Events.cpp
+            QuickLoot::API::QuickLootAPI::RegisterOpenLootMenuHandler(EventSink::OnQuickLootOpen);
+            QuickLoot::API::QuickLootAPI::RegisterCloseLootMenuHandler(EventSink::OnQuickLootClose);
+        }
+        else {
+            logger::warn("QuickLootIE não detectado ou falha na API.");
+        }
+
         //LocationChangeHandler::Register();
         //HeadPartCreator::TestCreateHeadPart();
         SPIDUI::Register();
@@ -67,7 +83,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
             }
 
             SaveStateManager::GetSingleton()->LoadCharacterData(charID);
-            SaveStateManager::GetSingleton()->SetCurrentContext(charID, tempEntry.saveNumber, "");
+            SaveStateManager::GetSingleton()->SetCurrentContext(charID, tempEntry.saveNumber);
 
             logger::info("Contexto carregado: Personagem {:X}, Save {}", charID, tempEntry.saveNumber);
         }

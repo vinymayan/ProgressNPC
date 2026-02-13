@@ -1,5 +1,5 @@
 #include "Manager.h"
-
+#include "SaveState.h"
 
 void Manager::PopulateAllLists() {
     if (_isPopulated) return;
@@ -8,12 +8,24 @@ void Manager::PopulateAllLists() {
 
     PopulateList<RE::BGSKeyword>("Keyword");
     PopulateList<RE::TESFaction>("Faction");
+    PopulateList<RE::TESRace>("Race");
     PopulateList<RE::BGSPerk>("Perk");
     PopulateList<RE::SpellItem>("Spell");
     PopulateList<RE::TESShout>("Shout");
     PopulateList<RE::TESNPC>("NPC");
     PopulateList<RE::TESObjectWEAP>("Weapon");
     PopulateList<RE::TESObjectARMO>("Armor");
+    PopulateList<RE::BGSOutfit>("Outfit");
+    
+
+    // --- NOVOS TIPOS ADICIONADOS ---
+    PopulateList<RE::AlchemyItem>("Potion");
+    PopulateList<RE::IngredientItem>("Ingredient");
+    PopulateList<RE::ScrollItem>("Scroll");
+    PopulateList<RE::TESObjectBOOK>("Book");
+    PopulateList<RE::TESAmmo>("Ammo");
+    PopulateList<RE::TESObjectMISC>("Misc");
+    PopulateList<RE::TESKey>("Key");
 
     _isPopulated = true;
     for (auto cb : _readyCallbacks) {
@@ -86,42 +98,39 @@ void Manager::PopulateList(const std::string& a_typeName) {
 }
 
 void Manager::ConvertAllNPCOutfitsToInventory() {
+    auto settings = NPCSettings::GetSingleton();
+    if (settings->outfitMode == OutfitConversionMode::kDisabled) {
+        logger::info("[Outfit] Conversão desativada nas configurações.");
+        return;
+    }
     auto dataHandler = RE::TESDataHandler::GetSingleton();
     if (!dataHandler) return;
 
     // Obtém todos os NPCs carregados no jogo
     const auto& npcArray = dataHandler->GetFormArray<RE::TESNPC>();
-
+    RE::BGSOutfit* rdoEmptyOutfit = dataHandler->LookupForm<RE::BGSOutfit>(0x800, "RDO.esp");
     uint32_t count = 0;
     for (auto* npc : npcArray) {
         // Verifica se o NPC existe e se possui um Outfit padrão (DOFT)
         if (npc && npc->defaultOutfit) {
-            RE::BGSOutfit* outfit = npc->defaultOutfit;
-            std::string editorID = clib_util::editorID::get_editorID(outfit);
-            // Transfere cada item do Outfit para o container fixo do NPC
-            for (auto* item : outfit->outfitItems) {
-                if (item) {
-                    auto* boundItem = item->As<RE::TESBoundObject>();
-                    if (boundItem) {
-                        if (npc->GetObjectCount(boundItem) == 0) {
-                            npc->AddObjectToContainer(boundItem, 1, nullptr);
+            if (settings->outfitMode == OutfitConversionMode::kFullConversion) {
+                RE::BGSOutfit* outfit = npc->defaultOutfit;
+                for (auto* item : outfit->outfitItems) {
+                    if (item) {
+                        auto* boundItem = item->As<RE::TESBoundObject>();
+                        if (boundItem && npc->GetObjectCount(boundItem) == 0) {
+                            npc->AddObjectToContainer(boundItem, 1, npc);
                         }
                     }
                 }
             }
-            RE::BGSOutfit* rdoEmptyOutfit = nullptr;
 
-            rdoEmptyOutfit = dataHandler->LookupForm<RE::BGSOutfit>(0x800, "RDO.esp");
-            // Remove o Outfit padrão para evitar que o jogo sobrescreva o inventário
             npc->SetDefaultOutfit(rdoEmptyOutfit);
-            RE::BGSOutfit* newoutFit = npc->defaultOutfit;
-            std::string novoOut = clib_util::editorID::get_editorID(newoutFit);
-            //logger::debug("[NOVO] '{}': Outfit '{}'",npc->GetName(), novoOut);
-            // Opcional: Repetir para o Sleep Outfit (SOFT) se desejar
+
             // npc->sleepOutfit = nullptr; 
 
             count++;
         }
     }
-    //logger::info("Processados {} NPCs: Outfits convertidos em itens de inventário.", count);
+    logger::info("Processados {} NPCs: Outfits convertidos em itens de inventário.", count);
 }

@@ -1,11 +1,5 @@
 #include "UI.h"
-#include "Manager.h"
-#include "Rule.h"
-
-
-
-
-
+#include <unordered_set>
 namespace SPIDUI {
     static std::set<std::string> activeTypeFilters;
 
@@ -13,7 +7,7 @@ namespace SPIDUI {
     static int activeGroupIdx = -1;            // Índice do grupo de recompensa ativo
     static bool isPickingReward = false;
     //static RewardGroup* currentTargetGroup = nullptr;
-    static std::string currentRewardType = "Perk";
+    static std::string currentRewardType = "All";
 
     // Variáveis para controlar abertura dos modals fora do loop
     static bool openTargetsModal = false;
@@ -24,6 +18,10 @@ namespace SPIDUI {
     static std::string lastNPCSearch = "";
     static bool lastShowOnlyAffected = false;
     static size_t lastRulesCount = 0;
+
+    static bool openBlacklistModal = false;
+    static bool isPickingBlacklist = false;
+    static std::string currentBlacklistType = "All";
 
     struct NPCMatchInfo {
         bool isAffected = false;
@@ -57,7 +55,7 @@ namespace SPIDUI {
     }
 
     void RenderTypeFilter() {
-        const std::vector<std::string> options = { "NPC", "Faction", "Keyword", "Perk" };
+        const std::vector<std::string> options = { "NPC", "Faction", "Keyword", "Race" };
 
         ImGuiMCP::Text("Filtros Ativos:");
         if (activeTypeFilters.empty()) ImGuiMCP::TextDisabled("Nenhum (Mostrando tudo)");
@@ -84,50 +82,219 @@ namespace SPIDUI {
         }
     }
 
+    void RenderFilterEditor(Rule& rule, bool isBlacklist) {
+        if (ImGuiMCP::Button("Voltar")) {
+            if (isBlacklist) openBlacklistModal = false;
+            else openTargetsModal = false;
+        }
+        ImGuiMCP::SameLine();
+        // 1. Resolvemos as referências dos dados com base no modo
+        auto& filters = isBlacklist ? rule.blacklistFilters : rule.targetFilters;
+        auto& gender = isBlacklist ? rule.blacklistedGender : rule.targetGender;
+        auto& requiresAll = isBlacklist ? rule.blacklistRequiresAll : rule.targetRequiresAll;
+
+        // 2. Textos dinâmicos para a UI
+        const char* genderLabel = isBlacklist ? "Gênero Excluído:" : "Gênero Alvo:";
+        const char* genderNoneOption = isBlacklist ? "Nenhum" : "Todos";
+        const char* checkLabel = isBlacklist ? "Requerer TODOS os filtros para invalidar (AND)" : "Requerer TODOS os filtros (AND)";
+        const char* tooltip = isBlacklist ? "(?) Se desmarcado, qualquer um invalida" : "(?) Se desmarcado, qualquer um valida (OR)";
+        const char* buttonLabel = isBlacklist ? "Adicionar Novo Filtro" : "Adicionar Novo Filtro de Alvo";
+        const char* tableName = isBlacklist ? "BlacklistTable" : "TargetsTable";
+        const std::string idPrefix = isBlacklist ? "X##bl" : "X##target";
+
+        // --- Renderização da Interface ---
+        ImGuiMCP::Text(genderLabel);
+        ImGuiMCP::SameLine();
+        const char* genders[] = { genderNoneOption, "Masculino", "Feminino" };
+        ImGuiMCP::SetNextItemWidth(150.0f);
+        if (ImGuiMCP::BeginCombo(isBlacklist ? "##gender" : "##targetGender", genders[gender])) {
+            for (int i = 0; i < 3; i++) {
+                if (ImGuiMCP::Selectable(genders[i], gender == i)) gender = i;
+            }
+            ImGuiMCP::EndCombo();
+        }
+        ImGuiMCP::SameLine();
+        ImGuiMCP::Checkbox(checkLabel, &requiresAll);
+        if (ImGuiMCP::IsItemHovered()) {
+            ImGuiMCP::SetTooltip(tooltip);
+        }
+
+        ImGuiMCP::Separator();
+        if (ImGuiMCP::Button(buttonLabel)) {
+            isPickingBlacklist = true;
+        }
+
+        if (ImGuiMCP::BeginTable(tableName, 4, ImGuiMCP::ImGuiTableFlags_Borders)) {
+            ImGuiMCP::TableSetupColumn("Tipo", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGuiMCP::TableSetupColumn("Nome", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
+            ImGuiMCP::TableSetupColumn("Identificador", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
+            ImGuiMCP::TableSetupColumn("Ação", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
+            ImGuiMCP::TableHeadersRow();
+            auto dataHandler = RE::TESDataHandler::GetSingleton();
+            for (int i = 0; i < filters.size(); i++) {
+                auto& f = filters[i];
+                ImGuiMCP::TableNextRow();
+                ImGuiMCP::TableSetColumnIndex(0); ImGuiMCP::Text(f.type.c_str());
+                ImGuiMCP::TableSetColumnIndex(1);
+                std::string resolvedName = "Não Encontrado";
+
+                // Puxamos apenas o necessário: Split da string e busca direta no Form
+                auto tokens = split(f.formIDStr, '|'); // Função auxiliar definida em Rule.h
+                if (tokens.size() == 2 && dataHandler) {
+                    try {
+                        uint32_t localID = std::stoul(tokens[1], nullptr, 16);
+                        if (auto actualFormID = dataHandler->LookupFormID(localID, tokens[0])) {
+                            if (auto form = RE::TESForm::LookupByID(actualFormID)) {
+                                // 1. Tenta nome completo (NPC, Faction, Race)
+                                if (auto fullName = form->As<RE::TESFullName>()) {
+                                    resolvedName = fullName->GetFullName();
+                                }
+                                // 2. Fallback para EditorID (Keywords ou nomes vazios)
+                                if (resolvedName.empty() || resolvedName == "Não Encontrado") {
+                                    resolvedName = clib_util::editorID::get_editorID(form);
+                                }
+                                // 3. Se nada funcionar, exibe o ID local
+                                if (resolvedName.empty()) resolvedName = tokens[1];
+                            }
+                        }
+                    }
+                    catch (...) { resolvedName = "ID Inválido"; }
+                }
+                ImGuiMCP::TextUnformatted(resolvedName.c_str());
+                ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text(f.formIDStr.c_str());
+                ImGuiMCP::TableSetColumnIndex(3);
+
+                // Usamos o prefixo para evitar conflitos de ID no ImGui
+                if (ImGuiMCP::Button((idPrefix + std::to_string(i)).c_str())) {
+                    filters.erase(filters.begin() + i);
+                    break;
+                }
+            }
+            ImGuiMCP::EndTable();
+        }
+    }
+
     bool IsIDSelected(const std::vector<std::string>& list, const std::string& id) {
         return std::find(list.begin(), list.end(), id) != list.end();
     }
     // Substitua sua função DrawSelectionTable em UI.cpp por esta:
-    void DrawSelectionTable(Rule& rule, const std::string& listType, bool isRewardMode, RewardGroup* targetGroup = nullptr) {
-        std::vector<InternalFormInfo> customList;
+    void DrawSelectionTable(Rule& rule, std::string& listType, bool isRewardMode,
+        RewardGroup* targetGroup = nullptr,
+        std::vector<BlacklistFilter>* blacklistTarget = nullptr) {
+
+        // --- SISTEMA DE CACHE PARA O MODO "SELECTED" ---
+        static std::vector<InternalFormInfo> cachedSelectedList;
+        static std::vector<InternalFormInfo> rewardAllCache;
+        static std::vector<InternalFormInfo> filterAllCache; // Novo cache para filtros
+        static void* lastPointer = nullptr;
+        static size_t lastSize = 0;
+
+
         const std::vector<InternalFormInfo>* sourceList = nullptr;
 
         if (listType == "All") {
-            for (auto& type : { "Spell", "Perk", "Weapon", "Armor"}) {
-                auto& l = Manager::GetSingleton()->GetList(type);
-                customList.insert(customList.end(), l.begin(), l.end());
-            }
-            sourceList = &customList;
-        }
-        else if (listType == "Selected" && targetGroup) {
-            for (auto& reward : targetGroup->rewards) {
-                auto& l = Manager::GetSingleton()->GetList(reward.typeReward);
-                for (auto& info : l) {
-                    // CORREÇÃO: Usar FormatLocalFormID para consistência na comparação
-                    std::string infoHex = FormatLocalFormID(info.formID, info.pluginName);
-                    std::string compareID = info.pluginName + "|" + infoHex;
-
-                    if (compareID == reward.formIDStr) {
-                        customList.push_back(info);
-                        break;
+            if (isRewardMode) {
+                if (rewardAllCache.empty()) {
+                    for (auto& type : { "Spell", "Perk", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" }) {
+                        auto& l = Manager::GetSingleton()->GetList(type);
+                        rewardAllCache.insert(rewardAllCache.end(), l.begin(), l.end());
                     }
                 }
+                sourceList = &rewardAllCache;
             }
-            sourceList = &customList;
+            else {
+                // Lógica "All" para Targets e Blacklist
+                if (filterAllCache.empty()) {
+                    for (auto& type : { "NPC", "Faction", "Keyword", "Race" }) {
+                        auto& l = Manager::GetSingleton()->GetList(type);
+                        filterAllCache.insert(filterAllCache.end(), l.begin(), l.end());
+                    }
+                }
+                sourceList = &filterAllCache;
+            }
+        }
+        else if (listType == "Selected") {
+            // Lógica de atualização de cache para itens selecionados
+            bool needsUpdate = false;
+            if (isRewardMode && targetGroup) {
+                if (targetGroup != lastPointer || targetGroup->rewards.size() != lastSize) needsUpdate = true;
+            }
+            else if (!isRewardMode && blacklistTarget) {
+                if (blacklistTarget != lastPointer || blacklistTarget->size() != lastSize) needsUpdate = true;
+            }
+
+            if (needsUpdate) {
+                cachedSelectedList.clear();
+                if (isRewardMode && targetGroup) {
+                    for (auto& reward : targetGroup->rewards) {
+                        auto& l = Manager::GetSingleton()->GetList(reward.typeReward);
+                        auto [plugin, fID] = reward.ParseFormID();
+                        for (auto& info : l) {
+                            if (info.formID == fID && info.pluginName == plugin) {
+                                cachedSelectedList.push_back(info);
+                                break;
+                            }
+                        }
+                    }
+                    lastPointer = targetGroup;
+                    lastSize = targetGroup->rewards.size();
+                }
+                else if (blacklistTarget) {
+                    for (auto& filter : *blacklistTarget) {
+                        auto& l = Manager::GetSingleton()->GetList(filter.type);
+                        auto tokens = split(filter.formIDStr, '|');
+                        if (tokens.size() == 2) {
+                            uint32_t fID = std::stoul(tokens[1], nullptr, 16);
+                            for (auto& info : l) {
+                                if (info.formID == fID && info.pluginName == tokens[0]) {
+                                    cachedSelectedList.push_back(info);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    lastPointer = blacklistTarget;
+                    lastSize = blacklistTarget->size();
+                }
+            }
+            sourceList = &cachedSelectedList;
         }
         else {
             sourceList = &Manager::GetSingleton()->GetList(listType);
         }
+        
 
+        if (!sourceList || sourceList->empty()) {
+            ImGuiMCP::TextDisabled("Nenhum item encontrado nesta categoria.");
+            return;
+        }
         const auto& list = *sourceList;
         static char searchBuf[128] = "";
         static std::string pluginFilter = "All";
 
-        ImGuiMCP::InputText("Buscar Nome/ID", searchBuf, sizeof(searchBuf));
-        if (ImGuiMCP::BeginCombo("Filtrar por Plugin", pluginFilter.c_str())) {
-            if (ImGuiMCP::Selectable("All", pluginFilter == "All")) pluginFilter = "All";
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        ImGuiMCP::InputText("Buscar", searchBuf, sizeof(searchBuf));
+		ImGuiMCP::SameLine();
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        if (ImGuiMCP::BeginCombo("##FilterType", listType.c_str())) {
+            std::vector<const char*> options;
+            if (isRewardMode) {
+                options = { "All", "Selected", "Perk", "Spell", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" };
+            }
+            else {
+                options = { "All", "Selected", "NPC", "Faction", "Keyword", "Race" };
+            }
+            for (auto opt : options) {
+                if (ImGuiMCP::Selectable(opt, listType == opt)) listType = opt;
+            }
+            ImGuiMCP::EndCombo();
+        }
+        ImGuiMCP::SameLine();
+        ImGuiMCP::SetNextItemWidth(150.0f);
+        if (ImGuiMCP::BeginCombo("##Plugin", pluginFilter.c_str())) {
+            if (ImGuiMCP::Selectable("Todos Plugins", pluginFilter == "All")) pluginFilter = "All";
             std::set<std::string> plugins;
-            for (const auto& item : list) if (!item.pluginName.empty()) plugins.insert(item.pluginName);
+            for (const auto& item : *sourceList) if (!item.pluginName.empty()) plugins.insert(item.pluginName);
             for (const auto& p : plugins) if (ImGuiMCP::Selectable(p.c_str(), pluginFilter == p)) pluginFilter = p;
             ImGuiMCP::EndCombo();
         }
@@ -146,6 +313,17 @@ namespace SPIDUI {
             filteredIndices.push_back(i);
         }
 
+        std::unordered_set<std::string> activeIDs;
+        if (blacklistTarget) {
+            for (auto& f : *blacklistTarget) activeIDs.insert(f.formIDStr);
+        }
+        else if (isRewardMode && targetGroup) {
+            for (auto& r : targetGroup->rewards) activeIDs.insert(r.formIDStr);
+        }
+        else {
+            for (auto& f : rule.targetFilters) activeIDs.insert(f.formIDStr);
+        }
+
         ImGuiMCP::ImVec2 avail;
         ImGuiMCP::GetContentRegionAvail(&avail);
         float largura = avail.x;
@@ -155,16 +333,24 @@ namespace SPIDUI {
             ImGuiMCP::ImGuiTableFlags_Resizable | ImGuiMCP::ImGuiTableFlags_ScrollY;
 
         // 6 Colunas no Reward Mode: Ativo, ID, Nome, Plugin, Amount, Chance
-        int columns = isRewardMode ? 6 : 4;
+        bool showTypeColumn = (listType == "All" || listType == "Selected");
+
+        // AJUSTE AQUI: Se for Filtro e tiver que mostrar o tipo, são 5 colunas. Se não, 4.
+        int columns = isRewardMode ? (showTypeColumn ? 7 : 6) : (showTypeColumn ? 5 : 4);
 
         if (ImGuiMCP::BeginTable("SelectionTable", columns, tableFlags, { largura, altura })) {
+
             ImGuiMCP::TableSetupColumn("Ativo", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 50.0f);
             ImGuiMCP::TableSetupColumn("FormID", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
             ImGuiMCP::TableSetupColumn("Nome", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
+            if (showTypeColumn) {
+                ImGuiMCP::TableSetupColumn("Tipo", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            }
             ImGuiMCP::TableSetupColumn("Plugin", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             if (isRewardMode) {
                 ImGuiMCP::TableSetupColumn("Qtde", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
                 ImGuiMCP::TableSetupColumn("Chance %", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                //ImGuiMCP::TableSetupColumn("Loot", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 40.0f);
             }
             ImGuiMCP::TableHeadersRow();
 
@@ -180,74 +366,96 @@ namespace SPIDUI {
 
             for (int i = display_start; i < display_end; i++) {
                 const auto& item = list[filteredIndices[i]];
-                std::string hexID = FormatLocalFormID(item.formID, item.pluginName); // Função criada no Rule.cpp
-                std::string internalID = item.pluginName + "|" + hexID;
+                std::string internalID = item.pluginName + "|" + FormatLocalFormID(item.formID, item.pluginName);
 
                 ImGuiMCP::TableNextRow();
                 ImGuiMCP::TableSetColumnIndex(0);
+                bool isSelected = false;
+                if (blacklistTarget) {
+                    // MODO BLACKLIST (OU TARGETS VIA MODAL)
+                    auto it = std::find_if(blacklistTarget->begin(), blacklistTarget->end(), [&](const BlacklistFilter& f) {
+                        return f.formIDStr == internalID;
+                        });
+                    bool selected = (it != blacklistTarget->end());
 
-                if (isRewardMode && targetGroup) {
-                    // Lógica para Reward Groups
+                    if (ImGuiMCP::Checkbox(("##bl" + internalID).c_str(), &selected)) {
+                        // CORREÇÃO: Usar item.formType em vez de listType
+                        if (selected) blacklistTarget->push_back({ item.formType, internalID });
+                        else if (it != blacklistTarget->end()) blacklistTarget->erase(it);
+                    }
+                }
+                else if (isRewardMode && targetGroup) {
                     auto it = std::find_if(targetGroup->rewards.begin(), targetGroup->rewards.end(), [&](const Reward& r) {
                         return r.formIDStr == internalID;
                         });
-                    bool selected = (it != targetGroup->rewards.end());
-
-                    if (ImGuiMCP::Checkbox(("##cb" + internalID).c_str(), &selected)) {
-                        if (selected) {
-                            Reward r;
-                            r.typeReward = item.formType;
-                            r.formIDStr = internalID;
-                            r.amount = 1;
-                            r.chanceReward = 100.0f;
+                    isSelected = (it != targetGroup->rewards.end());
+                    if (ImGuiMCP::Checkbox(("##cb" + internalID).c_str(), &isSelected)) {
+                        if (isSelected) {
+                            Reward r; r.typeReward = item.formType; r.formIDStr = internalID; r.amount = 1; r.chanceReward = 100.0f;
                             targetGroup->rewards.push_back(r);
                         }
                         else {
                             targetGroup->rewards.erase(it);
                         }
                     }
-
-                    ImGuiMCP::TableSetColumnIndex(1); ImGuiMCP::Text("%08X", item.formID);
-                    ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text(item.name.empty() ? item.editorID.c_str() : item.name.c_str());
-                    ImGuiMCP::TableSetColumnIndex(3); ImGuiMCP::Text(item.pluginName.c_str());
-
-                    if (selected) {
-                        auto& editIt = *std::find_if(targetGroup->rewards.begin(), targetGroup->rewards.end(), [&](const Reward& r) {
-                            return r.formIDStr == internalID;
-                            });
-
-                        // Coluna Qtde
-                        ImGuiMCP::TableSetColumnIndex(4);
-                        if (listType == "Keyword" || listType == "Spell" || listType == "Perk") {
-                            ImGuiMCP::TextDisabled("1");
-                        }
-                        else {
-                            int val = (int)editIt.amount;
-                            ImGuiMCP::SetNextItemWidth(-FLT_MIN);
-                            if (ImGuiMCP::InputInt(("##amt" + internalID).c_str(), &val, 0, 0)) {
-                                editIt.amount = (uint32_t)std::max(1, val);
-                            }
-                        }
-
-                        // Coluna Chance
-                        ImGuiMCP::TableSetColumnIndex(5);
-                        ImGuiMCP::SetNextItemWidth(-FLT_MIN);
-                        ImGuiMCP::InputFloat(("##ch" + internalID).c_str(), &editIt.chanceReward, 0, 0, "%.1f");
-                        editIt.chanceReward = std::clamp(editIt.chanceReward, 0.0f, 100.0f);
-                    }
                 }
                 else {
-                    // Lógica de Targets (Alvos)
-                    bool selected = IsIDSelected(rule.filterFormIDs, internalID);
-                    if (ImGuiMCP::Checkbox(("##cb" + internalID).c_str(), &selected)) {
-                        if (selected) rule.filterFormIDs.push_back(internalID);
-                        else std::erase(rule.filterFormIDs, internalID);
+                    // MODO TARGETS (ALVOS DIRETOS)
+                    auto it = std::find_if(rule.targetFilters.begin(), rule.targetFilters.end(), [&](const BlacklistFilter& f) {
+                        return f.formIDStr == internalID;
+                        });
+                    bool isSelected = (it != rule.targetFilters.end());
+
+                    if (ImGuiMCP::Checkbox(("##cb" + internalID).c_str(), &isSelected)) {
+                        // CORREÇÃO: Usar item.formType em vez de listType
+                        if (isSelected) rule.targetFilters.push_back({ item.formType, internalID });
+                        else if (it != rule.targetFilters.end()) rule.targetFilters.erase(it);
                     }
-                    ImGuiMCP::TableSetColumnIndex(1); ImGuiMCP::Text("%08X", item.formID);
-                    ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text(item.name.empty() ? item.editorID.c_str() : item.name.c_str());
-                    ImGuiMCP::TableSetColumnIndex(3); ImGuiMCP::Text(item.pluginName.c_str());
+                }
+
+                ImGuiMCP::TableSetColumnIndex(1); ImGuiMCP::Text("%08X", item.formID);
+                ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text(item.name.empty() ? item.editorID.c_str() : item.name.c_str());
+                int nextIdx = 3;
+                if (showTypeColumn) {
+                    ImGuiMCP::TableSetColumnIndex(nextIdx++);
+                    ImGuiMCP::Text(item.formType.c_str());
+                }
+                ImGuiMCP::TableSetColumnIndex(nextIdx++); // Plugin
+                ImGuiMCP::Text(item.pluginName.c_str());
+
+                if (isRewardMode && targetGroup && isSelected) {
+                    auto& editIt = *std::find_if(targetGroup->rewards.begin(), targetGroup->rewards.end(), [&](const Reward& r) {
+                        return r.formIDStr == internalID;
+                        });
+
+                    // Quantidade
+                    ImGuiMCP::TableSetColumnIndex(nextIdx++);
+                    if (item.formType == "Keyword" || item.formType == "Spell" || item.formType == "Perk"|| item.formType == "Outfit") {
+                        ImGuiMCP::TextDisabled("-");
+                    }
+                    else {
+                        int val = (int)editIt.amount;
+                        ImGuiMCP::SetNextItemWidth(-FLT_MIN);
+                        if (ImGuiMCP::InputInt(("##amt" + internalID).c_str(), &val, 0, 0)) editIt.amount = (uint32_t)std::max(1, val);
+                    }
+
+                    // Chance
+                    ImGuiMCP::TableSetColumnIndex(nextIdx++);
+                    ImGuiMCP::SetNextItemWidth(-FLT_MIN);
+                    ImGuiMCP::InputFloat(("##ch" + internalID).c_str(), &editIt.chanceReward, 0, 0, "%.1f");
+
+                    // LOOTABLE (Novo)
+                    /*ImGuiMCP::TableSetColumnIndex(nextIdx++);
+                    if (item.formType == "Spell" || item.formType == "Perk") {
+                        ImGuiMCP::TextDisabled("N/A");
+                    }
+                    else {
+                        ImGuiMCP::Checkbox(("##loot" + internalID).c_str(), &editIt.lootable);
+                        if (ImGuiMCP::IsItemHovered()) ImGuiMCP::SetTooltip("Se desmarcado, o item será 'Non-Playable' (não aparece no loot).");
+                    }*/
                 }
             }
+        
 
             ImGuiMCP::TableNextRow();
             ImGuiMCP::TableSetColumnIndex(0);
@@ -260,7 +468,8 @@ namespace SPIDUI {
     // --- NOVO: Gerenciador de Grupos de Recompensa ---
     void RenderRewardGroups(Rule& rule) {
         if (ImGuiMCP::Button("Voltar")) openRewardsModal = false;
-		ImGuiMCP::SameLine();
+        ImGuiMCP::SameLine();
+        
         if (ImGuiMCP::Button("+ Novo Grupo")) {
             rule.rewardGroups.push_back({ "Novo Grupo", false, {} });
         }
@@ -274,12 +483,14 @@ namespace SPIDUI {
             // Título do CollapsingHeader com informações do grupo
             std::string headerLabel = group.name + " (" + std::to_string(group.rewards.size()) + " rewards)";
             if (group.isExclusive) headerLabel = "[EXCL] " + headerLabel;
+            headerLabel += "###header_group_" + std::to_string(gIdx);
 
             if (ImGuiMCP::CollapsingHeader(headerLabel.c_str())) {
                 ImGuiMCP::Indent();
 
                 char nameBuf[64];
                 strcpy_s(nameBuf, group.name.c_str());
+                ImGuiMCP::SetNextItemWidth(200.0f);
                 if (ImGuiMCP::InputText("Nome do Grupo", nameBuf, sizeof(nameBuf))) group.name = nameBuf;
 
                 ImGuiMCP::SameLine();
@@ -291,7 +502,7 @@ namespace SPIDUI {
                 }
 
                 ImGuiMCP::Checkbox("Exclusivo (Sorteia apenas um da lista)", &group.isExclusive);
-
+                ImGuiMCP::SameLine();
                 if (group.isExclusive) {
                     float total = 0;
                     for (const auto& r : group.rewards) total += r.chanceReward;
@@ -350,10 +561,10 @@ namespace SPIDUI {
     }
 
     bool InputTextString(const char* label, std::string& value) {
-        char buf[2048]; 
+        char buf[2048];
         strncpy_s(buf, value.c_str(), _TRUNCATE);
         if (ImGuiMCP::InputText(label, buf, sizeof(buf))) {
-            value = buf; 
+            value = buf;
             return true;
         }
         return false;
@@ -404,13 +615,17 @@ namespace SPIDUI {
         auto viewport = ImGuiMCP::GetMainViewport();
 
         // Targets Section
-        ImGuiMCP::Text("Alvos: %d selecionados", rule.filterFormIDs.size());
+        //ImGuiMCP::Text("Alvos: %d selecionados", rule.filterFormIDs.size());
 
         if (ImGuiMCP::Button("Gerenciar Alvos")) {
             activeRuleID = rule.id;
             openTargetsModal = true;
         }
-
+        ImGuiMCP::SameLine();
+        if (ImGuiMCP::Button("Gerenciar Blacklist")) {
+            activeRuleID = rule.id;
+            openBlacklistModal = true;
+        }
         ImGuiMCP::Separator();
 
         // Rewards Section (Redirecionada para RewardGroups)
@@ -431,7 +646,7 @@ namespace SPIDUI {
     }
 
     void Render() {
-       
+
         // 1. Botão Criar Regra
         if (ImGuiMCP::Button(" + Nova Regra ")) {
             ImGuiMCP::OpenPopup("PopupNovaRegra");
@@ -439,31 +654,24 @@ namespace SPIDUI {
 
         // Lógica do Popup de Criação
         if (ImGuiMCP::BeginPopup("PopupNovaRegra")) {
-            static char nBuf[64] = ""; static std::string t = "NPC";
+            static char nBuf[64] = "";
             ImGuiMCP::InputText("Nome", nBuf, sizeof(nBuf));
-            if (ImGuiMCP::BeginCombo("Tipo", t.c_str())) {
-                for (auto opt : { "NPC", "Faction", "Keyword" }) if (ImGuiMCP::Selectable(opt, t == opt)) t = opt;
-                ImGuiMCP::EndCombo();
-            }
             if (ImGuiMCP::Button("Criar")) {
                 auto& r = RuleManager::GetSingleton()->CreateRule();
-                r.name = nBuf; r.type = t; ImGuiMCP::CloseCurrentPopup();
+                r.name = nBuf;
+                ImGuiMCP::CloseCurrentPopup();
+                nBuf[0] = '\0';
             }
             ImGuiMCP::EndPopup();
         }
 
         ImGuiMCP::SameLine();
-        if (ImGuiMCP::Button("Salvar Tudo")) {
+        if (ImGuiMCP::Button("Save")) {
             RuleManager::GetSingleton()->SaveRules();
             RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
             needsNPCListUpdate = true;
         }
-        ImGuiMCP::SameLine();
-        ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Button, { 0.2f, 0.5f, 0.2f, 1.0f }); // Cor verde para destacar
-        if (ImGuiMCP::Button("Gerar Relatório (Log)")) {
-            RuleManager::GetSingleton()->GenerateDistributionReport();
-        }
-        ImGuiMCP::PopStyleColor();
+
 
         ImGuiMCP::Separator();
         RenderTypeFilter();
@@ -471,14 +679,20 @@ namespace SPIDUI {
         std::string toDelete = "";
 
         for (auto& rule : rules) {
-            if (!activeTypeFilters.empty() && !activeTypeFilters.contains(rule.type)) continue;
+            if (!activeTypeFilters.empty()) {
+                bool matchesFilter = false;
+                for (auto& f : rule.targetFilters) {
+                    if (activeTypeFilters.contains(f.type)) { matchesFilter = true; break; }
+                }
+                if (!matchesFilter) continue;
+            }
 
             // Verifica se a regra foi modificada para adicionar um marcador visual
             bool modified = rule.IsModified();
-            std::string label = "[" + rule.type + "] " + (rule.name.empty() ? rule.id : rule.name);
+            std::string label = rule.name + "V:" + std::to_string(rule.version);
 
             if (modified) {
-                label += " * (Não Salvo)"; // Indicador visual de modificação
+                label += " (Need save)"; // Indicador visual de modificação
             }
             label += "###" + rule.id;
 
@@ -516,41 +730,79 @@ namespace SPIDUI {
             ImGuiMCP::OpenPopup("TargetsModal");
         }
         if (ImGuiMCP::BeginPopupModal("TargetsModal", &openTargetsModal)) {
-            if (activeRule) DrawSelectionTable(*activeRule, activeRule->type, false);
+            if (activeRule) {
+                if (isPickingBlacklist) { // Modo de busca de ID
+                    if (ImGuiMCP::Button("Voltar")) isPickingBlacklist = false;
+                    DrawSelectionTable(*activeRule, currentBlacklistType, false, nullptr, &activeRule->targetFilters);
+                }
+                else {
+                    RenderFilterEditor(*activeRule,false);
+                }
+            }
             ImGuiMCP::EndPopup();
         }
 
-        if (openRewardsModal) { 
+        if (openRewardsModal) {
             ImGuiMCP::SetNextWindowSize({ viewport->Size.x / 1.2f, viewport->Size.y / 1.2f });
-            ImGuiMCP::OpenPopup("RewardsModal"); }
+            ImGuiMCP::OpenPopup("RewardsModal");
+        }
         if (ImGuiMCP::BeginPopupModal("RewardsModal", &openRewardsModal)) {
             if (activeRule) {
                 if (isPickingReward && activeGroupIdx >= 0 && activeGroupIdx < (int)activeRule->rewardGroups.size()) {
                     if (ImGuiMCP::Button("Voltar")) isPickingReward = false;
-					ImGuiMCP::SameLine();
+                    ImGuiMCP::SameLine();
                     ImGuiMCP::Text("Editando Grupo: %s", activeRule->rewardGroups[activeGroupIdx].name.c_str());
-                    if (ImGuiMCP::BeginCombo("Filtrar", currentRewardType.c_str())) {
-                        for (auto opt : { "All", "Selected", "Perk", "Spell", "Weapon", "Armor"}) if (ImGuiMCP::Selectable(opt, currentRewardType == opt)) currentRewardType = opt;
-                        ImGuiMCP::EndCombo();
-                    }
                     DrawSelectionTable(*activeRule, currentRewardType, true, &activeRule->rewardGroups[activeGroupIdx]);
-                    
+
                 }
                 else {
                     RenderRewardGroups(*activeRule);
-                    //if (ImGuiMCP::Button("Fechar")) openRewardsModal = false;
                 }
             }
             else { openRewardsModal = false; }
             ImGuiMCP::EndPopup();
         }
+
+        if (openBlacklistModal) {
+            ImGuiMCP::SetNextWindowSize({ viewport->Size.x / 1.3f, viewport->Size.y / 1.3f });
+            ImGuiMCP::OpenPopup("BlacklistModal");
+        }
+
+        if (ImGuiMCP::BeginPopupModal("BlacklistModal", &openBlacklistModal)) {
+            if (activeRule) {
+                if (isPickingBlacklist) {
+                    if (ImGuiMCP::Button("Voltar")) isPickingBlacklist = false;
+                    ImGuiMCP::Text(" | Tipo de Filtro:");
+                    ImGuiMCP::SameLine();
+                    ImGuiMCP::SetNextItemWidth(150.0f);
+
+                    // NOVO: Seletor de tipo de blacklist
+                    if (ImGuiMCP::BeginCombo("##blType", currentBlacklistType.c_str())) {
+                        for (auto opt : { "All", "Selected", "NPC", "Faction", "Keyword", "Race" }) {
+                            if (ImGuiMCP::Selectable(opt, currentBlacklistType == opt)) {
+                                currentBlacklistType = opt;
+                            }
+                        }
+                        ImGuiMCP::EndCombo();
+                    }
+                    ImGuiMCP::Separator();
+                    DrawSelectionTable(*activeRule, currentBlacklistType, false, nullptr, &activeRule->blacklistFilters);
+                }
+                else {
+                    RenderFilterEditor(*activeRule,true);
+                }
+            }
+            ImGuiMCP::EndPopup();
+        }
     }
+
 
     void RenderNPCList() {
         auto manager = Manager::GetSingleton();
         auto ruleManager = RuleManager::GetSingleton();
         const auto& npcList = manager->GetList("NPC");
         const auto& affectedDB = ruleManager->GetAffectedNPCsDatabase();
+        auto& allRules = ruleManager->GetRules();
 
         if (npcList.empty()) {
             ImGuiMCP::Text("Nenhum NPC carregado. Entre no jogo para popular a lista.");
@@ -560,21 +812,37 @@ namespace SPIDUI {
 
         static char filterBuffer[256] = "";
         static bool showOnlyAffected = false;
-        static size_t lastDBSize = 0; // Para detectar mudanças no banco de dados
 
-        // --- FILTRAGEM LEVE (UI/Busca) ---
+        // --- FILTRAGEM ---
         bool searchChanged = ImGuiMCP::InputText("Filtrar Nome/EditorID", filterBuffer, sizeof(filterBuffer));
-        bool toggleChanged = ImGuiMCP::Checkbox("Mostrar apenas NPCs afetados", &showOnlyAffected);
+        bool toggleChanged = ImGuiMCP::Checkbox("Mostrar apenas NPCs afetados (inclui Preview)", &showOnlyAffected);
 
-        // Atualiza o cache de visualização se algo mudou ou se o DB de afetados foi reconstruído
-        if (searchChanged || toggleChanged || needsNPCListUpdate || affectedDB.size() != lastDBSize) {
+        if (searchChanged || toggleChanged || needsNPCListUpdate) {
             cachedFilteredIndices.clear();
             std::string search(filterBuffer);
             std::transform(search.begin(), search.end(), search.begin(), ::tolower);
 
             for (size_t i = 0; i < npcList.size(); i++) {
                 const auto& item = npcList[i];
+
+                // Para o filtro de "Apenas Afetados", precisamos checar o DB salvo 
+                // OU se ele passaria em alguma regra modificada (Preview)
                 bool isAffected = affectedDB.contains(item.formID);
+
+                // Otimização: Se não estiver no DB, checamos se passaria em alguma regra modificada
+                if (!isAffected && showOnlyAffected) {
+                    if (auto npc = RE::TESForm::LookupByID<RE::TESNPC>(item.formID)) {
+                        for (const auto& rule : allRules) {
+                            if (rule.IsModified()) {
+                                if (IsNPCMatchingTargets(npc, const_cast<Rule&>(rule), false) &&
+                                    !IsNPCMatchingTargets(npc, const_cast<Rule&>(rule), true)) {
+                                    isAffected = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if (showOnlyAffected && !isAffected) continue;
 
@@ -586,12 +854,9 @@ namespace SPIDUI {
                 cachedFilteredIndices.push_back(i);
             }
             needsNPCListUpdate = false;
-            lastDBSize = affectedDB.size();
         }
 
-        // --- RENDERIZAÇÃO ---
-        ImGuiMCP::Text("Exibindo %d / %d NPCs (%llu afetados por regras)",
-            (int)cachedFilteredIndices.size(), (int)npcList.size(), affectedDB.size());
+        ImGuiMCP::Text("Exibindo %d NPCs", (int)cachedFilteredIndices.size());
         ImGuiMCP::Separator();
 
         auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg |
@@ -603,7 +868,7 @@ namespace SPIDUI {
         if (ImGuiMCP::BeginTable("NPCDatabaseTable", 4, tableFlags, { 0, avail.y })) {
             ImGuiMCP::TableSetupColumn("FormID", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 100.0f);
             ImGuiMCP::TableSetupColumn("Nome / EditorID", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
-            ImGuiMCP::TableSetupColumn("Status", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGuiMCP::TableSetupColumn("Status", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 100.0f);
             ImGuiMCP::TableSetupColumn("Regras Ativas", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             ImGuiMCP::TableHeadersRow();
 
@@ -611,7 +876,6 @@ namespace SPIDUI {
             int display_start = std::max(0, static_cast<int>(ImGuiMCP::GetScrollY() / item_height));
             int display_end = std::min(static_cast<int>(cachedFilteredIndices.size()), display_start + static_cast<int>(ceil(avail.y / item_height)) + 1);
 
-            // Dummy superior para o Clipper
             ImGuiMCP::TableNextRow();
             ImGuiMCP::TableSetColumnIndex(0);
             ImGuiMCP::Dummy({ 0.0f, display_start * item_height });
@@ -620,45 +884,116 @@ namespace SPIDUI {
                 size_t idx = cachedFilteredIndices[i];
                 const auto& item = npcList[idx];
 
-                // Busca no banco de dados pré-calculado
                 auto it = affectedDB.find(item.formID);
-                bool isAffected = (it != affectedDB.end());
+                bool hasSavedRules = (it != affectedDB.end());
+
+                std::vector<std::string> previewRules;
+
+                // 2. LÓGICA DE PREVIEW (Apenas para novos NPCs)
+                // Se já tem regras salvas, não processamos preview para este NPC
+                if (!hasSavedRules) {
+                    if (auto npc = RE::TESForm::LookupByID<RE::TESNPC>(item.formID)) {
+                        for (const auto& rule : allRules) {
+                            if (rule.IsModified()) {
+                                if (IsNPCMatchingTargets(npc, const_cast<Rule&>(rule), false) &&
+                                    !IsNPCMatchingTargets(npc, const_cast<Rule&>(rule), true)) {
+                                    previewRules.push_back(rule.name.empty() ? "Sem Nome" : rule.name);
+                                }
+                            }
+                        }
+                    }
+                }
 
                 ImGuiMCP::TableNextRow();
                 ImGuiMCP::TableSetColumnIndex(0); ImGuiMCP::Text("%08X", item.formID);
                 ImGuiMCP::TableSetColumnIndex(1); ImGuiMCP::TextUnformatted(item.name.empty() ? item.editorID.c_str() : item.name.c_str());
 
+                // Coluna de Status
                 ImGuiMCP::TableSetColumnIndex(2);
-                if (isAffected) {
+                if (!previewRules.empty()) {
+                    ImGuiMCP::TextColored({ 1.0f, 0.8f, 0.2f, 1.0f }, "PREVIEW");
+                    if (ImGuiMCP::IsItemHovered()) ImGuiMCP::SetTooltip("Este NPC será afetado por alterações ainda não salvas.");
+                }
+                else if (hasSavedRules) {
                     ImGuiMCP::TextColored({ 0.2f, 1.0f, 0.2f, 1.0f }, "AFETADO");
                 }
                 else {
                     ImGuiMCP::TextDisabled("Nenhum");
                 }
 
+                // Coluna de Regras
                 ImGuiMCP::TableSetColumnIndex(3);
-                if (isAffected) {
-                    std::string ruleSummary;
+                std::string ruleSummary = "";
+
+                // Regras Salvas
+                if (hasSavedRules) {
                     for (const auto& ruleID : it->second.ruleIDs) {
-                        // Tenta achar o nome amigável da regra
-                        auto& rules = ruleManager->GetRules();
-                        auto rIt = std::find_if(rules.begin(), rules.end(), [&](const Rule& r) { return r.id == ruleID; });
-                        std::string rName = (rIt != rules.end() && !rIt->name.empty()) ? rIt->name : ruleID;
-                        ruleSummary += "[" + rName + "] ";
+                        auto rIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
+                        // Só mostra se a regra não estiver na lista de preview (para não duplicar)
+                        if (rIt != allRules.end()) {
+                            bool beingModified = std::find(previewRules.begin(), previewRules.end(), rIt->name) != previewRules.end();
+                            if (!beingModified) {
+                                ruleSummary += "[" + (rIt->name.empty() ? ruleID : rIt->name) + "] ";
+                            }
+                        }
                     }
-                    ImGuiMCP::TextWrapped(ruleSummary.c_str());
+                }
+
+                // Regras Preview (Destaque visual)
+                if (!previewRules.empty()) {
+                    for (const auto& pName : previewRules) {
+                        ruleSummary += "*" + pName + "* ";
+                    }
+                    ImGuiMCP::TextColored({ 1.0f, 0.8f, 0.4f, 1.0f }, ruleSummary.c_str());
                 }
                 else {
-                    ImGuiMCP::TextDisabled("-");
+                    ImGuiMCP::TextWrapped(ruleSummary.c_str());
                 }
             }
 
-            // Dummy inferior para o Clipper
             ImGuiMCP::TableNextRow();
             ImGuiMCP::TableSetColumnIndex(0);
             ImGuiMCP::Dummy({ 0.0f, (static_cast<int>(cachedFilteredIndices.size()) - display_end) * item_height });
 
             ImGuiMCP::EndTable();
+        }
+    }
+
+    void MenuSettings() {
+        auto settings = NPCSettings::GetSingleton();
+
+        ImGuiMCP::Text("Configurações Globais");
+        ImGuiMCP::Separator();
+        ImGuiMCP::Spacing();
+
+        const char* modes[] = {
+            "Desligado",
+            "Ligado (Apenas esvaziar Outfit)",
+            "Ligado (Conversão Completa)"
+        };
+
+        int currentMode = static_cast<int>(settings->outfitMode);
+
+        ImGuiMCP::SetNextItemWidth(350.0f);
+        if (ImGuiMCP::BeginCombo("Modo de Conversão de Outfit", modes[currentMode])) {
+            for (int i = 0; i < 3; i++) {
+                bool isSelected = (currentMode == i);
+                if (ImGuiMCP::Selectable(modes[i], isSelected)) {
+                    settings->outfitMode = static_cast<OutfitConversionMode>(i);
+                    settings->Save(); // Salva automaticamente ao mudar
+                }
+            }
+            ImGuiMCP::EndCombo();
+        }
+
+        ImGuiMCP::SameLine();
+        ImGuiMCP::TextDisabled("(?)");
+        if (ImGuiMCP::IsItemHovered()) {
+            ImGuiMCP::SetTooltip("Define como o plugin lida com as roupas padrão (Outfits) dos NPCs ao carregar o jogo.");
+        }
+
+        if (currentMode == 0) {
+            ImGuiMCP::TextColored({ 1.0f, 0.5f, 0.5f, 1.0f }, "Nota: O sistema SPID de equipamentos pode não funcionar corretamente em NPCs com Outfits originais.");
         }
     }
 
@@ -671,7 +1006,8 @@ namespace SPIDUI {
         SKSEMenuFramework::SetSection("ProgressNPC");
         SKSEMenuFramework::AddSectionItem("Rules Manager", Render);
         SKSEMenuFramework::AddSectionItem("NPC Database", RenderNPCList);
-        
+        SKSEMenuFramework::AddSectionItem("Settings", MenuSettings);
+
         logger::info("UI Registered via SKSEMenuFramework");
     }
 }

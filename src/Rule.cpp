@@ -1,9 +1,6 @@
 #include "Rule.h"
-#include <fstream>
-#include <filesystem>
-#include <random>
 
-
+namespace fs = std::filesystem;
 // Helper to split string
 std::vector<std::string> split(const std::string& s, char delimiter) {
     std::vector<std::string> tokens;
@@ -55,7 +52,13 @@ std::pair<std::string, RE::FormID> Reward::ParseFormID() const {
     return { "", 0 };
 }
 void to_json(json& j, const Reward& p) {
-    j = json{ {"typeReward", p.typeReward}, {"FormID", p.formIDStr}, {"Amount", p.amount}, {"Chance", p.chanceReward} };
+    j = json{
+        {"typeReward", p.typeReward},
+        {"FormID", p.formIDStr},
+        {"Amount", p.amount},
+        {"Chance", p.chanceReward},
+        {"Lootable", p.lootable} 
+    };
 }
 
 void from_json(const json& j, Reward& p) {
@@ -63,6 +66,7 @@ void from_json(const json& j, Reward& p) {
     j.at("FormID").get_to(p.formIDStr);
     p.amount = j.value("Amount", 1);
     p.chanceReward = j.value("Chance", 100.0f);
+    p.lootable = j.value("Lootable", true); 
 }
 
 void to_json(json& j, const RewardGroup& p) {
@@ -75,78 +79,158 @@ void from_json(const json& j, RewardGroup& p) {
     j.at("rewards").get_to(p.rewards);
 }
 
+void to_json(json& j, const BlacklistFilter& p) {
+    j = json{ {"type", p.type}, {"formID", p.formIDStr} };
+}
+
+void from_json(const json& j, BlacklistFilter& p) {
+    j.at("type").get_to(p.type);
+    j.at("formID").get_to(p.formIDStr);
+}
+
+// Atualize o to_json e from_json da Rule:
 void to_json(json& j, const Rule& p) {
     j = json{
-        {"id", p.id},
-        {"name", p.name},
-        {"type", p.type},
-        {"level", p.level},
-        {"filterFormIDs", p.filterFormIDs},
+        {"id", p.id}, {"name", p.name}, {"level", p.level}, {"version", p.version},
+        {"targetGender", p.targetGender},
+        {"targetRequiresAll", p.targetRequiresAll},
+        {"targetFilters", p.targetFilters},
         {"RewardGroups", p.rewardGroups},
-        {"versionHash", p.versionHash} 
+        {"blacklistedGender", p.blacklistedGender},
+        {"blacklistRequiresAll", p.blacklistRequiresAll},
+        {"blacklistFilters", p.blacklistFilters}
     };
 }
 
 void from_json(const json& j, Rule& p) {
     j.at("id").get_to(p.id);
     p.name = j.value("name", "Sem Nome");
-    j.at("type").get_to(p.type);
-    j.at("level").get_to(p.level);
-    if (j.contains("filterFormIDs")) j.at("filterFormIDs").get_to(p.filterFormIDs);
-    if (j.contains("versionHash")) j.at("versionHash").get_to(p.versionHash); 
-
-    if (j.contains("RewardGroups")) {
-        j.at("RewardGroups").get_to(p.rewardGroups);
-    }
-    else if (j.contains("Reward")) {
-        RewardGroup defaultGroup;
-        defaultGroup.name = "Migrated Rewards";
-        j.at("Reward").get_to(defaultGroup.rewards);
-        p.rewardGroups.push_back(defaultGroup);
-    }
+    p.level = j.value("level", 1);
+    p.version = j.value("version", 1);
+    p.targetGender = j.value("targetGender", 0);
+    p.targetRequiresAll = j.value("targetRequiresAll", false);
+    if (j.contains("targetFilters")) j.at("targetFilters").get_to(p.targetFilters);
+    if (j.contains("RewardGroups")) j.at("RewardGroups").get_to(p.rewardGroups);
+    p.blacklistedGender = j.value("blacklistedGender", 0);
+    p.blacklistRequiresAll = j.value("blacklistRequiresAll", false);
+    if (j.contains("blacklistFilters")) j.at("blacklistFilters").get_to(p.blacklistFilters);
+    p.lastSavedHash = p.CalculateHash();
 }
 
-void RuleManager::LoadRules() {
-    std::ifstream i(_filename);
-    if (!i.is_open()) {
-        logger::warn("Rules file not found: {}", _filename);
-        return;
-    }
-    
-    try {
-        json j;
-        i >> j;
-        _rules = j.get<std::vector<Rule>>();
-        logger::info("Loaded {} rules.", _rules.size());
-    } catch (const json::parse_error& e) {
-        logger::error("JSON Parse Error: {}", e.what());
-    }
-}
+bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist) {
+    // 1. Seleciona os dados baseados no modo (Target vs Blacklist)
+    int genderFilter = isBlacklist ? rule.blacklistedGender : rule.targetGender;
+    const auto& filters = isBlacklist ? rule.blacklistFilters : rule.targetFilters;
+    bool requiresAll = isBlacklist ? rule.blacklistRequiresAll : rule.targetRequiresAll;
 
-void RuleManager::SaveRules() {
-    int updatedCount = 0;
-    for (auto& rule : _rules) {
-        std::string newHash = rule.CalculateHash();
-        if (rule.versionHash != newHash) {
-            logger::info("[RuleManager] Regra '{}' modificada. Hash antigo: {} -> Novo: {}",
-                rule.name, rule.versionHash, newHash);
-            rule.versionHash = newHash;
-            updatedCount++;
+    // 2. Verificação de Gênero (0: None, 1: Male, 2: Female)
+    if (genderFilter != 0) {
+        bool isFemale = npc->IsFemale();
+        bool genderMatch = (genderFilter == 1 && !isFemale) || (genderFilter == 2 && isFemale);
+
+        if (isBlacklist && genderMatch) return true;  // Se for blacklist e deu match no gênero, bloqueia
+        if (!isBlacklist && !genderMatch) return false; // Se for target e NÃO deu match, descarta
+    }
+
+    // 3. Se não houver filtros de ID/Keyword/etc
+    if (filters.empty()) {
+        // Na Blacklist, vazio significa "não bloqueia ninguém". No Target, significa "afeta todos".
+        return !isBlacklist;
+    }
+
+    int matches = 0;
+    for (const auto& filter : filters) {
+        bool match = false;
+        auto tokens = split(filter.formIDStr, '|');
+        if (tokens.size() < 2) continue;
+
+        auto fID = RE::TESDataHandler::GetSingleton()->LookupFormID(std::stoul(tokens[1], nullptr, 16), tokens[0]);
+
+        if (filter.type == "NPC") { if (npc->GetFormID() == fID) match = true; }
+        else if (filter.type == "Keyword") {
+            auto kwd = RE::TESForm::LookupByID<RE::BGSKeyword>(fID);
+            if (kwd && npc->HasKeyword(kwd)) match = true;
+        }
+        else if (filter.type == "Faction") {
+            auto fact = RE::TESForm::LookupByID<RE::TESFaction>(fID);
+            if (fact && npc->IsInFaction(fact)) match = true;
+        }
+        else if (filter.type == "Race") {
+            auto race = RE::TESForm::LookupByID<RE::TESRace>(fID);
+            if (npc->race == race) match = true;
+        }
+
+        if (match) {
+            matches++;
+            if (!requiresAll) return true; // Se não exige todos, o primeiro match já valida
         }
     }
 
-    std::filesystem::path path(_filename);
-    std::filesystem::create_directories(path.parent_path());
+    return (requiresAll && matches == filters.size() && matches > 0);
+}
 
-    std::ofstream o(_filename);
-    json j = _rules;
-    o << std::setw(4) << j << std::endl;
+void RuleManager::LoadRules() {
+    _rules.clear();
+    _ruleHistories.clear();
 
-    if (updatedCount > 0) {
-        logger::info("Salvamento concluído: {} regras atualizadas no arquivo.", updatedCount);
+    if (!fs::exists(_rulesDir)) {
+        fs::create_directories(_rulesDir);
+        return;
     }
-    else {
-        logger::info("Salvamento concluído: Nenhuma alteração detectada nas regras.");
+
+    for (const auto& entry : fs::directory_iterator(_rulesDir)) {
+        if (entry.path().extension() == ".json") {
+            std::ifstream i(entry.path());
+            try {
+                json j;
+                i >> j;
+                // Cada arquivo agora é uma lista (histórico)
+                auto history = j.get<std::vector<Rule>>();
+                if (!history.empty()) {
+                    // A primeira posição [0] deve ser sempre a versão mais recente
+                    std::string id = history[0].id;
+                    _ruleHistories[id] = history;
+                    _rules.push_back(history[0]);
+                }
+            }
+            catch (const std::exception& e) {
+                logger::error("Erro ao carregar regra {}: {}", entry.path().string(), e.what());
+            }
+        }
+    }
+    logger::info("Carregadas {} regras com seus históricos.", _rules.size());
+}
+
+void RuleManager::SaveRules() {
+    int updatedTotal = 0;
+
+    for (auto& currentRule : _rules) {
+        std::string currentContentHash = currentRule.CalculateHash();
+
+        // Se o hash atual for diferente do último salvo
+        if (currentRule.lastSavedHash != currentContentHash) {
+
+            // 1. Incrementa a versão numérica
+            currentRule.version++;
+            currentRule.lastSavedHash = currentContentHash;
+
+            // 2. Atualiza o histórico em memória
+            auto& history = _ruleHistories[currentRule.id];
+            history.insert(history.begin(), currentRule); // Adiciona a nova versão no topo
+
+            // 3. Salva o arquivo individual com o histórico completo
+            std::string filePath = _rulesDir + currentRule.id + ".json";
+            std::ofstream o(filePath);
+            json j = history; // O arquivo contém o array de versões
+            o << std::setw(4) << j << std::endl;
+
+            updatedTotal++;
+            logger::info("Regra '{}' salva. Nova Versão: {}", currentRule.name, currentRule.version);
+        }
+    }
+
+    if (updatedTotal > 0) {
+        InitializeAffectedNPCsDatabase();
     }
 }
 
@@ -167,8 +251,6 @@ Rule& RuleManager::CreateRule() {
     Rule r;
     r.id = GenerateUUID();
     r.level = 1;
-    r.type = "NPC"; // Agora é uma string simples para o Combo da UI
-    r.filterFormIDs = {};
     _rules.push_back(r);
     return _rules.back();
 }
@@ -195,60 +277,11 @@ std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {
     std::uniform_real_distribution<float> dis(0.0f, 100.0f);
 
     for (const auto& rule : _rules) {
-        bool isAffected = false;
-
-        // Se a lista de filtros estiver vazia, a regra afeta todos os NPCs (Global)
-        if (rule.filterFormIDs.empty()) {
-            isAffected = true;
-        }
-        else {
-            // CORREÇÃO: Lógica baseada no tipo da regra (NPC, Keyword ou Faction)
-            if (rule.type == "NPC") {
-                for (const auto& targetID : rule.filterFormIDs) {
-                    if (targetID == npcIdentifier) {
-                        isAffected = true;
-                        break;
-                    }
-                }
-            }
-            else if (rule.type == "Keyword") {
-                for (const auto& targetID : rule.filterFormIDs) {
-                    auto tokens = split(targetID, '|');
-                    if (tokens.size() == 2) {
-                        uint32_t localID = std::stoul(tokens[1], nullptr, 16);
-                        // CORREÇÃO: Primeiro resolve o FormID, depois busca o objeto
-                        auto fullFormID = RE::TESDataHandler::GetSingleton()->LookupFormID(localID, tokens[0]);
-                        auto kwd = RE::TESForm::LookupByID<RE::BGSKeyword>(fullFormID);
-
-                        if (kwd && npc->HasKeyword(kwd)) {
-                            isAffected = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            else if (rule.type == "Faction") {
-                for (const auto& targetID : rule.filterFormIDs) {
-                    auto tokens = split(targetID, '|');
-                    if (tokens.size() == 2) {
-                        uint32_t localID = std::stoul(tokens[1], nullptr, 16);
-                        // CORREÇÃO: Primeiro resolve o FormID, depois busca o objeto
-                        auto fullFormID = RE::TESDataHandler::GetSingleton()->LookupFormID(localID, tokens[0]);
-                        auto faction = RE::TESForm::LookupByID<RE::TESFaction>(fullFormID);
-
-                        if (faction && npc->IsInFaction(faction)) {
-                            isAffected = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Se o NPC passou no filtro, processa os grupos de recompensa
-        if (isAffected) {
+        if (IsNPCMatchingTargets(npc, rule, false) && !IsNPCMatchingTargets(npc, rule, true)) {
+            // 3. Processa os grupos de recompensa da regra
             for (const auto& group : rule.rewardGroups) {
                 if (group.isExclusive) {
+                    // Lógica de Sorteio Único (Exclusivo)
                     float roll = dis(gen);
                     float cumulative = 0.0f;
                     for (const auto& reward : group.rewards) {
@@ -260,13 +293,15 @@ std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {
                     }
                 }
                 else {
+                    // Lógica de Sorteio Independente
                     for (const auto& reward : group.rewards) {
                         if (dis(gen) <= reward.chanceReward) {
                             applicable.push_back(reward);
                         }
                     }
                 }
-            }
+            }  
+            
         }
     }
 
@@ -274,86 +309,80 @@ std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {
 }
 
 
-void RuleManager::GenerateDistributionReport() {
-    logger::info("==================================================");
-    logger::info("INICIANDO RELATÓRIO DE DISTRIBUIÇÃO DINÂMICA");
-    logger::info("==================================================");
 
-    auto npcList = Manager::GetSingleton()->GetList("NPC");
-    size_t totalNpcs = npcList.size();
-    size_t affectedCount = 0;
-    size_t totalRewards = 0;
 
-    logger::info("Total de NPCs indexados: {}", totalNpcs);
-    logger::info("Total de Regras ativas: {}", _rules.size());
-
-    for (const auto& npcInfo : npcList) {
-        // Tenta obter o ponteiro real do NPC a partir do FormID
-        auto npc = RE::TESForm::LookupByID<RE::TESNPC>(npcInfo.formID);
-        if (!npc) continue;
-
-        // Simula a aplicação das regras
-        std::vector<Reward> results = GetRewardsForNPC(npc);
-
-        if (!results.empty()) {
-            affectedCount++;
-            totalRewards += results.size();
-
-            std::string rewardsStr = "";
-            for (const auto& r : results) {
-                rewardsStr += "[" + r.typeReward + ": " + r.formIDStr + "] ";
-            }
-
-            logger::info("NPC: {} ({:X}) | Plugin: {} -> Receberia: {}",
-                npcInfo.name.empty() ? npcInfo.editorID : npcInfo.name,
-                npcInfo.formID,
-                npcInfo.pluginName,
-                rewardsStr);
+Rule* RuleManager::GetRuleVersion(const std::string& ruleID, int version) {
+    if (_ruleHistories.contains(ruleID)) {
+        for (auto& rule : _ruleHistories[ruleID]) {
+            if (rule.version == version) return &rule;
         }
     }
-
-    logger::info("--------------------------------------------------");
-    logger::info("RESUMO DO RELATÓRIO:");
-    logger::info("NPCs que passaram nos filtros: {}", affectedCount);
-    logger::info("Total de instâncias de itens distribuídas: {}", totalRewards);
-    logger::info("==================================================");
+    return nullptr;
 }
 
 std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, const Rule& rule) {
     std::vector<Reward> applicable;
     if (!npc) return applicable;
 
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dis(0.0f, 100.0f);
+    std::string npcName = npc->GetName();
+    logger::debug("[Sorteio] --- Iniciando processamento para: {} (Regra: {}) ---", npcName, rule.name);
 
-    // Como o RuleProcessor já validou o "quem" (NPC) e o "quando" (Nível),
-    // aqui focamos apenas no "o quê" (Sorteio dos Grupos)
     for (const auto& group : rule.rewardGroups) {
-        if (group.rewards.empty()) continue;
+        if (group.rewards.empty()) {
+            logger::debug("  [Grupo: {}] Vazio, pulando.", group.name);
+            continue;
+        }
 
         if (group.isExclusive) {
             // Lógica de Sorteio Único (Exclusivo)
-            float roll = dis(gen);
+            float roll = GetRandomFloat(0.0f, 100.0f);
             float cumulative = 0.0f;
+            bool found = false;
+
+            logger::debug("  [Grupo Exclusivo: {}] Roll: {:.2f}/100.00", group.name, roll);
+
             for (const auto& reward : group.rewards) {
+                float startRange = cumulative;
                 cumulative += reward.chanceReward;
-                if (roll <= cumulative) {
+
+                // Busca o nome do item para o log
+                auto [plugin, fID] = reward.ParseFormID();
+                auto form = RE::TESForm::LookupByID(fID);
+                std::string itemName = form ? form->GetName() : reward.formIDStr;
+
+                logger::debug("    - Item: {} | Range: {:.2f} a {:.2f}", itemName, startRange, cumulative);
+
+                if (!found && roll <= cumulative) {
+                    logger::debug("      >> SELECIONADO: {:.2f} caiu dentro do range!", roll);
                     applicable.push_back(reward);
-                    break; // Sai do grupo após ganhar um item
+                    found = true;
+                    // Não damos 'break' aqui se você quiser ver o log dos outros ranges, 
+                    // mas a lógica garante que apenas o primeiro que satisfaz a condição é pego.
                 }
             }
+            if (!found) logger::debug("    - Nenhum item selecionado (Roll foi maior que a soma total).");
         }
         else {
             // Lógica de Sorteio Independente
+            logger::debug("  [Grupo Independente: {}]", group.name);
             for (const auto& reward : group.rewards) {
-                if (dis(gen) <= reward.chanceReward) {
+                float roll = GetRandomFloat(0.0f, 100.0f);
+
+                auto [plugin, fID] = reward.ParseFormID();
+                auto form = RE::TESForm::LookupByID(fID);
+                std::string itemName = form ? form->GetName() : reward.formIDStr;
+
+                bool success = (roll <= reward.chanceReward);
+                logger::debug("    - Item: {} | Roll: {:.2f} vs Chance: {:.2f} | {}",
+                    itemName, roll, reward.chanceReward, success ? "SUCESSO" : "FALHA");
+
+                if (success) {
                     applicable.push_back(reward);
                 }
             }
         }
     }
-
+    logger::debug("[Sorteio] --- Fim do processamento para {} ---\n", npcName);
     return applicable;
 }
 
@@ -366,73 +395,24 @@ void RuleManager::InitializeAffectedNPCsDatabase() {
     auto& rules = GetRules();
     auto npcList = Manager::GetSingleton()->GetList("NPC");
 
-    if (rules.empty()) {
-        logger::warn("[Database] Nenhuma regra carregada. Abortando mapeamento.");
-        return;
-    }
-
-    logger::info("[Database] Analisando {} NPCs contra {} regras.", npcList.size(), rules.size());
-
     for (const auto& npcInfo : npcList) {
         auto npc = RE::TESForm::LookupByID<RE::TESNPC>(npcInfo.formID);
         if (!npc) continue;
 
-        std::string npcIdentifier = npcInfo.pluginName + "|" + FormatLocalFormID(npcInfo.formID, npcInfo.pluginName);
         AffectedNPC affectedInfo;
         affectedInfo.npcFormID = npcInfo.formID;
         affectedInfo.npcName = npc->GetName();
 
         for (const auto& rule : rules) {
-            bool isAffected = false;
-
-            // 1. Regra Global (Sem filtros = afeta todos)
-            if (rule.filterFormIDs.empty()) {
-                isAffected = true;
-                logger::debug("  [Match] NPC '{}' ({:X}) afetado por Regra Global: {}", affectedInfo.npcName, npcInfo.formID, rule.name);
-            }
-            else {
-                // 2. Filtro por FormID direto (Tipo NPC)
-                if (rule.type == "NPC") {
-                    if (std::find(rule.filterFormIDs.begin(), rule.filterFormIDs.end(), npcIdentifier) != rule.filterFormIDs.end()) {
-                        isAffected = true;
-                    }
-                }
-                // 3. Filtros Complexos (Keyword/Faction)
-                else {
-                    for (const auto& filterStr : rule.filterFormIDs) {
-                        auto tokens = split(filterStr, '|');
-                        if (tokens.size() < 2) continue;
-
-                        auto filterFormID = RE::TESDataHandler::GetSingleton()->LookupFormID(std::stoul(tokens[1], nullptr, 16), tokens[0]);
-
-                        if (rule.type == "Keyword") {
-                            auto kwd = RE::TESForm::LookupByID<RE::BGSKeyword>(filterFormID);
-                            if (kwd && npc->HasKeyword(kwd)) isAffected = true;
-                        }
-                        else if (rule.type == "Faction") {
-                            auto fact = RE::TESForm::LookupByID<RE::TESFaction>(filterFormID);
-                            if (fact && npc->IsInFaction(fact)) isAffected = true;
-                        }
-
-                        if (isAffected) break;
-                    }
-                }
-            }
-
-            if (isAffected) {
+            if (IsNPCMatchingTargets(npc, rule, false) && !IsNPCMatchingTargets(npc, rule, true)) {
                 affectedInfo.ruleIDs.push_back(rule.id);
             }
         }
 
-        // Se o NPC foi afetado por pelo menos uma regra, adiciona ao banco
         if (!affectedInfo.ruleIDs.empty()) {
             _affectedNPCsDatabase[npcInfo.formID] = affectedInfo;
-            logger::debug("[Database] NPC Adicionado: {} | Regras: {}", affectedInfo.npcName, affectedInfo.ruleIDs.size());
         }
     }
-
-    logger::info("======================================================");
-    logger::info("Mapeamento concluído. NPCs afetados encontrados: {}", _affectedNPCsDatabase.size());
-    logger::info("======================================================");
 }
+
 

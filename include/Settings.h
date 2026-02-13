@@ -1,64 +1,96 @@
-#pragma once
-#include <string>
-#include <vector>
-#include <map>
-#include <nlohmann/json.hpp>
-#include "Rule.h"
 
-struct SaveHistoryEntry {
-    uint32_t saveNumber;
-    std::string playTime;
-    std::string saveName;
-    std::vector<Rule> appliedRulesSnapshot; // Como as regras eram no momento do save
-    std::vector<RE::FormID> affectedNPCs;
-    std::map<std::string, std::vector<std::string>> npcAppliedRules;
-    NLOHMANN_DEFINE_TYPE_INTRUSIVE(SaveHistoryEntry, saveNumber, playTime, saveName, appliedRulesSnapshot, affectedNPCs, npcAppliedRules)
-};
 
-struct CurrentSaveContext {
-    uint32_t charID = 0;
-    uint32_t saveNumber = 0;
-    std::string playTime = "";
-    bool isValid = false;
-};
+//namespace DynamicHeadPartUtils
+//{
+//    using json = nlohmann::json;
+//
+//    RE::BGSHeadPart* CreateHeadPartFromJson(const json& a_data)
+//    {
+//        // 1. Cria a instância utilizando o helper de template do ConcreteFormFactory.h
+//        // Isso resolve automaticamente a factory para FormType::HeadPart
+//        auto newPart = RE::IFormFactory::Create<RE::BGSHeadPart>();
+//        if (!newPart) return nullptr;
+//
+//        // 2. Configura o EditorID (EDID)
+//        if (a_data.contains("editorID")) {
+//            newPart->SetFormEditorID(a_data["editorID"].get<std::string>().c_str());
+//        }
+//
+//        // 3. Define o Tipo (PNAM)
+//        if (a_data.contains("type")) {
+//            newPart->type = static_cast<RE::BGSHeadPart::HeadPartType>(a_data["type"].get<uint32_t>());
+//        }
+//
+//        // 4. Configura o Modelo (herdado de TESModelTextureSwap)
+//        if (a_data.contains("modelPath")) {
+//            newPart->SetModel(a_data["modelPath"].get<std::string>().c_str());
+//        }
+//
+//        // 5. Configura as Flags (DATA)
+//        if (a_data.contains("flags")) {
+//            newPart->flags = static_cast<RE::BGSHeadPart::Flag>(a_data["flags"].get<uint8_t>());
+//        }
+//
+//        // 6. Configura o TextureSet (TNAM)
+//        if (a_data.contains("textureSetID") && a_data.contains("textureSource")) {
+//            auto dataHandler = RE::TESDataHandler::GetSingleton();
+//            if (dataHandler) {
+//                auto txSet = dataHandler->LookupForm<RE::BGSTextureSet>(
+//                    std::stoul(a_data["textureSetID"].get<std::string>(), nullptr, 16),
+//                    a_data["textureSource"].get<std::string>()
+//                );
+//                if (txSet) {
+//                    newPart->textureSet = txSet;
+//                }
+//            }
+//        }
+//
+//        // 7. Configura as Raças Válidas (RNAM)
+//        if (a_data.contains("validRacesListID")) {
+//            auto dataHandler = RE::TESDataHandler::GetSingleton();
+//            if (dataHandler) {
+//                auto raceList = dataHandler->LookupForm<RE::BGSListForm>(
+//                    std::stoul(a_data["validRacesListID"].get<std::string>(), nullptr, 16),
+//                    "Skyrim.esm"
+//                );
+//                if (raceList) {
+//                    newPart->validRaces = raceList;
+//                }
+//            }
+//        }
+//
+//        return newPart;
+//    }
+//
+//    void ApplyDynamicPartToActor(RE::Actor* a_actor, const json& a_partData)
+//    {
+//        if (!a_actor) return;
+//
+//        // Obtém o Base NPC para modificar o array de partes
+//        auto baseNPC = a_actor->GetActorBase();
+//        if (!baseNPC) return;
+//
+//        // Cria a nova HeadPart em runtime
+//        RE::BGSHeadPart* customPart = CreateHeadPartFromJson(a_partData);
+//
+//        if (customPart) {
+//            // ChangeHeadPart substitui a parte existente do mesmo tipo no array headParts
+//            baseNPC->ChangeHeadPart(customPart);
+//
+//            // Força a atualização do modelo 3D do Actor para refletir a mudança
+//            a_actor->Update3DModel();
+//        }
+//    }
+//}
 
-class SaveStateManager {
-public:
-    static SaveStateManager* GetSingleton() {
-        static SaveStateManager singleton;
-        return &singleton;
-    }
 
-    // Carrega o arquivo do personagem (ex: 21C20337.json)
-    void LoadCharacterData(uint32_t characterID);
 
-    // Salva ou atualiza uma entrada de save para o personagem atual
-    void UpdateSaveEntry(uint32_t characterID, const SaveHistoryEntry& newEntry);
-
-    // Verifica se uma regra mudou comparando com o snapshot salvo
-    bool DidRuleChange(const std::string& ruleID, const SaveHistoryEntry& lastEntry);
-
-    std::vector<SaveHistoryEntry>& GetCharacterHistory(uint32_t characterID);
-
-    void SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum, std::string a_time) {
-        _currentContext.charID = a_charID;
-        _currentContext.saveNumber = a_saveNum;
-        _currentContext.playTime = a_time;
-        _currentContext.isValid = true;
-    }
-
-    void ClearContext() {
-        _currentContext.isValid = false;
-        _currentContext.saveNumber = 0;
-        _currentContext.charID = 0;
-    }
-
-    CurrentSaveContext& GetCurrentContext() { return _currentContext; }
-
-    void PersistCurrentSave(const std::string& a_saveName);
-
-private:
-    std::string GetCharacterPath(uint32_t characterID);
-    std::map<uint32_t, std::vector<SaveHistoryEntry>> _characterHistory; // Cache em memória
-    CurrentSaveContext _currentContext;
-};
+//namespace HeadPartCreator
+//{
+//    using json = nlohmann::json;
+//
+//    RE::BGSHeadPart* CreateHeadPartFromJson(const json& a_data);
+//
+//    void TestCreateHeadPart();
+//
+//}
