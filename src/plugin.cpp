@@ -10,11 +10,12 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         RuleManager::GetSingleton()->LoadRules();
         Manager::GetSingleton()->PopulateAllLists();
         RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
-		Manager::GetSingleton()->ConvertAllNPCOutfitsToInventory();
+		//Manager::GetSingleton()->ConvertAllNPCOutfitsToInventory();
        // CellAttachHandler::Register();
         //CellFullyLoadedHandler::Register();
         LoadEventHandler::Register();
         PlayerLevel::Register();
+		CombatEventHandler::Register();
         //auto ui = RE::UI::GetSingleton();
         //if (ui) {
         //    ui->AddEventSink(EventSink::GetSingleton());

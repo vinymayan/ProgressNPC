@@ -167,21 +167,55 @@ void EquipBestInventoryItems(RE::Actor* a_actor)
 
 void ApplyRulesToInstance(RE::Actor* a_actor) {
     if (!a_actor || a_actor->IsDead()) return;
-
+    bool isPlayer = a_actor->IsPlayer();
     auto baseNPC = a_actor->GetActorBase();
+    if (!baseNPC) return;
     auto& context = SaveStateManager::GetSingleton()->GetCurrentContext();
-    if (!context.isValid || !baseNPC) return;
+    if (!context.isValid) return;
 
     auto& session = SaveStateManager::GetSingleton()->GetSessionData();
+    std::string fileNameStr = "Dynamic";
+    if (auto file = baseNPC->GetFile(0)) {
+        fileNameStr = file->GetFilename();
+    }
+    else if (baseNPC->IsDynamicForm()) {
+        fileNameStr = "Created"; // Para NPCs gerados por scripts/leveled lists
+    }
+
+
     std::string actorName = a_actor->GetName();
-    std::string fileNameStr(baseNPC->GetFile(0)->GetFilename());
     std::string npcKey = fileNameStr + "|" + FormatLocalFormID(a_actor->GetFormID(), fileNameStr);
 
     const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
-    auto it = affectedDB.find(baseNPC->GetFormID());
-    if (it == affectedDB.end()) return;
 
-    for (const auto& ruleID : it->second.ruleIDs) {
+
+    // --- NOVA LÓGICA DE COLETA DE REGRAS (3 FONTES) ---
+    std::vector<std::string> rulesToProcess;
+    auto addRulesFromID = [&](RE::FormID a_id) {
+        if (affectedDB.contains(a_id)) {
+            for (const auto& id : affectedDB.at(a_id).ruleIDs) {
+                if (std::find(rulesToProcess.begin(), rulesToProcess.end(), id) == rulesToProcess.end()) {
+                    rulesToProcess.push_back(id);
+                }
+            }
+        }
+        };
+
+    // 1. Regras do ID da Instância (Actor)
+    addRulesFromID(a_actor->GetFormID());
+
+    // 2. Regras do ID do Base NPC
+    addRulesFromID(baseNPC->GetFormID());
+
+    // 3. Regras do ID do Template (se houver)
+    auto templateBase = a_actor->GetTemplateBase();
+    if (templateBase) {
+        addRulesFromID(templateBase->GetFormID());
+    }
+
+    if (rulesToProcess.empty()) return;
+
+    for (const auto& ruleID : rulesToProcess) {
         auto& allRules = RuleManager::GetSingleton()->GetRules();
         auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
         if (ruleIt == allRules.end()) continue;
@@ -280,16 +314,16 @@ void ApplyRulesToInstance(RE::Actor* a_actor) {
                     // Weapon, Armor, Misc, Potion, Ingredient, Book, Ammo, etc.
                     if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
                         RE::ExtraDataList* xList = nullptr;
-                        if (!reward.lootable) {
+                        /*if (!reward.lootable) {
                             a_actor->AddObjectToContainer(bound, xList, reward.amount, nullptr);
-                        }
-                        else {
+                        }*/
+                        
                             a_actor->AddObjectToContainer(bound, nullptr, reward.amount, nullptr);
-                        }
+                        
 
                         if (reward.typeReward == "Weapon" || reward.typeReward == "Armor" || reward.typeReward == "Ammo") {
                             auto equipManager = RE::ActorEquipManager::GetSingleton();
-                            if (equipManager) {
+                            if (equipManager && !isPlayer) {
                                 equipManager->EquipObject(a_actor, bound, nullptr, 1, nullptr, false, true, false, true);
                             }
                         }

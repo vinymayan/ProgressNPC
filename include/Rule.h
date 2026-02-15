@@ -13,7 +13,7 @@ struct Reward {
     std::string formIDStr;  // e.g. "Skyrim.esm|D8D4E" (Plugin|FormID) or "D8D4E" (FormID only - unsafe without plugin)
     uint32_t amount = 1;
     float chanceReward = 100.0f;
-    bool lootable = true;
+    //bool lootable = true;
     // Helper to separate Plugin | FormID
     std::pair<std::string, RE::FormID> ParseFormID() const;
 };
@@ -94,9 +94,11 @@ public:
         return &singleton;
     }
 
+    bool IsAffected(RE::Actor* actor);
+
     void LoadRules();
     void SaveRules();
-    
+    void ExportRule(const Rule& rule);
     std::vector<Rule>& GetRules() { return _rules; }
     
     // Create specific rule

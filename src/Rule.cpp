@@ -1,4 +1,5 @@
 #include "Rule.h"
+#include <miniz.h> // Inclua a biblioteca miniz
 
 namespace fs = std::filesystem;
 // Helper to split string
@@ -75,7 +76,7 @@ void to_json(json& j, const Reward& p) {
         {"FormID", p.formIDStr},
         {"Amount", p.amount},
         {"Chance", p.chanceReward},
-        {"Lootable", p.lootable} 
+        //{"Lootable", p.lootable} 
     };
 }
 
@@ -84,7 +85,7 @@ void from_json(const json& j, Reward& p) {
     j.at("FormID").get_to(p.formIDStr);
     p.amount = j.value("Amount", 1);
     p.chanceReward = j.value("Chance", 100.0f);
-    p.lootable = j.value("Lootable", true); 
+    //p.lootable = j.value("Lootable", true); 
 }
 
 void to_json(json& j, const RewardGroup& p) {
@@ -135,6 +136,33 @@ void from_json(const json& j, Rule& p) {
     p.lastSavedHash = p.CalculateHash();
 }
 
+
+bool RuleManager::IsAffected(RE::Actor* actor) {
+    if (!actor) return false;
+    auto baseNPC = actor->GetActorBase();
+	logger::debug("Verificando NPC: {} (FormID: {:08X})", baseNPC ? baseNPC->GetName() : "Unknown", baseNPC->GetFormID());
+    if (!baseNPC) return false;
+
+    // 1. Identificar os 3 IDs principais
+    RE::FormID actorID = actor->GetFormID();
+    RE::FormID baseID = baseNPC->GetFormID();
+
+    // Acessa o baseTemplateForm (TPLT) definido em TESActorBaseData
+    RE::TESForm* baseTemplate = actor->GetTemplateBase();
+    RE::FormID templateID = baseTemplate ? baseTemplate->GetFormID() : 0;
+	logger::debug("IDs para verificação - ActorID: {:08X}, BaseID: {:08X}, TemplateID: {:08X}", actorID, baseID, templateID);
+    // 2. Busca "em massa": Se qualquer um dos IDs estiver no banco, o ator é afetado
+    if (_affectedNPCsDatabase.contains(actorID)) return true;
+    if (_affectedNPCsDatabase.contains(baseID)) return true;
+
+    if (templateID != 0 && _affectedNPCsDatabase.contains(templateID)) {
+        logger::debug("NPC {} identificado via Template: {:08X}", baseNPC->GetName(), templateID);
+        return true;
+    }
+
+    return false;
+}
+
 bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist) {
     // 1. Seleciona os dados baseados no modo (Target vs Blacklist)
     int genderFilter = isBlacklist ? rule.blacklistedGender : rule.targetGender;
@@ -164,18 +192,32 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist) {
 
         auto fID = RE::TESDataHandler::GetSingleton()->LookupFormID(std::stoul(tokens[1], nullptr, 16), tokens[0]);
 
-        if (filter.type == "NPC") { if (npc->GetFormID() == fID) match = true; }
+        if (filter.type == "NPC") {
+            // Verifica o NPC ou o seu Template
+            if (npc->GetFormID() == fID) {
+                match = true;
+            }
+        }
         else if (filter.type == "Keyword") {
             auto kwd = RE::TESForm::LookupByID<RE::BGSKeyword>(fID);
-            if (kwd && npc->HasKeyword(kwd)) match = true;
+            // Verifica keyword no NPC ou no Template
+            if (kwd && (npc->HasKeyword(kwd))) {
+                match = true;
+            }
         }
         else if (filter.type == "Faction") {
             auto fact = RE::TESForm::LookupByID<RE::TESFaction>(fID);
-            if (fact && npc->IsInFaction(fact)) match = true;
+            // Verifica facção no NPC ou no Template
+            if (fact && (npc->IsInFaction(fact))) {
+                match = true;
+            }
         }
         else if (filter.type == "Race") {
             auto race = RE::TESForm::LookupByID<RE::TESRace>(fID);
-            if (npc->race == race) match = true;
+            // Verifica raça no NPC ou no Template
+            if (race && (npc->race == race)) {
+                match = true;
+            }
         }
 
         if (match) {
@@ -250,7 +292,7 @@ void RuleManager::SaveRules() {
                     logger::info("Renomeando regra: deletando arquivo antigo '{}'", oldFileName);
                 }
             }
-
+            _ruleIdToFileName[currentRule.id] = newFileName;
             // 1. Incrementa a versão numérica
             currentRule.version++;
             currentRule.lastSavedHash = currentContentHash;
@@ -273,6 +315,52 @@ void RuleManager::SaveRules() {
     if (updatedTotal > 0) {
         InitializeAffectedNPCsDatabase();
     }
+}
+
+
+void RuleManager::ExportRule(const Rule& rule) {
+    namespace fs = std::filesystem;
+
+    if (!_ruleIdToFileName.contains(rule.id)) {
+        logger::error("Export: ID da regra não encontrado no mapeamento de arquivos.");
+        return;
+    }
+    // 1. Caminhos de origem e destino
+    std::string ruleFileName = _ruleIdToFileName[rule.id] + ".json";
+    std::string sourcePath = _rulesDir + ruleFileName;
+
+    fs::path exportDir = "Data/SKSE/Plugins/EDF/Exports";
+    fs::create_directories(exportDir);
+
+    std::string zipPath = (exportDir / (SanitizeFilename(rule.name) + ".zip")).string();
+
+    // 2. Inicializa o arquivo ZIP
+    mz_zip_archive zip_archive;
+    memset(&zip_archive, 0, sizeof(zip_archive));
+
+    if (!mz_zip_writer_init_file(&zip_archive, zipPath.c_str(), 0)) {
+        logger::error("Export: Falha ao inicializar arquivo ZIP em {}", zipPath);
+        return;
+    }
+
+    // 3. Define o caminho interno (onde o arquivo ficará dentro do ZIP)
+    // O usuário quer: SKSE\Plugins\EDF\Rules\nome.json
+    std::string internalZipPath = "SKSE/Plugins/EDF/Rules/" + ruleFileName;
+
+    // 4. Adiciona o arquivo ao ZIP
+    // mz_zip_writer_add_file(arquivo_zip, nome_dentro_do_zip, caminho_no_disco, ...)
+    if (!mz_zip_writer_add_file(&zip_archive, internalZipPath.c_str(), sourcePath.c_str(), nullptr, 0, MZ_BEST_COMPRESSION)) {
+        logger::error("Export: Falha ao adicionar arquivo {} ao ZIP", ruleFileName);
+        mz_zip_writer_finalize_archive(&zip_archive);
+        mz_zip_writer_end(&zip_archive);
+        return;
+    }
+
+    // 5. Finaliza e fecha
+    mz_zip_writer_finalize_archive(&zip_archive);
+    mz_zip_writer_end(&zip_archive);
+
+    logger::info("Regra '{}' exportada com sucesso para: {}", rule.name, zipPath);
 }
 
 std::string GenerateUUID() {
@@ -446,11 +534,11 @@ std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, cons
 }
 
 void RuleManager::InitializeAffectedNPCsDatabase() {
-
-
     _affectedNPCsDatabase.clear();
     auto& rules = GetRules();
     auto npcList = Manager::GetSingleton()->GetList("NPC");
+
+    logger::info("--- Iniciando Inicialização do Database de NPCs Afetados ---");
 
     for (const auto& npcInfo : npcList) {
         auto npc = RE::TESForm::LookupByID<RE::TESNPC>(npcInfo.formID);
@@ -461,6 +549,7 @@ void RuleManager::InitializeAffectedNPCsDatabase() {
         affectedInfo.npcName = npc->GetName();
 
         for (const auto& rule : rules) {
+            // Verifica se o NPC passa nos filtros de Target e não está na Blacklist
             if (IsNPCMatchingTargets(npc, rule, false) && !IsNPCMatchingTargets(npc, rule, true)) {
                 affectedInfo.ruleIDs.push_back(rule.id);
             }
@@ -470,6 +559,8 @@ void RuleManager::InitializeAffectedNPCsDatabase() {
             _affectedNPCsDatabase[npcInfo.formID] = affectedInfo;
         }
     }
+
+    logger::info("--- Inicialização Concluída. Total de NPCs no Database: {} ---", _affectedNPCsDatabase.size());
 }
 
 

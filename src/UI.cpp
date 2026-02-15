@@ -23,6 +23,16 @@ namespace SPIDUI {
     static bool isPickingBlacklist = false;
     static std::string currentBlacklistType = "All";
 
+    static char selectionSearchBuf[128] = "";
+    static std::string selectionPluginFilter = "All";
+
+    // Função auxiliar para limpar o estado da busca
+    void ResetSelectionState() {
+        memset(selectionSearchBuf, 0, sizeof(selectionSearchBuf));
+        selectionPluginFilter = "All";
+        currentRewardType = "All";
+        currentBlacklistType = "All";
+    }
     bool previewnpc = false;
     static std::vector<const InternalFormInfo*> affectedCache;
     static std::string lastPreviewID = "";
@@ -132,6 +142,7 @@ namespace SPIDUI {
 
         ImGuiMCP::Separator();
         if (ImGuiMCP::Button(buttonLabel)) {
+            ResetSelectionState();
             isPickingBlacklist = true;
         }
 
@@ -280,11 +291,10 @@ namespace SPIDUI {
             return;
         }
         const auto& list = *sourceList;
-        static char searchBuf[128] = "";
         static std::string pluginFilter = "All";
 
         ImGuiMCP::SetNextItemWidth(200.0f);
-        ImGuiMCP::InputText("Search", searchBuf, sizeof(searchBuf));
+        ImGuiMCP::InputText("Search", selectionSearchBuf, sizeof(selectionSearchBuf));
         ImGuiMCP::SameLine();
         ImGuiMCP::SetNextItemWidth(200.0f);
         if (ImGuiMCP::BeginCombo("##FilterType", listType.c_str())) {
@@ -304,22 +314,22 @@ namespace SPIDUI {
 		ImGuiMCP::Text(": Type Filter");
         ImGuiMCP::SameLine();
         ImGuiMCP::SetNextItemWidth(150.0f);
-        if (ImGuiMCP::BeginCombo("##Plugin", pluginFilter.c_str())) {
-            if (ImGuiMCP::Selectable("All Plugins", pluginFilter == "All")) pluginFilter = "All";
+        if (ImGuiMCP::BeginCombo("##Plugin", selectionPluginFilter.c_str())) {
+            if (ImGuiMCP::Selectable("All Plugins", selectionPluginFilter == "All")) selectionPluginFilter = "All";
             std::set<std::string> plugins;
             for (const auto& item : *sourceList) if (!item.pluginName.empty()) plugins.insert(item.pluginName);
-            for (const auto& p : plugins) if (ImGuiMCP::Selectable(p.c_str(), pluginFilter == p)) pluginFilter = p;
+            for (const auto& p : plugins) if (ImGuiMCP::Selectable(p.c_str(), selectionPluginFilter == p)) selectionPluginFilter = p;
             ImGuiMCP::EndCombo();
         }
         ImGuiMCP::SameLine();
         ImGuiMCP::Text(": Plugin Filter");
         
-        std::string search(searchBuf);
+        std::string search(selectionSearchBuf);
         std::transform(search.begin(), search.end(), search.begin(), ::tolower);
 
         std::vector<size_t> filteredIndices;
         for (size_t i = 0; i < list.size(); i++) {
-            if (pluginFilter != "All" && list[i].pluginName != pluginFilter) continue;
+            if (selectionPluginFilter != "All" && list[i].pluginName != selectionPluginFilter) continue;
             if (!search.empty()) {
                 std::string n = list[i].name; std::transform(n.begin(), n.end(), n.begin(), ::tolower);
                 std::string e = list[i].editorID; std::transform(e.begin(), e.end(), e.begin(), ::tolower);
@@ -516,6 +526,7 @@ namespace SPIDUI {
                     continue;
                 }
                 if (ImGuiMCP::Button("Add Rewards")) {
+                    ResetSelectionState();
                     isPickingReward = true;
                     activeGroupIdx = static_cast<int>(gIdx);
                 }
@@ -638,13 +649,25 @@ namespace SPIDUI {
         //ImGuiMCP::Text("Alvos: %d selecionados", rule.filterFormIDs.size());
 
         if (ImGuiMCP::Button("Manage Targets")) {
+            ResetSelectionState();
             activeRuleID = rule.id;
             openTargetsModal = true;
         }
         ImGuiMCP::SameLine();
         if (ImGuiMCP::Button("Manage Blacklist")) {
+            ResetSelectionState();
             activeRuleID = rule.id;
             openBlacklistModal = true;
+        }
+        ImGuiMCP::SameLine();
+        bool modified = rule.IsModified();
+
+        if (ImGuiMCP::Button("Preview Affected NPCs")) {
+            activeRuleID = rule.id;
+            activeGroupIdx = -1;
+            previewnpc = true;
+            lastPreviewID = "";
+            affectedCache.clear();
         }
         ImGuiMCP::Separator();
 
@@ -662,13 +685,16 @@ namespace SPIDUI {
             openRewardsModal = true;
         }
         ImGuiMCP::SameLine();
-        //if (ImGuiMCP::Button("Preview Affected NPCs")) {
-        //    activeRuleID = rule.id;
-        //    activeGroupIdx = -1;
-        //    previewnpc = true;
-        //    //lastPreviewID = "";
-        //    //affectedCache.clear();
-        //}
+        
+        if (!modified) {
+            ImGuiMCP::SameLine();
+            if (ImGuiMCP::Button("Export (.zip)")) {
+                RuleManager::GetSingleton()->ExportRule(rule);
+            }
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip("Creates a ZIP file in 'Data/SKSE/Plugins/EDF/Exports' with the correct folder structure.");
+            }
+        }
         ImGuiMCP::PopID();
     }
 

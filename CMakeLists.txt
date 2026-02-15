@@ -67,6 +67,8 @@ source_group(
 
 set(BUILD_TESTS OFF)
 include(${COMMONLIB_SRC_DIR}/cmake/CommonLibSSE.cmake)
+find_package(miniz CONFIG REQUIRED)
+
 
 add_commonlibsse_plugin(
   ${PROJECT_NAME}
@@ -82,6 +84,11 @@ target_include_directories(
 	${CLIB_UTILS_QTR_INCLUDE_DIRS}
     ${SKSE_MCP_INCLUDE_DIRS}
 	${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(
+    ${PROJECT_NAME}
+    PRIVATE
+    miniz::miniz
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE IS_HOST_PLUGIN)

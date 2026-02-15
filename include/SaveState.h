@@ -121,26 +121,19 @@ public:
 private:
     // Nota: Como a função original é 'const', o ponteiro 'this' também deve ser const
     static bool Hook_ShouldBackgroundClone(const RE::TESObjectREFR* a_this) {
-        // Chama a função original
-        auto npcConst = const_cast<RE::Actor*>(a_this->As<RE::Actor>());
-        if (npcConst && !npcConst->IsDead() && npcConst != RE::PlayerCharacter::GetSingleton()) {
-            // 1. MELHORIA: Verificação rápida antes de entrar na lógica pesada
-            auto baseNPC = npcConst->GetActorBase();
-
+        auto actor = const_cast<RE::Actor*>(a_this->As<RE::Actor>());
+        if (actor && !actor->IsDead() && actor != RE::PlayerCharacter::GetSingleton()) {
+            auto baseNPC = actor->GetActorBase();
             if (baseNPC) {
-                const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
-                // Se o FormID do NPC Base não estiver no banco de dados, ignoramos o ator imediatamente
-                if (affectedDB.find(baseNPC->GetFormID()) == affectedDB.end()) {
-                    EquipBestInventoryItems(npcConst);
-                    logger::debug("sem rules para aplicar para {}", npcConst->GetName());
+                // USAR O NOVO HELPER: Ele verifica o NPC e o Template dele no banco de dados
+                if (!RuleManager::GetSingleton()->IsAffected(actor)) {
+                    //EquipBestInventoryItems(actor);
                     return _ShouldBackgroundClone(a_this);
                 }
-                logger::debug("Rules encontradas para {}, iniciando processo de aplicacao.", npcConst->GetName());
-                // Se chegou aqui, o NPC tem regras potenciais
-                ApplyRulesToInstance(npcConst);
 
+                logger::debug("Rules encontradas para {} (ou seu Template), aplicando.", actor->GetName());
+                ApplyRulesToInstance(actor);
             }
-
         }
 
         return _ShouldBackgroundClone(a_this);
@@ -176,7 +169,7 @@ public:
                 const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
                 // Se o FormID do NPC Base não estiver no banco de dados, ignoramos o ator imediatamente
                 if (affectedDB.find(baseNPC->GetFormID()) == affectedDB.end()) {
-                    EquipBestInventoryItems(npcConst);
+                    //EquipBestInventoryItems(npcConst);
                     logger::debug("sem rules para aplicar para {}", npcConst->GetName());
                     return RE::BSEventNotifyControl::kContinue;
                 }
@@ -217,7 +210,7 @@ public:
 
         // 1. Aplicar regras ao próprio Player
         auto player = RE::PlayerCharacter::GetSingleton();
-        if (player) {
+        if (player && !player->IsInCombat()) {
             logger::debug("[LevelUp] Verificando regras para o Player.");
             ApplyRulesToInstance(player);
         }
@@ -233,15 +226,9 @@ public:
 
                     // Pula o player (já processado acima) e mortos
                     if (npc && npc != player && !npc->IsDead()) {
-                        auto baseNPC = npc->GetActorBase();
-                        if (baseNPC) {
-                            const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
-
-                            // Verifica se este NPC específico está no banco de dados de regras
-                            if (affectedDB.find(baseNPC->GetFormID()) != affectedDB.end()) {
-                                logger::debug("[LevelUp] NPC '{}' detectado próximo. Aplicando regras.", npc->GetName());
-                                ApplyRulesToInstance(npc);
-                            }
+                        if (RuleManager::GetSingleton()->IsAffected(npc)) {
+                            logger::debug("[LevelUp] NPC '{}' detectado com regras aplicáveis. Aplicando.", npc->GetName());
+                            ApplyRulesToInstance(npc);
                         }
                     }
                 }
@@ -260,6 +247,42 @@ public:
         }
         else {
             logger::error("Falha ao obter RE::LevelIncrease::GetEventSource()!");
+        }
+    }
+};
+
+class CombatEventHandler : public RE::BSTEventSink<RE::TESCombatEvent> {
+public:
+    static CombatEventHandler* GetSingleton() {
+        static CombatEventHandler singleton;
+        return &singleton;
+    }
+
+    // Flag para controlar se o player deve receber itens após o combate
+    bool pendingPlayerUpdate = false;
+
+    RE::BSEventNotifyControl ProcessEvent(const RE::TESCombatEvent* a_event, RE::BSTEventSource<RE::TESCombatEvent>*) override {
+        if (!a_event || !a_event->actor || !a_event->actor->IsPlayer()) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        switch (a_event->newState.get()) {
+        case RE::ACTOR_COMBAT_STATE::kNone:
+            auto player = RE::PlayerCharacter::GetSingleton();
+            if (player) {
+                ApplyRulesToInstance(player);
+            }
+        }
+
+
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    static void Register() {
+        auto scriptEventSourceHolder = RE::ScriptEventSourceHolder::GetSingleton();
+        if (scriptEventSourceHolder) {
+            scriptEventSourceHolder->AddEventSink(GetSingleton());
+            logger::info("CombatEventHandler registrado.");
         }
     }
 };
