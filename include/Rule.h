@@ -13,6 +13,7 @@ struct Reward {
     std::string formIDStr;  // e.g. "Skyrim.esm|D8D4E" (Plugin|FormID) or "D8D4E" (FormID only - unsafe without plugin)
     uint32_t amount = 1;
     float chanceReward = 100.0f;
+    bool isSleepOutfit = false;
     //bool lootable = true;
     // Helper to separate Plugin | FormID
     std::pair<std::string, RE::FormID> ParseFormID() const;
@@ -21,6 +22,7 @@ struct Reward {
 struct RewardGroup {
     std::string name = "New Group";
     bool isExclusive = false; // Modo Rolagem: Independente vs Exclusivo
+    float chanceGroup = 100.0f;
     std::vector<Reward> rewards;
 };
 
@@ -41,12 +43,14 @@ void from_json(const json& j, BlacklistFilter& p);
 struct Rule {
     std::string id;
     std::string name;
+    bool isEnabled = true;
     std::string type = "NPC";
     int level = 1;
     int version = 0;
     // Novos campos de Alvos (Substituem type e filterFormIDs)
     int targetGender = 0;
     bool targetRequiresAll = false;
+    bool isExclusive = false;
     std::vector<BlacklistFilter> targetFilters; // Usando a mesma struct de filtro
     std::vector<RewardGroup> rewardGroups;
 
@@ -59,6 +63,7 @@ struct Rule {
     // Calcula um hash baseado no conteúdo estrutural da regra
     std::string CalculateHash() const {
         nlohmann::json j;
+        j["enabled"] = isEnabled;
         j["name"] = name;
         j["level"] = level;
         j["t_gender"] = targetGender;
@@ -68,6 +73,8 @@ struct Rule {
         j["b_gender"] = blacklistedGender;
         j["b_reqAll"] = blacklistRequiresAll;
         j["b_filters"] = blacklistFilters;
+        j["isExclusive"] = isExclusive; // Adicionar ao hash para detectar mudanças
+        for (auto& g : rewardGroups) j["g_chance_" + g.name] = g.chanceGroup;
         return std::to_string(std::hash<std::string>{}(j.dump()));
     }
 

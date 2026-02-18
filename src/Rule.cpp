@@ -76,6 +76,7 @@ void to_json(json& j, const Reward& p) {
         {"FormID", p.formIDStr},
         {"Amount", p.amount},
         {"Chance", p.chanceReward},
+        {"isSleepOutfit", p.isSleepOutfit}
         //{"Lootable", p.lootable} 
     };
 }
@@ -85,16 +86,23 @@ void from_json(const json& j, Reward& p) {
     j.at("FormID").get_to(p.formIDStr);
     p.amount = j.value("Amount", 1);
     p.chanceReward = j.value("Chance", 100.0f);
+    p.isSleepOutfit = j.value("isSleepOutfit", false);
     //p.lootable = j.value("Lootable", true); 
 }
 
 void to_json(json& j, const RewardGroup& p) {
-    j = json{ {"name", p.name}, {"exclusive", p.isExclusive}, {"rewards", p.rewards} };
+    j = json{
+        {"name", p.name},
+        {"exclusive", p.isExclusive},
+        {"chanceGroup", p.chanceGroup}, 
+        {"rewards", p.rewards}
+    };
 }
 
 void from_json(const json& j, RewardGroup& p) {
     j.at("name").get_to(p.name);
     j.at("exclusive").get_to(p.isExclusive);
+    p.chanceGroup = j.value("chanceGroup", 100.0f);
     j.at("rewards").get_to(p.rewards);
 }
 
@@ -110,19 +118,23 @@ void from_json(const json& j, BlacklistFilter& p) {
 // Atualize o to_json e from_json da Rule:
 void to_json(json& j, const Rule& p) {
     j = json{
-        {"id", p.id}, {"name", p.name}, {"level", p.level}, {"version", p.version},
+        {"id", p.id}, {"name", p.name},
+        {"enabled", p.isEnabled},
+        {"level", p.level}, {"version", p.version},
         {"targetGender", p.targetGender},
         {"targetRequiresAll", p.targetRequiresAll},
         {"targetFilters", p.targetFilters},
         {"RewardGroups", p.rewardGroups},
         {"blacklistedGender", p.blacklistedGender},
         {"blacklistRequiresAll", p.blacklistRequiresAll},
-        {"blacklistFilters", p.blacklistFilters}
+        {"blacklistFilters", p.blacklistFilters},
+        {"ruleExclusive", p.isExclusive}
     };
 }
 
 void from_json(const json& j, Rule& p) {
     j.at("id").get_to(p.id);
+    p.isEnabled = j.value("enabled", true);
     p.name = j.value("name", "Sem Nome");
     p.level = j.value("level", 1);
     p.version = j.value("version", 1);
@@ -133,6 +145,7 @@ void from_json(const json& j, Rule& p) {
     p.blacklistedGender = j.value("blacklistedGender", 0);
     p.blacklistRequiresAll = j.value("blacklistRequiresAll", false);
     if (j.contains("blacklistFilters")) j.at("blacklistFilters").get_to(p.blacklistFilters);
+    p.isExclusive = j.value("ruleExclusive", false);
     p.lastSavedHash = p.CalculateHash();
 }
 
@@ -474,64 +487,46 @@ std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, cons
     std::string npcName = npc->GetName();
     logger::debug("[Sorteio] --- Iniciando processamento para: {} (Regra: {}) ---", npcName, rule.name);
 
-    for (const auto& group : rule.rewardGroups) {
-        if (group.rewards.empty()) {
-            logger::debug("  [Grupo: {}] Vazio, pulando.", group.name);
-            continue;
-        }
-
+    auto processGroup = [&](const RewardGroup& group) {
         if (group.isExclusive) {
-            // Lógica de Sorteio Único (Exclusivo)
             float roll = GetRandomFloat(0.0f, 100.0f);
             float cumulative = 0.0f;
-            bool found = false;
-
-            logger::debug("  [Grupo Exclusivo: {}] Roll: {:.2f}/100.00", group.name, roll);
-
             for (const auto& reward : group.rewards) {
-                float startRange = cumulative;
                 cumulative += reward.chanceReward;
-
-                // Busca o nome do item para o log
-                auto [plugin, fID] = reward.ParseFormID();
-                auto form = RE::TESForm::LookupByID(fID);
-                std::string itemName = form ? form->GetName() : reward.formIDStr;
-
-                logger::debug("    - Item: {} | Range: {:.2f} a {:.2f}", itemName, startRange, cumulative);
-
-                if (!found && roll <= cumulative) {
-                    logger::debug("      >> SELECIONADO: {:.2f} caiu dentro do range!", roll);
-                    applicable.push_back(reward);
-                    found = true;
-                    // Não damos 'break' aqui se você quiser ver o log dos outros ranges, 
-                    // mas a lógica garante que apenas o primeiro que satisfaz a condição é pego.
-                }
+                if (roll <= cumulative) { applicable.push_back(reward); break; }
             }
-            if (!found) logger::debug("    - Nenhum item selecionado (Roll foi maior que a soma total).");
         }
         else {
-            // Lógica de Sorteio Independente
-            logger::debug("  [Grupo Independente: {}]", group.name);
             for (const auto& reward : group.rewards) {
-                float roll = GetRandomFloat(0.0f, 100.0f);
+                if (GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) applicable.push_back(reward);
+            }
+        }
+        };
 
-                auto [plugin, fID] = reward.ParseFormID();
-                auto form = RE::TESForm::LookupByID(fID);
-                std::string itemName = form ? form->GetName() : reward.formIDStr;
-
-                bool success = (roll <= reward.chanceReward);
-                logger::debug("    - Item: {} | Roll: {:.2f} vs Chance: {:.2f} | {}",
-                    itemName, roll, reward.chanceReward, success ? "SUCESSO" : "FALHA");
-
-                if (success) {
-                    applicable.push_back(reward);
-                }
+    if (rule.isExclusive) {
+        // LÓGICA: Escolhe apenas UM grupo da regra baseado nas chances
+        float roll = GetRandomFloat(0.0f, 100.0f);
+        float cumulative = 0.0f;
+        for (const auto& group : rule.rewardGroups) {
+            cumulative += group.chanceGroup;
+            if (roll <= cumulative) {
+                logger::debug("  >> Grupo Selecionado Exclusivamente: {}", group.name);
+                processGroup(group);
+                break;
             }
         }
     }
-    logger::debug("[Sorteio] --- Fim do processamento para {} ---\n", npcName);
+    else {
+        // LÓGICA: Testa cada grupo independentemente
+        for (const auto& group : rule.rewardGroups) {
+            if (GetRandomFloat(0.0f, 100.0f) <= group.chanceGroup) {
+                processGroup(group);
+            }
+        }
+    }
     return applicable;
 }
+
 
 void RuleManager::InitializeAffectedNPCsDatabase() {
     _affectedNPCsDatabase.clear();
@@ -545,10 +540,8 @@ void RuleManager::InitializeAffectedNPCsDatabase() {
         if (!npc) continue;
 
         AffectedNPC affectedInfo;
-        affectedInfo.npcFormID = npcInfo.formID;
-        affectedInfo.npcName = npc->GetName();
-
         for (const auto& rule : rules) {
+            if (!rule.isEnabled) continue;
             // Verifica se o NPC passa nos filtros de Target e não está na Blacklist
             if (IsNPCMatchingTargets(npc, rule, false) && !IsNPCMatchingTargets(npc, rule, true)) {
                 affectedInfo.ruleIDs.push_back(rule.id);

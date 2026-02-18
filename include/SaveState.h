@@ -102,7 +102,7 @@ private:
 
 void EquipBestInventoryItems(RE::Actor* a_actor);
 
-void ApplyRulesToInstance(RE::Actor* a_actor);
+void ApplyRulesToInstance(RE::Actor* a_actor,int a_forcedLevel = -1);
 
 
 
@@ -211,8 +211,8 @@ public:
         // 1. Aplicar regras ao próprio Player
         auto player = RE::PlayerCharacter::GetSingleton();
         if (player && !player->IsInCombat()) {
-            logger::debug("[LevelUp] Verificando regras para o Player.");
-            ApplyRulesToInstance(player);
+            //logger::debug("[LevelUp] Verificando regras para o Player.");
+            ApplyRulesToInstance(player, static_cast<int>(a_event->newLevel));
         }
 
         // 2. Aplicar regras aos NPCs carregados (próximos)
@@ -270,6 +270,7 @@ public:
         case RE::ACTOR_COMBAT_STATE::kNone:
             auto player = RE::PlayerCharacter::GetSingleton();
             if (player) {
+                logger::info("saiu de combate");
                 ApplyRulesToInstance(player);
             }
         }

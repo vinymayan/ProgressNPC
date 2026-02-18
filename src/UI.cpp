@@ -212,7 +212,7 @@ namespace SPIDUI {
         // --- SISTEMA DE CACHE PARA O MODO "SELECTED" ---
         static std::vector<InternalFormInfo> rewardAllCache;
         static std::vector<InternalFormInfo> filterAllCache;
-        
+
         static std::string lastSearch = "";
         static std::string lastPluginFilter = "";
         static std::string lastListType = "";
@@ -222,8 +222,8 @@ namespace SPIDUI {
 
         std::vector<size_t>& currentCache = isRewardMode ? rewardFilteredIndices : blacklistFilteredIndices;
 
-        
-        
+
+
         ImGuiMCP::SetNextItemWidth(200.0f);
         if (ImGuiMCP::InputText("Search", selectionSearchBuf, sizeof(selectionSearchBuf))) needsRebuildFiltered = true;
 
@@ -338,7 +338,7 @@ namespace SPIDUI {
         // 3. PROCESSAMENTO DO FILTRO (Apenas se necessário)
         if (needsRebuildFiltered || lastListType != listType) {
             currentCache.clear();
-            
+
             std::string searchStr = selectionSearchBuf;
             std::transform(searchStr.begin(), searchStr.end(), searchStr.begin(), ::tolower);
 
@@ -357,24 +357,25 @@ namespace SPIDUI {
             needsRebuildFiltered = false;
             logger::info("[UI] Filtro Rebuilt: {} itens para tipo {}", currentCache.size(), listType);
         }
-        logger::debug("DrawSelectionTable: ListType: {}, SourceSize: {}, CacheSize: {}",
-            listType, sourceList->size(), currentCache.size());
+
 
         ImGuiMCP::ImVec2 avail;
         ImGuiMCP::GetContentRegionAvail(&avail);
         float largura = avail.x;
         // No ImGuiMCP, usamos GetScrollY e o tamanho da região visível para definir o range
-        
+
         float tableHeight = avail.y; // Mesma altura definida no BeginTable
         // 4. TABELA COM IMGUILISTCLIPPER
         bool showTypeColumn = (listType == "All" || listType == "Selected");
-        int columns = isRewardMode ? (showTypeColumn ? 7 : 6) : (showTypeColumn ? 5 : 4);
+        int columns = 4; // Active, FormID, Name, Plugin
+        if (showTypeColumn) columns += 1; // Type
+        if (isRewardMode)   columns += 3; // Qty, Chance, Sleep
 
         auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg |
             ImGuiMCP::ImGuiTableFlags_Resizable | ImGuiMCP::ImGuiTableFlags_ScrollY;
         const float rowHeight = 24.0f;
         if (ImGuiMCP::BeginTable("SelectionTable", columns, tableFlags, { 0, tableHeight })) {
-            ImGuiMCP::TableSetupColumn("Active", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 40.0f);
+            ImGuiMCP::TableSetupColumn("Active", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
             ImGuiMCP::TableSetupColumn("FormID", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
             ImGuiMCP::TableSetupColumn("Name", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             if (showTypeColumn) ImGuiMCP::TableSetupColumn("Type", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
@@ -382,10 +383,11 @@ namespace SPIDUI {
             if (isRewardMode) {
                 ImGuiMCP::TableSetupColumn("Qty", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
                 ImGuiMCP::TableSetupColumn("Chance", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                ImGuiMCP::TableSetupColumn("Sleep", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
             }
             ImGuiMCP::TableHeadersRow();
             int totalItems = static_cast<int>(currentCache.size());
-            logger::debug("valor de total itens: {}", totalItems);
+            //logger::debug("valor de total itens: {}", totalItems);
             static auto clipper = ImGuiMCP::ImGuiListClipperManager::Create();
             ImGuiMCP::ImGuiListClipperManager::Begin(clipper, (int)currentCache.size(), -1.0f);
 
@@ -429,20 +431,39 @@ namespace SPIDUI {
 
                     ImGuiMCP::TableSetColumnIndex(1); ImGuiMCP::Text("%08X", item.formID);
                     ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::TextUnformatted(item.GetDisplayName().c_str());
-                    ImGuiMCP::TableSetColumnIndex(3); ImGuiMCP::TextUnformatted(item.formType.c_str());
-                    ImGuiMCP::TableSetColumnIndex(4); ImGuiMCP::TextUnformatted(item.pluginName.c_str());
+                    int nextCol = 3; // Começamos a controlar o índice dinamicamente
+
+                    if (showTypeColumn) {
+                        ImGuiMCP::TableSetColumnIndex(nextCol++);
+                        ImGuiMCP::TextUnformatted(item.formType.c_str());
+                    }
+
+                    ImGuiMCP::TableSetColumnIndex(nextCol++);
+                    ImGuiMCP::TextUnformatted(item.pluginName.c_str());
 
                     if (isRewardMode && targetGroup) {
-                        auto it = std::find_if(targetGroup->rewards.begin(), targetGroup->rewards.end(), [&](const Reward& r) { return r.formIDStr == internalID; });
+                        auto it = std::find_if(targetGroup->rewards.begin(), targetGroup->rewards.end(), [&](const Reward& r) {
+                            return r.formIDStr == internalID;
+                            });
+
                         if (it != targetGroup->rewards.end()) {
-                            ImGuiMCP::TableSetColumnIndex(5);
+                            // Usa o nextCol para garantir que estamos na coluna certa (5 e 6 ou 4 e 5)
+                            ImGuiMCP::TableSetColumnIndex(nextCol++);
                             ImGuiMCP::SetNextItemWidth(-1.0f);
                             int val = (int)it->amount;
                             if (ImGuiMCP::InputInt(("##q" + internalID).c_str(), &val, 0, 0)) it->amount = (uint32_t)val;
 
-                            ImGuiMCP::TableSetColumnIndex(6);
+                            ImGuiMCP::TableSetColumnIndex(nextCol++);
                             ImGuiMCP::SetNextItemWidth(-1.0f);
                             ImGuiMCP::InputFloat(("##c" + internalID).c_str(), &it->chanceReward, 0, 0, "%.1f");
+
+                            ImGuiMCP::TableSetColumnIndex(nextCol++);
+                            if (item.formType == "Outfit") {
+                                ImGuiMCP::Checkbox(("##slp" + internalID).c_str(), &it->isSleepOutfit);
+                            }
+                            else {
+                                ImGuiMCP::TextDisabled("-");
+                            }
                         }
                     }
                 }
@@ -457,9 +478,20 @@ namespace SPIDUI {
         ImGuiMCP::SameLine();
 
         if (ImGuiMCP::Button("+ New Group")) {
-            rule.rewardGroups.push_back({ "New Group", false, {} });
+            rule.rewardGroups.push_back({ "New Group", false, 100.0f, {} });
         }
+        if (rule.isExclusive) {
+            float totalGroupsChance = 0.0f;
+            for (const auto& g : rule.rewardGroups) totalGroupsChance += g.chanceGroup;
 
+            ImGuiMCP::SameLine();
+            if (totalGroupsChance > 100.0f) {
+                ImGuiMCP::TextColored({ 1.0f, 0.0f, 0.0f, 1.0f }, " [!] Group Sum: %.1f%% (Exceeds 100%%)", totalGroupsChance);
+            }
+            else {
+                ImGuiMCP::TextDisabled(" | Group Sum: %.1f%%", totalGroupsChance);
+            }
+        }
         ImGuiMCP::Separator();
 
         for (size_t gIdx = 0; gIdx < rule.rewardGroups.size(); gIdx++) {
@@ -473,7 +505,7 @@ namespace SPIDUI {
 
             if (ImGuiMCP::CollapsingHeader(headerLabel.c_str())) {
                 ImGuiMCP::Indent();
-
+                
                 char nameBuf[64];
                 strcpy_s(nameBuf, group.name.c_str());
                 ImGuiMCP::SetNextItemWidth(200.0f);
@@ -486,7 +518,13 @@ namespace SPIDUI {
                     ImGuiMCP::PopID();
                     continue;
                 }
-                if (ImGuiMCP::Button("Add Rewards")) {
+                ImGuiMCP::SetNextItemWidth(200.0f);
+                if (ImGuiMCP::InputFloat("Activation Chance (%)", &group.chanceGroup, 1.0f, 10.0f, "%.1f")) {
+                    // Clamping para garantir que o valor fique entre 0 e 100
+                    if (group.chanceGroup < 0.0f) group.chanceGroup = 0.0f;
+                    if (group.chanceGroup > 100.0f) group.chanceGroup = 100.0f;
+                }
+                if (ImGuiMCP::Button("Manage Rewards")) {
                     ResetSelectionState();
                     isPickingReward = true;
                     activeGroupIdx = static_cast<int>(gIdx);
@@ -508,35 +546,56 @@ namespace SPIDUI {
 
                 // --- Tabela de Visualização de Rewards ---
                 auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg | ImGuiMCP::ImGuiTableFlags_Resizable;
-                if (ImGuiMCP::BeginTable("GroupRewardsSummary", 4, tableFlags)) {
+                if (ImGuiMCP::BeginTable("GroupRewardsSummary", 6, tableFlags)) {
                     ImGuiMCP::TableSetupColumn("Type", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
                     ImGuiMCP::TableSetupColumn("Reward", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
                     ImGuiMCP::TableSetupColumn("Qty", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 50.0f);
                     ImGuiMCP::TableSetupColumn("Chance", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                    ImGuiMCP::TableSetupColumn("Sleep", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 45.0f);
+                    ImGuiMCP::TableSetupColumn("Action", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 40.0f);
                     ImGuiMCP::TableHeadersRow();
 
-                    for (const auto& r : group.rewards) {
+                    for (size_t rIdx = 0; rIdx < group.rewards.size(); ++rIdx) {
+                        auto& r = group.rewards[rIdx];
                         ImGuiMCP::TableNextRow();
+
+                        // Coluna 0: Tipo
                         ImGuiMCP::TableSetColumnIndex(0); ImGuiMCP::Text(r.typeReward.c_str());
+
+                        // Coluna 1: Nome/ID
                         ImGuiMCP::TableSetColumnIndex(1);
                         auto [plugin, fID] = r.ParseFormID();
                         auto form = RE::TESForm::LookupByID(fID);
-
                         if (form) {
                             std::string dName = "";
-                            if (auto fullName = form->As<RE::TESFullName>()) {
-                                dName = fullName->GetFullName();
-                            }
-                            if (dName.empty()) {
-                                dName = clib_util::editorID::get_editorID(form);
-                            }
+                            if (auto fullName = form->As<RE::TESFullName>()) dName = fullName->GetFullName();
+                            if (dName.empty()) dName = clib_util::editorID::get_editorID(form);
                             ImGuiMCP::Text(dName.empty() ? r.formIDStr.c_str() : dName.c_str());
                         }
                         else {
                             ImGuiMCP::TextDisabled(r.formIDStr.c_str());
                         }
+
+                        // Coluna 2: Quantidade
                         ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text("%d", r.amount);
+
+                        // Coluna 3: Chance
                         ImGuiMCP::TableSetColumnIndex(3); ImGuiMCP::Text("%.1f%%", r.chanceReward);
+
+                        ImGuiMCP::TableSetColumnIndex(4);
+                        if (r.typeReward == "Outfit") {
+                            ImGuiMCP::Checkbox(("##slpsum" + std::to_string(rIdx)).c_str(), &r.isSleepOutfit);
+                        }
+                        else {
+                            ImGuiMCP::TextDisabled("-");
+                        }
+
+                        // Coluna 4: Ação de Remover (Botão X)
+                        ImGuiMCP::TableSetColumnIndex(5);
+                        if (ImGuiMCP::Button(("X##r" + std::to_string(rIdx)).c_str())) {
+                            group.rewards.erase(group.rewards.begin() + rIdx);
+                            break; // Interrompe o frame para evitar erro de índice após remoção
+                        }
                     }
                     ImGuiMCP::EndTable();
                 }
@@ -590,7 +649,11 @@ namespace SPIDUI {
 
     void RenderRuleEditor(Rule& rule) {
         ImGuiMCP::PushID(rule.id.c_str());
+        if (ImGuiMCP::Checkbox("Rule Enabled", &rule.isEnabled)) {
+            // Opcional: Você pode forçar um save ou apenas deixar o hash detectar
+        }
 
+        ImGuiMCP::SameLine();
         char nameBuf[256];
         strcpy_s(nameBuf, rule.name.c_str());
         if (ImGuiMCP::InputText("Rule Name", nameBuf, sizeof(nameBuf),
@@ -631,21 +694,31 @@ namespace SPIDUI {
             affectedCache.clear();
         }
         ImGuiMCP::Separator();
-
+        
+        ImGuiMCP::Separator();
         // Rewards Section (Redirecionada para RewardGroups)
         int totalRewards = 0;
-        for (const auto& g : rule.rewardGroups) totalRewards += (int)g.rewards.size();
+        float groupTotal = 0.0f;
+        for (const auto& g : rule.rewardGroups) {
+            totalRewards += (int)g.rewards.size();
+            groupTotal += g.chanceGroup;
+        }
 
         ImGuiMCP::Text("Groups: %d | Total Items: %d", rule.rewardGroups.size(), totalRewards);
+        ImGuiMCP::Checkbox("Exclusive Groups (Pick only one group from this rule)", &rule.isExclusive);
+        if (rule.isExclusive) {
+            ImGuiMCP::SameLine();
+            if (groupTotal > 100.0f) ImGuiMCP::TextColored({ 1,0,0,1 }, "(Sum: %.1f%% !)", groupTotal);
+            else ImGuiMCP::TextDisabled("(Sum: %.1f%%)", groupTotal);
+        }
 
-
-        if (ImGuiMCP::Button("Manage Rewards")) {
+        if (ImGuiMCP::Button("Manage Groups")) {
             activeRuleID = rule.id;
             activeGroupIdx = -1;
             isPickingReward = false;
             openRewardsModal = true;
         }
-        ImGuiMCP::SameLine();
+
         
         if (!modified) {
             ImGuiMCP::SameLine();
@@ -723,35 +796,40 @@ namespace SPIDUI {
                 if (!matchesFilter) continue;
             }
 
-            // Verifica se a regra foi modificada para adicionar um marcador visual
             bool modified = rule.IsModified();
-            std::string label = rule.name + " [V:" + std::to_string(rule.version) + "]";
-
-            if (modified) {
-                label += " (Need save)"; // Indicador visual de modificação
+            std::string label = rule.name;
+            if (!rule.isEnabled) { label = "[OFF] " + label; }
+            else if (rule.isEnabled && modified) {
+                label += " (Need save)";
             }
-            label += "###" + rule.id;
 
-            // Se modificada, muda a cor do cabeçalho para destacar
-            if (modified) {
-                ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Header, { 0.4f, 0.3f, 0.1f, 1.0f }); // Tom alaranjado/marrom
+            
+            label += " [V:" + std::to_string(rule.version) + "]###" + rule.id;
+
+            // --- Lógica de Cor do Header e Texto ---
+            bool stylePushed = false;
+            if (!rule.isEnabled) {
+                // Escurece o cabeçalho e o texto se estiver OFF
+                ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Text, { 0.5f, 0.5f, 0.5f, 1.0f }); // Cinza
+                ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Header, { 0.1f, 0.1f, 0.1f, 1.0f }); // Dark
+                stylePushed = true;
+            }
+            else if (modified) {
+                ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Header, { 0.4f, 0.3f, 0.1f, 1.0f }); // Laranja (Save)
+                stylePushed = true;
             }
 
             if (ImGuiMCP::CollapsingHeader(label.c_str())) {
-                if (modified) ImGuiMCP::PopStyleColor(); // Remove a cor se abrir o header
-
+                if (stylePushed) ImGuiMCP::PopStyleColor(rule.isEnabled ? 1 : 2);
                 RenderRuleEditor(rule);
-                
-               
-                // Modal de Preview
-                
                 if (ImGuiMCP::Button(("Delete Rule###btnDel" + rule.id).c_str())) {
                     toDelete = rule.id;
                 }
             }
             else {
-                if (modified) ImGuiMCP::PopStyleColor();
+                if (stylePushed) ImGuiMCP::PopStyleColor(rule.isEnabled ? 1 : 2);
             }
+            
         }
 
         if (!toDelete.empty()) {

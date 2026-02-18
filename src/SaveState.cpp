@@ -165,11 +165,19 @@ void EquipBestInventoryItems(RE::Actor* a_actor)
     logger::debug("[OutfitSync] Equipamento para {}. Verificação completa.", a_actor->GetName());
 }
 
-void ApplyRulesToInstance(RE::Actor* a_actor) {
+struct PendingEquip {
+    RE::TESBoundObject* object;
+    int priority; // 0 para Outfit (Baixa), 1 para Recompensas Individuais (Alta)
+};
+
+void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
     if (!a_actor || a_actor->IsDead()) return;
-    bool isPlayer = a_actor->IsPlayer();
+    bool isPlayer = (a_actor->GetFormID() == 0x00000014) || a_actor->IsPlayer();
+    //logger::info("É o player? {}", isPlayer);
+
     auto baseNPC = a_actor->GetActorBase();
     if (!baseNPC) return;
+
     auto& context = SaveStateManager::GetSingleton()->GetCurrentContext();
     if (!context.isValid) return;
 
@@ -214,14 +222,18 @@ void ApplyRulesToInstance(RE::Actor* a_actor) {
     }
 
     if (rulesToProcess.empty()) return;
-
+    std::vector<PendingEquip> equipQueue;
     for (const auto& ruleID : rulesToProcess) {
         auto& allRules = RuleManager::GetSingleton()->GetRules();
         auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
         if (ruleIt == allRules.end()) continue;
 
         const Rule& currentRule = *ruleIt;
-        if (a_actor->GetLevel() < currentRule.level) continue;
+        if (!currentRule.isEnabled) continue;
+        int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
+        logger::debug("O ator esta no nivel {}", level);
+        if (level < currentRule.level) continue;
+        
 
         int appliedVersion = 0;
         if (session.npcRuleVersions.contains(npcKey) && session.npcRuleVersions[npcKey].contains(ruleID)) {
@@ -301,11 +313,20 @@ void ApplyRulesToInstance(RE::Actor* a_actor) {
                 }
                 else if (reward.typeReward == "Outfit") {
                     if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
-                        for (auto* form : outfit->outfitItems) {
-                            if (!form) continue;
-                            auto* bound = form->As<RE::TESBoundObject>();
-                            if (bound) {
-                                a_actor->AddObjectToContainer(bound, nullptr, 1, nullptr);
+                        if (reward.isSleepOutfit) {
+                            // APLICAÇÃO DE SLEEP OUTFIT
+                            a_actor->SetSleepOutfit(outfit, false);
+                            logger::debug("  [Outfit] Definido como Sleep Outfit: {}", rewardForm->GetName());
+                        }
+                        else {
+                            for (auto* form : outfit->outfitItems) {
+                                if (!form) continue;
+                                auto* bound = form->As<RE::TESBoundObject>();
+                                if (bound) {
+                                    a_actor->AddObjectToContainer(bound, nullptr, 1, nullptr);
+                                    auto actorHandle = a_actor->GetHandle();
+                                    if (!isPlayer) equipQueue.push_back({ bound, 0 });
+                                }
                             }
                         }
                     }
@@ -317,21 +338,31 @@ void ApplyRulesToInstance(RE::Actor* a_actor) {
                         /*if (!reward.lootable) {
                             a_actor->AddObjectToContainer(bound, xList, reward.amount, nullptr);
                         }*/
-                        
-                            a_actor->AddObjectToContainer(bound, nullptr, reward.amount, nullptr);
-                        
-
+                        a_actor->AddObjectToContainer(bound, nullptr, reward.amount, nullptr);
                         if (reward.typeReward == "Weapon" || reward.typeReward == "Armor" || reward.typeReward == "Ammo") {
-                            auto equipManager = RE::ActorEquipManager::GetSingleton();
-                            if (equipManager && !isPlayer) {
-                                equipManager->EquipObject(a_actor, bound, nullptr, 1, nullptr, false, true, false, true);
-                            }
+                            if (!isPlayer) equipQueue.push_back({ bound, 1 });
                         }
                         logger::debug("  [Item] Adicionado: {} (Tipo: {})", rewardForm->GetName(), reward.typeReward);
                     }
                 }
             }
             session.npcRuleVersions[npcKey][ruleID] = currentRule.version;
+        }
+    }
+    if (!equipQueue.empty() && !isPlayer) {
+        auto equipManager = RE::ActorEquipManager::GetSingleton();
+        if (equipManager) {
+            // Ordena: Prioridade 0 (Outfit) primeiro, 1 (Individual) depois.
+            // Assim, o item individual sobrescreve o do outfit no mesmo slot.
+            std::sort(equipQueue.begin(), equipQueue.end(), [](const PendingEquip& a, const PendingEquip& b) {
+                return a.priority < b.priority;
+                });
+
+            for (auto& entry : equipQueue) {
+                logger::debug("  [EquipQueue] Equipando: {} (Prio: {})", entry.object->GetName(), entry.priority);
+                // IMPORTANTE: p_queueEquip (último param) como TRUE é essencial para evitar o ILS
+                equipManager->EquipObject(a_actor, entry.object, nullptr, 1, nullptr, false, true, false, true);
+            }
         }
     }
 }
