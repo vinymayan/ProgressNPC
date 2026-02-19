@@ -8,6 +8,7 @@
 
 
 
+
 struct InternalFormInfo {
     RE::FormID formID;
     std::string editorID;
@@ -31,7 +32,7 @@ public:
     }
 
     void PopulateAllLists();
-
+    static std::string ToUTF8(std::string_view a_str);
     // Data Store: Map of "TypeName" -> List of InternalFormInfo
     // We use this to feed the UI
     const std::vector<InternalFormInfo>& GetList(const std::string& typeName);
@@ -45,7 +46,7 @@ private:
     Manager() = default;
     
     template <typename T>
-    void PopulateList(const std::string& a_typeName);
+    void PopulateList(const std::string& a_typeName, std::function<bool(T*)> a_filter = nullptr);
 
     bool _isPopulated = false;
     std::map<std::string, std::vector<InternalFormInfo>> _dataStore;

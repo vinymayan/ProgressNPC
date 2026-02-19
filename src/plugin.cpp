@@ -33,7 +33,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         //    logger::warn("QuickLootIE não detectado ou falha na API.");
         //}
 
-        //LocationChangeHandler::Register();
+        LocationChangeHandler::Register();
         //HeadPartCreator::TestCreateHeadPart();
         SPIDUI::Register();
     }

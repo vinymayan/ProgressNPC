@@ -76,7 +76,11 @@ namespace SPIDUI {
     }
 
     void RenderTypeFilter() {
-        const std::vector<std::string> options = { "NPC", "Faction", "Keyword", "Race" };
+        const std::vector<std::string> options = {
+        "NPC", "Faction", "Keyword", "Race",
+        "Combat Style", "Voice Type", "Class", "Location",
+        "Hair", "Facial Hair"
+        };
 
         ImGuiMCP::Text("Active Filters:");
         if (activeTypeFilters.empty()) ImGuiMCP::TextDisabled("None (Showing all)");
@@ -147,7 +151,7 @@ namespace SPIDUI {
         }
 
         if (ImGuiMCP::BeginTable(tableName, 4, ImGuiMCP::ImGuiTableFlags_Borders)) {
-            ImGuiMCP::TableSetupColumn("Type", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGuiMCP::TableSetupColumn("Type", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 120.0f);
             ImGuiMCP::TableSetupColumn("Name", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             ImGuiMCP::TableSetupColumn("Identifier", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             ImGuiMCP::TableSetupColumn("Action", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
@@ -169,11 +173,11 @@ namespace SPIDUI {
                             if (auto form = RE::TESForm::LookupByID(actualFormID)) {
                                 // 1. Tenta nome completo (NPC, Faction, Race)
                                 if (auto fullName = form->As<RE::TESFullName>()) {
-                                    resolvedName = fullName->GetFullName();
+                                    resolvedName = Manager::ToUTF8(fullName->GetFullName());
                                 }
                                 // 2. Fallback para EditorID (Keywords ou nomes vazios)
                                 if (resolvedName.empty() || resolvedName == "Not Found") {
-                                    resolvedName = clib_util::editorID::get_editorID(form);
+                                    resolvedName = Manager::ToUTF8(clib_util::editorID::get_editorID(form)); 
                                 }
                                 // 3. Se nada funcionar, exibe o ID local
                                 if (resolvedName.empty()) resolvedName = tokens[1];
@@ -232,7 +236,11 @@ namespace SPIDUI {
         if (ImGuiMCP::BeginCombo("##FilterType", listType.c_str())) {
             std::vector<const char*> options = isRewardMode ?
                 std::vector<const char*>{ "All", "Selected", "Perk", "Spell", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" } :
-                std::vector<const char*>{ "All", "Selected", "NPC", "Faction", "Keyword", "Race" };
+                std::vector<const char*>{
+            "All", "Selected", "NPC", "Faction", "Keyword", "Race",
+            "Combat Style", "Voice Type", "Class", "Location",
+            "Hair", "Facial Hair" 
+            };
 
             for (auto opt : options) {
                 if (ImGuiMCP::Selectable(opt, listType == opt)) {
@@ -257,7 +265,11 @@ namespace SPIDUI {
             }
             else {
                 if (filterAllCache.empty()) {
-                    for (auto& type : { "NPC", "Faction", "Keyword", "Race" }) {
+                    for (auto& type : {
+                        "NPC", "Faction", "Keyword", "Race",
+                        "Combat Style", "Voice Type", "Class", "Location",
+                        "Hair", "Facial Hair"
+                        }) {
                         auto& l = Manager::GetSingleton()->GetList(type);
                         filterAllCache.insert(filterAllCache.end(), l.begin(), l.end());
                     }
@@ -315,7 +327,7 @@ namespace SPIDUI {
             return;
         }
 
-        const auto& list = *sourceList;
+
         static std::string pluginFilter = "All";
 
         ImGuiMCP::SameLine();
@@ -361,7 +373,7 @@ namespace SPIDUI {
 
         ImGuiMCP::ImVec2 avail;
         ImGuiMCP::GetContentRegionAvail(&avail);
-        float largura = avail.x;
+
         // No ImGuiMCP, usamos GetScrollY e o tamanho da região visível para definir o range
 
         float tableHeight = avail.y; // Mesma altura definida no BeginTable
@@ -373,9 +385,9 @@ namespace SPIDUI {
 
         auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg |
             ImGuiMCP::ImGuiTableFlags_Resizable | ImGuiMCP::ImGuiTableFlags_ScrollY;
-        const float rowHeight = 24.0f;
+
         if (ImGuiMCP::BeginTable("SelectionTable", columns, tableFlags, { 0, tableHeight })) {
-            ImGuiMCP::TableSetupColumn("Active", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGuiMCP::TableSetupColumn("Active", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
             ImGuiMCP::TableSetupColumn("FormID", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
             ImGuiMCP::TableSetupColumn("Name", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             if (showTypeColumn) ImGuiMCP::TableSetupColumn("Type", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
@@ -667,7 +679,6 @@ namespace SPIDUI {
             if (rule.level < 1) rule.level = 1;
         }
 		ImGuiMCP::SameLine();
-        auto viewport = ImGuiMCP::GetMainViewport();
 
         // Targets Section
         //ImGuiMCP::Text("Alvos: %d selecionados", rule.filterFormIDs.size());

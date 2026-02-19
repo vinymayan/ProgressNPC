@@ -169,17 +169,70 @@ struct PendingEquip {
     RE::TESBoundObject* object;
     int priority; // 0 para Outfit (Baixa), 1 para Recompensas Individuais (Alta)
 };
+void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
+    if (!a_actor) return;
 
+    for (const auto& group : a_rule.rewardGroups) {
+        for (const auto& reward : group.rewards) {
+            auto [plugin, fID] = reward.ParseFormID();
+            auto rewardForm = RE::TESForm::LookupByID(fID);
+            if (!rewardForm) continue;
+
+            if (reward.typeReward == "Spell") {
+                if (auto spell = rewardForm->As<RE::SpellItem>()) {
+                    a_actor->RemoveSpell(spell);
+                }
+            }
+            else if (reward.typeReward == "Perk") {
+                if (auto perk = rewardForm->As<RE::BGSPerk>()) {
+                    a_actor->RemovePerk(perk);
+                }
+            }
+            else if (reward.typeReward == "Outfit") {
+                // Outfits são complexos de "remover", mas podemos tirar os itens
+                if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
+                    for (auto* form : outfit->outfitItems) {
+                        if (auto* bound = form->As<RE::TESBoundObject>()) {
+                            a_actor->RemoveItem(bound, 1, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+                        }
+                    }
+                }
+            }
+            else {
+                // Itens genéricos (Weapon, Armor, etc)
+                if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
+                    a_actor->RemoveItem(bound, reward.amount, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+                }
+            }
+        }
+    }
+    logger::debug("[LocationUpdate] Regra '{}' desaplicada de {}.", a_rule.name, a_actor->GetName());
+}
 void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
-    if (!a_actor || a_actor->IsDead()) return;
-    bool isPlayer = (a_actor->GetFormID() == 0x00000014) || a_actor->IsPlayer();
-    //logger::info("É o player? {}", isPlayer);
+    if (!a_actor) return;
 
+    // --- LOG DE INÍCIO ---
+    std::string actorName = a_actor->GetName();
+    RE::FormID actorID = a_actor->GetFormID();
+    logger::info("[ApplyRules] INICIANDO processamento para {} (ID: {:08X})", actorName, actorID);
+
+    if (a_actor->IsDead()) {
+        logger::info("[ApplyRules] FINALIZADO: Ator está morto.");
+        return;
+    }
+
+    bool isPlayer = (actorID == 0x00000014) || a_actor->IsPlayer();
     auto baseNPC = a_actor->GetActorBase();
-    if (!baseNPC) return;
+    if (!baseNPC) {
+        logger::info("[ApplyRules] FINALIZADO: BaseNPC não encontrado.");
+        return;
+    }
 
     auto& context = SaveStateManager::GetSingleton()->GetCurrentContext();
-    if (!context.isValid) return;
+    if (!context.isValid) {
+        logger::info("[ApplyRules] FINALIZADO: Contexto de save inválido.");
+        return;
+    }
 
     auto& session = SaveStateManager::GetSingleton()->GetSessionData();
     std::string fileNameStr = "Dynamic";
@@ -187,17 +240,48 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
         fileNameStr = file->GetFilename();
     }
     else if (baseNPC->IsDynamicForm()) {
-        fileNameStr = "Created"; // Para NPCs gerados por scripts/leveled lists
+        fileNameStr = "Created";
     }
 
+    std::string npcKey = fileNameStr + "|" + FormatLocalFormID(actorID, fileNameStr);
 
-    std::string actorName = a_actor->GetName();
-    std::string npcKey = fileNameStr + "|" + FormatLocalFormID(a_actor->GetFormID(), fileNameStr);
+    // --- LÓGICA DE REMOÇÃO DE REGRAS INVÁLIDAS ---
+    if (session.npcRuleVersions.contains(npcKey)) {
+        auto& appliedRulesMap = session.npcRuleVersions[npcKey];
+        auto& allRules = RuleManager::GetSingleton()->GetRules();
+
+        for (auto it = appliedRulesMap.begin(); it != appliedRulesMap.end();) {
+            const std::string& ruleID = it->first;
+            auto ruleDefIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
+
+            bool shouldRemove = false;
+            if (ruleDefIt == allRules.end()) {
+                shouldRemove = true;
+            }
+            else {
+                const Rule& rule = *ruleDefIt;
+                if (!rule.isEnabled ||
+                    !IsNPCMatchingTargets(baseNPC, rule, false, a_actor) ||
+                    IsNPCMatchingTargets(baseNPC, rule, true, a_actor)) {
+                    shouldRemove = true;
+                }
+            }
+
+            if (shouldRemove) {
+                if (ruleDefIt != allRules.end()) {
+                    RemoveRuleRewards(a_actor, *ruleDefIt);
+                }
+                it = appliedRulesMap.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
+    }
 
     const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
 
-
-    // --- NOVA LÓGICA DE COLETA DE REGRAS (3 FONTES) ---
+    // --- COLETA DE REGRAS ---
     std::vector<std::string> rulesToProcess;
     auto addRulesFromID = [&](RE::FormID a_id) {
         if (affectedDB.contains(a_id)) {
@@ -209,19 +293,17 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
         }
         };
 
-    // 1. Regras do ID da Instância (Actor)
-    addRulesFromID(a_actor->GetFormID());
-
-    // 2. Regras do ID do Base NPC
+    addRulesFromID(actorID);
     addRulesFromID(baseNPC->GetFormID());
-
-    // 3. Regras do ID do Template (se houver)
     auto templateBase = a_actor->GetTemplateBase();
-    if (templateBase) {
-        addRulesFromID(templateBase->GetFormID());
+    if (templateBase) addRulesFromID(templateBase->GetFormID());
+
+    if (rulesToProcess.empty()) {
+        logger::info("[ApplyRules] FINALIZADO: Nenhuma regra aplicável para {}", actorName);
+        return;
     }
 
-    if (rulesToProcess.empty()) return;
+    // --- PROCESSAMENTO E APLICAÇÃO ---
     std::vector<PendingEquip> equipQueue;
     for (const auto& ruleID : rulesToProcess) {
         auto& allRules = RuleManager::GetSingleton()->GetRules();
@@ -230,10 +312,14 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 
         const Rule& currentRule = *ruleIt;
         if (!currentRule.isEnabled) continue;
+
+        if (!IsNPCMatchingTargets(baseNPC, currentRule, false, a_actor) ||
+            IsNPCMatchingTargets(baseNPC, currentRule, true, a_actor)) {
+            continue;
+        }
+
         int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
-        logger::debug("O ator esta no nivel {}", level);
         if (level < currentRule.level) continue;
-        
 
         int appliedVersion = 0;
         if (session.npcRuleVersions.contains(npcKey) && session.npcRuleVersions[npcKey].contains(ruleID)) {
@@ -242,89 +328,55 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 
         if (appliedVersion < currentRule.version) {
             std::vector<Reward> rewardsToApply;
-
             if (appliedVersion == 0) {
-                // APLICAÇÃO TOTAL: Primeira vez que o NPC vê esta regra
                 rewardsToApply = RuleManager::GetSingleton()->GetRewardsForSpecificRule(baseNPC, currentRule);
-                logger::debug("[ApplyRules] Aplicando nova regra '{}' v{} em {}", currentRule.name, currentRule.version, actorName);
             }
             else {
-                // ATUALIZAÇÃO INCREMENTAL: Comparar com a versão antiga
+                // Lógica incremental...
                 Rule* oldRule = RuleManager::GetSingleton()->GetRuleVersion(ruleID, appliedVersion);
-
                 if (oldRule) {
-                    logger::debug("[ApplyRules] Atualizando '{}' (v{} -> v{}) em {}", currentRule.name, appliedVersion, currentRule.version, actorName);
-
                     for (const auto& currentGroup : currentRule.rewardGroups) {
-                        // Se o grupo for exclusivo e mudou, não aplicamos incrementalmente para não quebrar a lógica de "um por grupo"
                         if (currentGroup.isExclusive) continue;
-
-                        // Localiza o grupo correspondente na regra antiga por nome
                         auto oldGroupIt = std::find_if(oldRule->rewardGroups.begin(), oldRule->rewardGroups.end(),
                             [&](const RewardGroup& g) { return g.name == currentGroup.name; });
 
                         for (const auto& reward : currentGroup.rewards) {
                             bool isNewReward = true;
                             if (oldGroupIt != oldRule->rewardGroups.end()) {
-                                // Verifica se esse item específico já existia na versão anterior desse grupo
                                 for (const auto& oldReward : oldGroupIt->rewards) {
-                                    if (oldReward.formIDStr == reward.formIDStr) {
-                                        isNewReward = false;
-                                        break;
-                                    }
+                                    if (oldReward.formIDStr == reward.formIDStr) { isNewReward = false; break; }
                                 }
                             }
-
-                            if (isNewReward) {
-                                float roll = RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f);
-                                if (roll <= reward.chanceReward) {
-                                    rewardsToApply.push_back(reward);
-                                    logger::debug("  [+] Novo Reward detectado e sorteado: {}", reward.formIDStr);
-                                }
+                            if (isNewReward && RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
+                                rewardsToApply.push_back(reward);
                             }
                         }
                     }
                 }
                 else {
-                    // Fallback: Se não achar o histórico, aplica tudo (segurança)
                     rewardsToApply = RuleManager::GetSingleton()->GetRewardsForSpecificRule(baseNPC, currentRule);
                 }
             }
 
-            // APLICAÇÃO DOS ITENS (Correção para Misc/Outros tipos)
+            // Aplicação física dos Rewards
             for (const auto& reward : rewardsToApply) {
                 auto [plugin, fID] = reward.ParseFormID();
                 auto rewardForm = RE::TESForm::LookupByID(fID);
                 if (!rewardForm) continue;
 
                 if (reward.typeReward == "Spell") {
-                    if (auto spell = rewardForm->As<RE::SpellItem>()) {
-                        if (!a_actor->HasSpell(spell)) {
-                            a_actor->AddSpell(spell);
-                        }
-                    }
+                    if (auto spell = rewardForm->As<RE::SpellItem>()) { if (!a_actor->HasSpell(spell)) a_actor->AddSpell(spell); }
                 }
                 else if (reward.typeReward == "Perk") {
-                    if (auto perk = rewardForm->As<RE::BGSPerk>()) {
-                        if (!a_actor->HasPerk(perk)) {
-                            a_actor->AddPerk(perk, 1);
-                        }
-                    }
+                    if (auto perk = rewardForm->As<RE::BGSPerk>()) { if (!a_actor->HasPerk(perk)) a_actor->AddPerk(perk, 1); }
                 }
                 else if (reward.typeReward == "Outfit") {
                     if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
-                        if (reward.isSleepOutfit) {
-                            // APLICAÇÃO DE SLEEP OUTFIT
-                            a_actor->SetSleepOutfit(outfit, false);
-                            logger::debug("  [Outfit] Definido como Sleep Outfit: {}", rewardForm->GetName());
-                        }
+                        if (reward.isSleepOutfit) a_actor->SetSleepOutfit(outfit, false);
                         else {
                             for (auto* form : outfit->outfitItems) {
-                                if (!form) continue;
-                                auto* bound = form->As<RE::TESBoundObject>();
-                                if (bound) {
+                                if (auto* bound = form->As<RE::TESBoundObject>()) {
                                     a_actor->AddObjectToContainer(bound, nullptr, 1, nullptr);
-                                    auto actorHandle = a_actor->GetHandle();
                                     if (!isPlayer) equipQueue.push_back({ bound, 0 });
                                 }
                             }
@@ -332,39 +384,34 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                     }
                 }
                 else {
-                    // Weapon, Armor, Misc, Potion, Ingredient, Book, Ammo, etc.
                     if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
-                        RE::ExtraDataList* xList = nullptr;
-                        /*if (!reward.lootable) {
-                            a_actor->AddObjectToContainer(bound, xList, reward.amount, nullptr);
-                        }*/
                         a_actor->AddObjectToContainer(bound, nullptr, reward.amount, nullptr);
-                        if (reward.typeReward == "Weapon" || reward.typeReward == "Armor" || reward.typeReward == "Ammo") {
-                            if (!isPlayer) equipQueue.push_back({ bound, 1 });
+                        if (!isPlayer && (reward.typeReward == "Weapon" || reward.typeReward == "Armor" || reward.typeReward == "Ammo")) {
+                            equipQueue.push_back({ bound, 1 });
                         }
-                        logger::debug("  [Item] Adicionado: {} (Tipo: {})", rewardForm->GetName(), reward.typeReward);
                     }
                 }
             }
             session.npcRuleVersions[npcKey][ruleID] = currentRule.version;
         }
     }
+
+    // Equipagem final
     if (!equipQueue.empty() && !isPlayer) {
         auto equipManager = RE::ActorEquipManager::GetSingleton();
         if (equipManager) {
-            // Ordena: Prioridade 0 (Outfit) primeiro, 1 (Individual) depois.
-            // Assim, o item individual sobrescreve o do outfit no mesmo slot.
             std::sort(equipQueue.begin(), equipQueue.end(), [](const PendingEquip& a, const PendingEquip& b) {
                 return a.priority < b.priority;
                 });
-
             for (auto& entry : equipQueue) {
-                logger::debug("  [EquipQueue] Equipando: {} (Prio: {})", entry.object->GetName(), entry.priority);
-                // IMPORTANTE: p_queueEquip (último param) como TRUE é essencial para evitar o ILS
                 equipManager->EquipObject(a_actor, entry.object, nullptr, 1, nullptr, false, true, false, true);
             }
         }
     }
+
+    // --- LOG DE FINALIZAÇÃO ---
+    logger::info("[ApplyRules] FINALIZADO com sucesso para {} ({:08X})", actorName, actorID);
 }
+
 
 

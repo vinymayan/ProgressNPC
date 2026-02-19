@@ -86,7 +86,7 @@ struct Rule {
 void to_json(json& j, const Rule& p);
 void from_json(const json& j, Rule& p);
 
-bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist);
+bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor = nullptr);
 
 struct AffectedNPC {
     RE::FormID npcFormID;

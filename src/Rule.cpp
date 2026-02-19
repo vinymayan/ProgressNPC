@@ -176,7 +176,7 @@ bool RuleManager::IsAffected(RE::Actor* actor) {
     return false;
 }
 
-bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist) {
+bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor) {
     // 1. Seleciona os dados baseados no modo (Target vs Blacklist)
     int genderFilter = isBlacklist ? rule.blacklistedGender : rule.targetGender;
     const auto& filters = isBlacklist ? rule.blacklistFilters : rule.targetFilters;
@@ -206,32 +206,64 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist) {
         auto fID = RE::TESDataHandler::GetSingleton()->LookupFormID(std::stoul(tokens[1], nullptr, 16), tokens[0]);
 
         if (filter.type == "NPC") {
-            // Verifica o NPC ou o seu Template
             if (npc->GetFormID() == fID) {
                 match = true;
             }
         }
         else if (filter.type == "Keyword") {
             auto kwd = RE::TESForm::LookupByID<RE::BGSKeyword>(fID);
-            // Verifica keyword no NPC ou no Template
             if (kwd && (npc->HasKeyword(kwd))) {
                 match = true;
             }
         }
         else if (filter.type == "Faction") {
             auto fact = RE::TESForm::LookupByID<RE::TESFaction>(fID);
-            // Verifica facção no NPC ou no Template
             if (fact && (npc->IsInFaction(fact))) {
                 match = true;
             }
         }
         else if (filter.type == "Race") {
             auto race = RE::TESForm::LookupByID<RE::TESRace>(fID);
-            // Verifica raça no NPC ou no Template
             if (race && (npc->race == race)) {
                 match = true;
             }
         }
+        else if (filter.type == "Combat Style") {
+            if (npc->combatStyle && npc->combatStyle->GetFormID() == fID) match = true;
+        }
+        else if (filter.type == "Voice Type") {
+            if (npc->voiceType && npc->voiceType->GetFormID() == fID) match = true;
+        }
+        else if (filter.type == "Class") {
+            if (npc->npcClass && npc->npcClass->GetFormID() == fID) match = true;
+        }
+        else if (filter.type == "Skin") {
+            // A Skin do NPC é um ponteiro para um TESObjectARMO (Armor)
+            if (npc->skin && npc->skin->GetFormID() == fID) match = true;
+        }
+        else if (filter.type == "Location") {
+            if (actor) {
+                // Estamos em tempo de execução com um Actor real.
+                auto targetLoc = RE::TESForm::LookupByID<RE::BGSLocation>(fID);
+                auto currentLoc = actor->GetCurrentLocation();
+                if (targetLoc && currentLoc) {
+                    if (currentLoc == targetLoc || currentLoc->IsParent(targetLoc)) {
+                        match = true;
+                    }
+                }
+            } 
+        }
+        else if (filter.type == "Hair" || filter.type == "Facial Hair") {
+            if (npc->headParts) {
+                for (uint32_t i = 0; i < npc->numHeadParts; i++) {
+                    if (npc->headParts[i] && npc->headParts[i]->GetFormID() == fID) {
+                        match = true;
+                        break;
+                    }
+                }
+            }
+        }
+        
 
         if (match) {
             matches++;
@@ -241,6 +273,7 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist) {
 
     return (requiresAll && matches == filters.size() && matches > 0);
 }
+
 
 void RuleManager::LoadRules() {
     _rules.clear();

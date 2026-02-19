@@ -26,6 +26,17 @@ void Manager::PopulateAllLists() {
     PopulateList<RE::TESAmmo>("Ammo");
     PopulateList<RE::TESObjectMISC>("Misc");
     PopulateList<RE::TESKey>("Key");
+    // - v.1.2.0
+    PopulateList<RE::TESCombatStyle>("Combat Style");
+    PopulateList<RE::BGSVoiceType>("Voice Type");
+    PopulateList<RE::TESClass>("Class");
+    PopulateList<RE::BGSLocation>("Location");
+    PopulateList<RE::BGSHeadPart>("Hair", [](RE::BGSHeadPart* hp) {
+        return hp->type == RE::BGSHeadPart::HeadPartType::kHair;
+        });
+    PopulateList<RE::BGSHeadPart>("Facial Hair", [](RE::BGSHeadPart* hp) {
+        return hp->type == RE::BGSHeadPart::HeadPartType::kFacialHair;
+        });
 
     _isPopulated = true;
     for (auto cb : _readyCallbacks) {
@@ -51,8 +62,30 @@ void Manager::RegisterReadyCallback(std::function<void()> callback) {
     }
 }
 
+// Altere a implementação:
+std::string Manager::ToUTF8(std::string_view a_str) {
+    if (a_str.empty()) return "";
+
+    // Converte string_view para data temporária para o WinAPI
+    int wlen = MultiByteToWideChar(CP_ACP, 0, a_str.data(), static_cast<int>(a_str.size()), nullptr, 0);
+    if (wlen <= 0) return std::string(a_str);
+
+    std::wstring wstr(wlen, 0);
+    MultiByteToWideChar(CP_ACP, 0, a_str.data(), static_cast<int>(a_str.size()), &wstr[0], wlen);
+
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (u8len <= 0) return std::string(a_str);
+
+    std::string u8str(u8len, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &u8str[0], u8len, nullptr, nullptr);
+
+    if (!u8str.empty() && u8str.back() == '\0') u8str.pop_back();
+
+    return u8str;
+}
+
 template <typename T>
-void Manager::PopulateList(const std::string& a_typeName) {
+void Manager::PopulateList(const std::string& a_typeName, std::function<bool(T*)> a_filter) {
     auto dataHandler = RE::TESDataHandler::GetSingleton();
     if (!dataHandler) return;
 
@@ -65,34 +98,58 @@ void Manager::PopulateList(const std::string& a_typeName) {
     for (const auto& form : forms) {
         if (!form) continue;
 
-        InternalFormInfo info;
-        info.formID = form->GetFormID();
-        info.formType = a_typeName;
+        if (a_filter && !a_filter(form)) {
+            continue;
+        }
+        // Variáveis de auxílio para o log de erro caso o catch seja acionado
+        RE::FormID currentID = 0;
+        std::string currentPlugin = "Unknown";
 
-        // Atribuição segura de string
-        // editorID pode não existir em build pública, mas clib_util tenta pegar
-        info.editorID = clib_util::editorID::get_editorID(form);
+        try {
+            currentID = form->GetFormID();
 
-        info.name = "";
-
-        // 1. Verifica se o form é um NPC
-        if (form->Is(RE::FormType::NPC)) {
-            if (auto npc = form->As<RE::TESNPC>()) {
-                info.name = npc->fullName.c_str();
+            // Obtém o nome do plugin de origem antes de qualquer processamento complexo
+            if (auto file = form->GetFile(0)) {
+                currentPlugin = std::string(file->GetFilename());
             }
-        }
-        // 2. Opcional: Se não for NPC, tenta pegar o nome de qualquer objeto que tenha TESFullName (Spells, Itens, etc)
-        else if (auto fullName = form->As<RE::TESFullName>()) {
-            info.name = fullName->fullName.c_str();
-        }
+            else {
+                currentPlugin = "Dynamic";
+            }
 
-        if (auto file = form->GetFile(0)) {
-            info.pluginName = file->GetFilename();
-        } else {
-             info.pluginName = "Dynamic"; // Created at runtime
+            InternalFormInfo info;
+            info.formID = currentID;
+            info.formType = a_typeName;
+            info.pluginName = ToUTF8(currentPlugin);
+
+            // EditorID: clib_util pode lançar exceções em contextos raros de memória
+            std::string rawEditorID = clib_util::editorID::get_editorID(form);
+            info.editorID = ToUTF8(rawEditorID);
+
+            std::string rawName = "";
+            if (form->Is(RE::FormType::NPC)) {
+                if (auto npc = form->As<RE::TESNPC>()) {
+                    rawName = npc->fullName.c_str();
+                }
+            }
+            else if (auto fullName = form->As<RE::TESFullName>()) {
+                rawName = fullName->fullName.c_str();
+            }
+
+            // A conversão UTF-8 é um ponto comum de falha se a string estiver corrompida
+            info.name = ToUTF8(rawName);
+
+            list.push_back(info);
         }
-       
-        list.push_back(info);
+        catch (const std::exception& e) {
+            // Log detalhado com FormID em Hexadecimal e o erro específico
+            logger::error("[PopulateList] Critical error on item {:08X} of plugin '{}' (Type: {}). Error: {}",
+                currentID, currentPlugin, a_typeName, e.what());
+        }
+        catch (...) {
+            // Captura erros desconhecidos que não herdam de std::exception
+            logger::error("[PopulateList] Uknown error on item {:08X} of plugin '{}' (Type: {})",
+                currentID, currentPlugin, a_typeName);
+        }
     }
     logger::info("Carregados {} itens do tipo {}", list.size(), a_typeName);
 }

@@ -287,3 +287,32 @@ public:
         }
     }
 };
+
+class LocationChangeHandler : public RE::BSTEventSink<RE::TESActorLocationChangeEvent> {
+public:
+    static LocationChangeHandler* GetSingleton() {
+        static LocationChangeHandler singleton;
+        return &singleton;
+    }
+    virtual RE::BSEventNotifyControl ProcessEvent(const RE::TESActorLocationChangeEvent* a_event, RE::BSTEventSource<RE::TESActorLocationChangeEvent>* a_source) override {
+        if (a_event && a_event->newLoc) {
+            logger::info("[LocationChangeHandler] Detected Location Change: {} moved from '{}' to '{}'",
+                a_event->actor ? a_event->actor->GetName() : "Unknown Actor",
+                a_event->oldLoc ? a_event->oldLoc->GetName() : "Unknown Location",
+                a_event->newLoc->GetName());
+			auto actor = a_event->actor->As<RE::Actor>();
+            //RE::FormID actorID = a_event->actor->GetFormID();
+            if (actor) {
+                ApplyRulesToInstance(actor);
+            }
+
+        }
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    static void Register() {
+        auto scriptEventSourceHolder = RE::ScriptEventSourceHolder::GetSingleton();
+        if (scriptEventSourceHolder) {
+            scriptEventSourceHolder->AddEventSink(GetSingleton());
+        }
+    }
+};
