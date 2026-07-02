@@ -6,15 +6,12 @@
 #include <functional>
 #include "ClibUtil/editorID.hpp"
 
-
-
-
 struct InternalFormInfo {
     RE::FormID formID;
     std::string editorID;
     std::string name;
     std::string pluginName;
-    std::string formType; 
+    std::string formType;
 
     // Helper for UI
     std::string GetDisplayName() const {
@@ -31,12 +28,12 @@ public:
         return &singleton;
     }
 
-    void PopulateAllLists();
+    void PopulateAllLists(bool forceRefresh = false);
     static std::string ToUTF8(std::string_view a_str);
     // Data Store: Map of "TypeName" -> List of InternalFormInfo
     // We use this to feed the UI
     const std::vector<InternalFormInfo>& GetList(const std::string& typeName);
-    
+
     // Register callback for when population is done
     void RegisterReadyCallback(std::function<void()> callback);
 
@@ -44,7 +41,7 @@ public:
 
 private:
     Manager() = default;
-    
+
     template <typename T>
     void PopulateList(const std::string& a_typeName, std::function<bool(T*)> a_filter = nullptr);
 

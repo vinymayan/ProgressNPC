@@ -2,18 +2,17 @@
 
 #include <string>
 #include <vector>
-#include <nlohmann/json.hpp>
+#include <rapidjson/document.h>
 #include "Manager.h"
 
-// Define types for JSON usage
-using json = nlohmann::json;
 std::vector<std::string> split(const std::string& s, char delimiter);
 struct Reward {
     std::string typeReward; // "Spell", "Perk", "Weapon", "Keyword"
     std::string formIDStr;  // e.g. "Skyrim.esm|D8D4E" (Plugin|FormID) or "D8D4E" (FormID only - unsafe without plugin)
     uint32_t amount = 1;
     float chanceReward = 100.0f;
-    bool isSleepOutfit = false;
+    int functionOnType = 0;
+    bool isPersistent = true;
     //bool lootable = true;
     // Helper to separate Plugin | FormID
     std::pair<std::string, RE::FormID> ParseFormID() const;
@@ -31,14 +30,6 @@ struct BlacklistFilter {
     std::string formIDStr; // Plugin|FormID
 };
 
-void to_json(json& j, const Reward& p);
-void from_json(const json& j, Reward& p);
-
-void to_json(json& j, const RewardGroup& p); 
-void from_json(const json& j, RewardGroup& p); 
-
-void to_json(json& j, const BlacklistFilter& p);
-void from_json(const json& j, BlacklistFilter& p);
 
 struct Rule {
     std::string id;
@@ -59,32 +50,14 @@ struct Rule {
     std::vector<BlacklistFilter> blacklistFilters;
 
     mutable std::string lastSavedHash;
-
-    // Calcula um hash baseado no conteúdo estrutural da regra
-    std::string CalculateHash() const {
-        nlohmann::json j;
-        j["enabled"] = isEnabled;
-        j["name"] = name;
-        j["level"] = level;
-        j["t_gender"] = targetGender;
-        j["t_reqAll"] = targetRequiresAll;
-        j["t_filters"] = targetFilters;
-        j["groups"] = rewardGroups;
-        j["b_gender"] = blacklistedGender;
-        j["b_reqAll"] = blacklistRequiresAll;
-        j["b_filters"] = blacklistFilters;
-        j["isExclusive"] = isExclusive; // Adicionar ao hash para detectar mudanças
-        for (auto& g : rewardGroups) j["g_chance_" + g.name] = g.chanceGroup;
-        return std::to_string(std::hash<std::string>{}(j.dump()));
-    }
+    // Calcula um hash baseado no conteÃºdo estrutural da regra
+    std::string CalculateHash() const;
 
     bool IsModified() const {
         return lastSavedHash != CalculateHash();
     }
 };
 
-void to_json(json& j, const Rule& p);
-void from_json(const json& j, Rule& p);
 
 bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor = nullptr);
 
@@ -107,7 +80,7 @@ public:
     void SaveRules();
     void ExportRule(const Rule& rule);
     std::vector<Rule>& GetRules() { return _rules; }
-    
+
     // Create specific rule
     Rule& CreateRule();
     void  DeleteRule(const std::string& id);
@@ -115,8 +88,9 @@ public:
     // Apply rules to an NPC (Validation logic)
     // Returns list of rewards to apply
     std::vector<Reward> GetRewardsForNPC(RE::TESNPC* npc);
-    
-    // Adicione a declaração na classe RuleManager
+
+    std::vector<RewardGroup> RollForGroups(RE::TESNPC* npc, const Rule& rule);
+    // Adicione a declaraÃ§Ã£o na classe RuleManager
     std::vector<Reward> GetRewardsForSpecificRule(RE::TESNPC* npc, const Rule& rule);
 
     void InitializeAffectedNPCsDatabase();

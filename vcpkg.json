@@ -12,8 +12,8 @@
     "clib-utils-qtr",
     "directxtk",
     "skse-mcp",
-    "nlohmann-json",
-    "miniz"
+    "miniz",
+    "rapidjson"
   ],
   "overrides": [
     {

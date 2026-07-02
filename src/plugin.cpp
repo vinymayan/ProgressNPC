@@ -1,15 +1,44 @@
 #include "logger.h"
-#include "SaveState.h"
+#include "hooks.h"
 #include "UI.h"
 #include "Events.h"
+#include "Manager.h"
+#include "Rule.h"
+
+#include <filesystem>
+#include <system_error>
 
 
-void OnMessage(SKSE::MessagingInterface::Message* message) {
-    if (message->type == SKSE::MessagingInterface::kDataLoaded) {
-        // Init Rules
-        RuleManager::GetSingleton()->LoadRules();
+
+namespace {
+    bool IsDynamicFormsGeneratorInstalled()
+    {
+        std::error_code ec;
+        return std::filesystem::exists("Data/SKSE/Plugins/DynamicFormsGenerator.dll", ec) && !ec;
+    }
+
+    void PopulateRuntimeData()
+    {
         Manager::GetSingleton()->PopulateAllLists();
         RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
+    }
+
+    void PopulateRuntimeDataWhenReady()
+    {
+        if (IsDynamicFormsGeneratorInstalled() && !DynamicFormsGeneratorEvents::HasLoaded()) {
+            logger::info("DynamicFormsGenerator.dll encontrada; aguardando DynamicFormsGeneratorLoaded para PopulateAllLists.");
+            return;
+        }
+
+        PopulateRuntimeData();
+    }
+}
+void OnMessage(SKSE::MessagingInterface::Message* message) {
+    if (message->type == SKSE::MessagingInterface::kDataLoaded) {
+		Hooks::Install();
+        // Init Rules
+        RuleManager::GetSingleton()->LoadRules();
+        PopulateRuntimeDataWhenReady();
 		//Manager::GetSingleton()->ConvertAllNPCOutfitsToInventory();
        // CellAttachHandler::Register();
         //CellFullyLoadedHandler::Register();
@@ -25,12 +54,12 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         //if (QuickLoot::API::QuickLootAPI::Init("ProgressNPC")) {
         //    logger::info("QuickLoot API conectada com sucesso.");
 
-        //    // Registrar handlers usando as funÁıes que criamos no Events.cpp
+        //    // Registrar handlers usando as fun√ß√µes que criamos no Events.cpp
         //    QuickLoot::API::QuickLootAPI::RegisterOpenLootMenuHandler(EventSink::OnQuickLootOpen);
         //    QuickLoot::API::QuickLootAPI::RegisterCloseLootMenuHandler(EventSink::OnQuickLootClose);
         //}
         //else {
-        //    logger::warn("QuickLootIE n„o detectado ou falha na API.");
+        //    logger::warn("QuickLootIE n√£o detectado ou falha na API.");
         //}
 
         LocationChangeHandler::Register();
@@ -38,76 +67,74 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         SPIDUI::Register();
     }
     if (message->type == SKSE::MessagingInterface::kPreLoadGame) {
-        SaveStateManager::GetSingleton()->ClearContext();
         const char* saveName = static_cast<const char*>(message->data);
-        
         if (!saveName) {
-            logger::warn("PreLoadGame: Nome do save È nulo.");
+            logger::warn("PreLoadGame: Nome do save √© nulo.");
             return;
         }
 
-        logger::info("Iniciando prÈ-carregamento para o save: {}", saveName);
+        logger::info("Iniciando pr√©-carregamento para o save: {}", saveName);
 
         RE::BGSSaveLoadFileEntry tempEntry{};
         tempEntry.fileName = saveName;
 
         bool success = false;
+        // Tentamos ler o cabe√ßalho para obter o CharID real do save
         for (int i = 0; i < 5; ++i) {
             if (tempEntry.PopulateFileEntryData()) {
-                // 3. CORRE«√O: Use .data() em vez de .c_str() para evitar o assert !wide()
-                logger::debug("Sucesso ao ler cabeÁalho na tentativa {}: {}", i + 1, tempEntry.fileName.data());
                 success = true;
                 break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
         if (success) {
-            std::string fileName = saveName;
             uint32_t charID = 0;
+            std::string fileName = saveName;
 
+            // Tentativa de extrair do nome do arquivo (mais r√°pido/seguro para CharID de pasta)
             try {
                 size_t firstUnderscore = fileName.find('_');
                 size_t secondUnderscore = fileName.find('_', firstUnderscore + 1);
-
                 if (firstUnderscore != std::string::npos && secondUnderscore != std::string::npos) {
                     std::string charIdStr = fileName.substr(firstUnderscore + 1, secondUnderscore - firstUnderscore - 1);
                     charID = static_cast<uint32_t>(std::stoul(charIdStr, nullptr, 16));
                 }
                 else {
                     charID = tempEntry.characterID;
-                    logger::warn("Padr„o de nome n„o detectado. Usando ID interno: {:X}", charID);
                 }
             }
-            catch (const std::exception& e) {
+            catch (...) {
                 charID = tempEntry.characterID;
-                logger::error("Erro no processamento do nome: {}", e.what());
             }
-
-            SaveStateManager::GetSingleton()->LoadCharacterData(charID);
+            // Isso minimiza o tempo em que o isValid fica false durante a transi√ß√£o
             SaveStateManager::GetSingleton()->SetCurrentContext(charID, tempEntry.saveNumber);
-
             logger::info("Contexto carregado: Personagem {:X}, Save {}", charID, tempEntry.saveNumber);
         }
         else {
-            logger::error("Falha crÌtica ao ler o cabeÁalho do arquivo: {}", saveName);
+            // Se falhou ao ler o save, limpamos o contexto por seguran√ßa
+            SaveStateManager::GetSingleton()->ClearContext();
+            logger::error("Falha ao ler cabe√ßalho. Contexto invalidado.");
         }
-
-
     }
     if (message->type == SKSE::MessagingInterface::kPostLoadGame) {
 
     }
     if (message->type == SKSE::MessagingInterface::kSaveGame) {
-        // O data do kSaveGame contÈm o nome do arquivo de save
+        // O data do kSaveGame cont√©m o nome do arquivo de save
         const char* saveName = static_cast<const char*>(message->data);
-        
-        logger::info("Salvamento detectado: {}. Sincronizando banco de dados JSON...", saveName);
-        SaveStateManager::GetSingleton()->PersistCurrentSave(saveName);
+
+        if(saveName) {
+            logger::info("[Plugin] Mensagem kSaveGame recebida: {}", saveName);
+            SaveStateManager::GetSingleton()->PersistCurrentSave(saveName);
+        }
     }
 
-    
+
     if (message->type == SKSE::MessagingInterface::kNewGame) {
+        logger::info("[Plugin] New Game detectado. Inicializando contexto padr√£o.");
+        // CharID 0 e Save 0 representam uma sess√£o nova sem persist√™ncia de disco ainda.
+        SaveStateManager::GetSingleton()->SetCurrentContext(0, 0);
 
     }
 }
@@ -117,6 +144,7 @@ SKSEPluginLoad(const SKSE::LoadInterface *skse) {
     SetupLog();
     logger::info("Plugin loaded");
     SKSE::Init(skse);
+    DynamicFormsGeneratorListener::GetSingleton()->Register();
     BackgroundCloneHook::Install();
     SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
     return true;

@@ -1,3 +1,5 @@
+ï»¿
+
 //#include "Settings.h"
 //#include <fstream>
 //#include <filesystem>
@@ -6,35 +8,35 @@
 //{
 //    std::string targetEDID = a_data.value("editorID", "MISSING_EDID");
 //    SKSE::log::info("==============================================");
-//    SKSE::log::info("Iniciando criação dinâmica de HeadPart: '{}'", targetEDID);
+//    SKSE::log::info("Iniciando criaï¿½ï¿½o dinï¿½mica de HeadPart: '{}'", targetEDID);
 //
-//    // 1. Criação da Instância (Heap)
+//    // 1. Criaï¿½ï¿½o da Instï¿½ncia (Heap)
 //    // Utiliza o template helper do ConcreteFormFactory.h
 //    auto newPart = RE::IFormFactory::Create<RE::BGSHeadPart>();
 //
 //    if (!newPart) {
-//        SKSE::log::critical("CRITICO: Falha ao obter a ConcreteFormFactory para HeadPart ou falha na alocação de memória.");
+//        SKSE::log::critical("CRITICO: Falha ao obter a ConcreteFormFactory para HeadPart ou falha na alocaï¿½ï¿½o de memï¿½ria.");
 //        return nullptr;
 //    }
-//    SKSE::log::info("Sucesso: Instância base de BGSHeadPart alocada no heap (FormID temporário: {:X})", newPart->GetFormID());
+//    SKSE::log::info("Sucesso: Instï¿½ncia base de BGSHeadPart alocada no heap (FormID temporï¿½rio: {:X})", newPart->GetFormID());
 //
 //
-//    // 2. Configuração do EditorID
+//    // 2. Configuraï¿½ï¿½o do EditorID
 //    if (a_data.contains("editorID")) {
 //        std::string edid = a_data["editorID"];
 //        newPart->SetFormEditorID(edid.c_str());
 //        SKSE::log::info(" - EditorID definido para: {}", edid);
 //    }
 //    else {
-//        SKSE::log::warn(" - AVISO: JSON sem 'editorID'. A parte não terá nome interno.");
+//        SKSE::log::warn(" - AVISO: JSON sem 'editorID'. A parte nï¿½o terï¿½ nome interno.");
 //    }
 //
 //
-//    // 3. Configuração do Tipo (Hair, Eyes, etc.)
+//    // 3. Configuraï¿½ï¿½o do Tipo (Hair, Eyes, etc.)
 //    if (a_data.contains("type")) {
 //        uint32_t typeVal = a_data["type"].get<uint32_t>();
 //        newPart->type = static_cast<RE::BGSHeadPart::HeadPartType>(typeVal);
-//        // Enum simples para log legível
+//        // Enum simples para log legï¿½vel
 //        std::string typeStr = "Unknown";
 //        switch (newPart->type.get()) {
 //        case RE::BGSHeadPart::HeadPartType::kMisc: typeStr = "Misc"; break;
@@ -47,26 +49,26 @@
 //        SKSE::log::info(" - Tipo definido para: {} ({})", typeVal, typeStr);
 //    }
 //    else {
-//        SKSE::log::error(" - ERRO: JSON faltando campo obrigatório 'type'.");
+//        SKSE::log::error(" - ERRO: JSON faltando campo obrigatï¿½rio 'type'.");
 //    }
 //
 //
-//    // 4. Configuração do Modelo (.nif)
+//    // 4. Configuraï¿½ï¿½o do Modelo (.nif)
 //    if (a_data.contains("modelPath")) {
 //        std::string path = a_data["modelPath"];
 //        newPart->SetModel(path.c_str());
 //        SKSE::log::info(" - Model Path definido para: '{}'", path);
-//        // Verificação básica se o caminho parece válido (não verifica existência do arquivo)
+//        // Verificaï¿½ï¿½o bï¿½sica se o caminho parece vï¿½lido (nï¿½o verifica existï¿½ncia do arquivo)
 //        if (path.length() < 5 || path.find(".nif") == std::string::npos) {
 //            SKSE::log::warn("   - AVISO: O caminho do modelo parece suspeito ou incompleto.");
 //        }
 //    }
 //    else {
-//        SKSE::log::error(" - ERRO: JSON faltando campo obrigatório 'modelPath'. A parte será invisível.");
+//        SKSE::log::error(" - ERRO: JSON faltando campo obrigatï¿½rio 'modelPath'. A parte serï¿½ invisï¿½vel.");
 //    }
 //
 //
-//    // 5. Configuração das Flags
+//    // 5. Configuraï¿½ï¿½o das Flags
 //    if (a_data.contains("flags")) {
 //        uint8_t flagsVal = a_data["flags"].get<uint8_t>();
 //        newPart->flags = static_cast<RE::BGSHeadPart::Flag>(flagsVal);
@@ -74,36 +76,36 @@
 //    }
 //
 //
-//    // 6. Configuração da Lista de Raças Válidas
+//    // 6. Configuraï¿½ï¿½o da Lista de Raï¿½as Vï¿½lidas
 //    if (a_data.contains("validRacesListID") && a_data.contains("validRacesSource")) {
 //        std::string formIdStr = a_data["validRacesListID"];
 //        std::string sourceMod = a_data["validRacesSource"];
 //
-//        SKSE::log::info(" - Tentando resolver Lista de Raças: ID '{}' em '{}'", formIdStr, sourceMod);
+//        SKSE::log::info(" - Tentando resolver Lista de Raï¿½as: ID '{}' em '{}'", formIdStr, sourceMod);
 //
 //        auto dataHandler = RE::TESDataHandler::GetSingleton();
 //        if (dataHandler) {
-//            // Converte string hex para numérico e busca
+//            // Converte string hex para numï¿½rico e busca
 //            RE::FormID localID = std::stoul(formIdStr, nullptr, 16);
 //            auto raceList = dataHandler->LookupForm<RE::BGSListForm>(localID, sourceMod);
 //
 //            if (raceList) {
 //                newPart->validRaces = raceList;
-//                SKSE::log::info("   - Sucesso: Lista de raças encontrada e vinculada ({:X}).", raceList->GetFormID());
+//                SKSE::log::info("   - Sucesso: Lista de raï¿½as encontrada e vinculada ({:X}).", raceList->GetFormID());
 //            }
 //            else {
-//                SKSE::log::error("   - FALHA: Não foi possível encontrar o FormList com ID {:X} no plugin '{}'.", localID, sourceMod);
+//                SKSE::log::error("   - FALHA: Nï¿½o foi possï¿½vel encontrar o FormList com ID {:X} no plugin '{}'.", localID, sourceMod);
 //            }
 //        }
 //        else {
-//            SKSE::log::critical("   - CRITICO: TESDataHandler não está disponível.");
+//            SKSE::log::critical("   - CRITICO: TESDataHandler nï¿½o estï¿½ disponï¿½vel.");
 //        }
 //    }
 //    else {
-//        SKSE::log::warn(" - AVISO: Informações de 'validRacesListID' ou 'validRacesSource' ausentes. A parte pode não aparecer para nenhuma raça.");
+//        SKSE::log::warn(" - AVISO: Informaï¿½ï¿½es de 'validRacesListID' ou 'validRacesSource' ausentes. A parte pode nï¿½o aparecer para nenhuma raï¿½a.");
 //    }
 //
-//    SKSE::log::info("HeadPart dinâmica '{}' criada com sucesso.", targetEDID);
+//    SKSE::log::info("HeadPart dinï¿½mica '{}' criada com sucesso.", targetEDID);
 //    SKSE::log::info("==============================================");
 //
 //    return newPart;
@@ -111,7 +113,7 @@
 //
 //void HeadPartCreator::TestCreateHeadPart()
 //{
-//    SKSE::log::info("Iniciando Teste de Criação de HeadPart...");
+//    SKSE::log::info("Iniciando Teste de Criaï¿½ï¿½o de HeadPart...");
 //
 //    // Simulando a leitura do arquivo JSON (aqui definido inline para o exemplo)
 //    std::string jsonContent = R"(
@@ -127,21 +129,21 @@
 //
 //    try {
 //        // Parse da string para objeto JSON
-//        nlohmann::json jsonData = nlohmann::json::parse(jsonContent);
+//        rapidjson::Document jsonData = rapidjson::Document::parse(jsonContent);
 //
-//        // Chama a função criadora
+//        // Chama a funï¿½ï¿½o criadora
 //        RE::BGSHeadPart* myNewPart = HeadPartCreator::CreateHeadPartFromJson(jsonData);
 //
 //        if (myNewPart) {
-//            SKSE::log::info("Teste bem sucedido! O ponteiro para a nova parte é válido.");
-//            // Aqui você poderia aplicar 'myNewPart' a um Actor usando a lógica anterior.
+//            SKSE::log::info("Teste bem sucedido! O ponteiro para a nova parte ï¿½ vï¿½lido.");
+//            // Aqui vocï¿½ poderia aplicar 'myNewPart' a um Actor usando a lï¿½gica anterior.
 //        }
 //        else {
-//            SKSE::log::error("Teste falhou! A função retornou um ponteiro nulo.");
+//            SKSE::log::error("Teste falhou! A funï¿½ï¿½o retornou um ponteiro nulo.");
 //        }
 //
 //    }
-//    catch (const nlohmann::json::parse_error& e) {
+//    catch (const rapidjson::Document::parse_error& e) {
 //        SKSE::log::error("Erro ao fazer parse do JSON de teste: {}", e.what());
 //    }
 //}

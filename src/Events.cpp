@@ -1,11 +1,46 @@
 #include "Events.h"
+#include "Manager.h"
+#include "Rule.h"
+
+namespace {
+    bool g_dynamicFormsGeneratorLoaded = false;
+}
+
+namespace DynamicFormsGeneratorEvents {
+    bool HasLoaded()
+    {
+        return g_dynamicFormsGeneratorLoaded;
+    }
+}
 
 
+RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE::ModCallbackEvent* a_event, RE::BSTEventSource<SKSE::ModCallbackEvent>*)
+{
+    if (!a_event) return RE::BSEventNotifyControl::kContinue;
+
+    std::string_view eventName = a_event->eventName.c_str();
+    if (eventName == "DynamicFormsGeneratorLoaded") {
+        g_dynamicFormsGeneratorLoaded = true;
+        logger::info("[DynamicFormsGenerator] Loaded recebido; populando listas e banco de regras.");
+        Manager::GetSingleton()->PopulateAllLists();
+        RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    if (eventName == "DynamicFormsGeneratorUpdated") {
+        logger::info("[DynamicFormsGenerator] Updated recebido; repopulando listas e banco de regras.");
+        Manager::GetSingleton()->PopulateAllLists(true);
+        RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    return RE::BSEventNotifyControl::kContinue;
+}
 RE::TESObjectREFR* GetContainerFromMenu() {
     auto ui = RE::UI::GetSingleton();
     if (!ui) return nullptr;
 
-    // 1. Tenta o ContainerMenu padrão (Skyrim Vanilla/VR)
+    // 1. Tenta o ContainerMenu padrÃ£o (Skyrim Vanilla/VR)
     if (const auto ui_menu = ui->GetMenu<RE::ContainerMenu>()) {
         auto ui_refid = ui_menu->GetTargetRefHandle();
         if (ui_refid) {
@@ -17,17 +52,17 @@ RE::TESObjectREFR* GetContainerFromMenu() {
 
     return nullptr;
 }
-    
+
 void InjectNoGoldSWF(RE::IMenu* a_menu) {
     if (!a_menu || !a_menu->uiMovie) return;
 
     auto view = a_menu->uiMovie.get();
     RE::GFxValue root;
 
-    // 1. Obtém o _root do Flash
+    // 1. ObtÃ©m o _root do Flash
     if (view->GetVariable(&root, "_root")) {
 
-        // Gerar profundidade aleatória entre 2000 e 4000
+        // Gerar profundidade aleatÃ³ria entre 2000 e 4000
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> dis(2000, 4000);
@@ -54,12 +89,12 @@ void InjectNoGoldSWF(RE::IMenu* a_menu) {
     }
 }
 
-// Exemplo de como a função Testarone poderia ser declarada (ou deve ser importada de outro lugar)
+// Exemplo de como a funÃ§Ã£o Testarone poderia ser declarada (ou deve ser importada de outro lugar)
 void Testarone(RE::Actor* a_deadActor) {
     if (!a_deadActor) return;
 
     auto sink = EventSink::GetSingleton();
-    // Obtemos o inventário atual do ator
+    // Obtemos o inventÃ¡rio atual do ator
     auto inventory = a_deadActor->GetInventory();
 
     logger::debug("Testarone: Iniciando processamento para: {} (ID: {:x})",
@@ -69,15 +104,15 @@ void Testarone(RE::Actor* a_deadActor) {
     for (auto& [item, data] : inventory) {
         if (!item) continue;
 
-        // 1. Aplicar flag na TESForm base (afeta todos os itens por padrão)
-       
+        // 1. Aplicar flag na TESForm base (afeta todos os itens por padrÃ£o)
+
         if (item->IsGold()) {
 
 
 
         }
         item->formFlags |= RE::TESForm::RecordFlags::kNonPlayable;
-        // 3. Tratar flags específicas para outros tipos
+        // 3. Tratar flags especÃ­ficas para outros tipos
         if (auto weapon = item->As<RE::TESObjectWEAP>()) {
             weapon->weaponData.flags |= RE::TESObjectWEAP::Data::Flag::kNonPlayable;
         }
@@ -100,7 +135,7 @@ void Testarone(RE::Actor* a_deadActor) {
         count++;
     }
     RE::SendUIMessage::SendInventoryUpdateMessage(a_deadActor,nullptr);
-    logger::debug("Testarone: Concluído. {} itens processados. Estado final Playable verificado.", count);
+    logger::debug("Testarone: ConcluÃ­do. {} itens processados. Estado final Playable verificado.", count);
 }
 
 void EventSink::RestoreItemsPlayability() {
@@ -116,7 +151,7 @@ void EventSink::RestoreItemsPlayability() {
         }
     }
     _modifiedItems.clear();
-    logger::debug("RestoreItemsPlayability: Inventário restaurado. {} itens voltaram a ser Playable.", count);
+    logger::debug("RestoreItemsPlayability: InventÃ¡rio restaurado. {} itens voltaram a ser Playable.", count);
 }
 
 void EventSink::OnQuickLootOpen(QuickLoot::API::OpenLootMenuEvent* a_event) {
@@ -143,7 +178,7 @@ RE::BSEventNotifyControl EventSink::ProcessEvent(const RE::MenuOpenCloseEvent* a
 
     if (a_event->menuName == RE::ContainerMenu::MENU_NAME) {
         if (a_event->opening) {
-            
+
             auto containerRef = GetContainerFromMenu();
             if (containerRef) {
                 if (auto actor = containerRef->As<RE::Actor>()) {

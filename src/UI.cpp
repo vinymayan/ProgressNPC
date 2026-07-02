@@ -1,15 +1,15 @@
-#include "UI.h"
+Ôªø#include "UI.h"
 #include <unordered_set>
 namespace SPIDUI {
     static std::set<std::string> activeTypeFilters;
 
     static std::string activeRuleID = "";      // ID da regra sendo editada no momento
-    static int activeGroupIdx = -1;            // Õndice do grupo de recompensa ativo
+    static int activeGroupIdx = -1;            // √çndice do grupo de recompensa ativo
     static bool isPickingReward = false;
     //static RewardGroup* currentTargetGroup = nullptr;
     static std::string currentRewardType = "All";
 
-    // Vari·veis para controlar abertura dos modals fora do loop
+    // Vari√°veis para controlar abertura dos modals fora do loop
     static bool openTargetsModal = false;
     static bool openRewardsModal = false;
 
@@ -26,7 +26,7 @@ namespace SPIDUI {
     static char selectionSearchBuf[128] = "";
     static std::string selectionPluginFilter = "All";
 
-    // FunÁ„o auxiliar para limpar o estado da busca
+    // Fun√ß√£o auxiliar para limpar o estado da busca
     void ResetSelectionState() {
         memset(selectionSearchBuf, 0, sizeof(selectionSearchBuf));
         selectionPluginFilter = "All";
@@ -46,7 +46,7 @@ namespace SPIDUI {
 
     struct NPCMatchInfo {
         bool isAffected = false;
-        std::string ruleNames; // Cache das strings das regras para exibiÁ„o r·pida
+        std::string ruleNames; // Cache das strings das regras para exibi√ß√£o r√°pida
     };
 
     static std::vector<NPCMatchInfo> g_npcMatchCache; // Cache pesado (Keywords/Factions)
@@ -77,9 +77,9 @@ namespace SPIDUI {
 
     void RenderTypeFilter() {
         const std::vector<std::string> options = {
-        "NPC", "Faction", "Keyword", "Race",
+        "NPC", "Faction", "Keyword", "Race", "Package",
         "Combat Style", "Voice Type", "Class", "Location",
-        "Hair", "Facial Hair"
+        "Hair", "Facial Hair", "Leveled NPC" // <--- Adicionado
         };
 
         ImGuiMCP::Text("Active Filters:");
@@ -113,12 +113,12 @@ namespace SPIDUI {
             else openTargetsModal = false;
         }
         ImGuiMCP::SameLine();
-        // 1. Resolvemos as referÍncias dos dados com base no modo
+        // 1. Resolvemos as refer√™ncias dos dados com base no modo
         auto& filters = isBlacklist ? rule.blacklistFilters : rule.targetFilters;
         auto& gender = isBlacklist ? rule.blacklistedGender : rule.targetGender;
         auto& requiresAll = isBlacklist ? rule.blacklistRequiresAll : rule.targetRequiresAll;
 
-        // 2. Textos din‚micos para a UI
+        // 2. Textos din√¢micos para a UI
         const char* genderLabel = isBlacklist ? "Excluded Gender:" : "Target Gender:";
         const char* genderNoneOption = isBlacklist ? "None" : "All";
         const char* checkLabel = isBlacklist ? "Require ALL filters to invalidate (AND)" : "Require ALL filters (AND)";
@@ -127,7 +127,7 @@ namespace SPIDUI {
         const char* tableName = isBlacklist ? "BlacklistTable" : "TargetsTable";
         const std::string idPrefix = isBlacklist ? "X##bl" : "X##target";
 
-        // --- RenderizaÁ„o da Interface ---
+        // --- Renderiza√ß√£o da Interface ---
         ImGuiMCP::Text(genderLabel);
         ImGuiMCP::SameLine();
         const char* genders[] = { genderNoneOption, "Male", "Female" };
@@ -164,8 +164,8 @@ namespace SPIDUI {
                 ImGuiMCP::TableSetColumnIndex(1);
                 std::string resolvedName = "Not Found";
 
-                // Puxamos apenas o necess·rio: Split da string e busca direta no Form
-                auto tokens = split(f.formIDStr, '|'); // FunÁ„o auxiliar definida em Rule.h
+                // Puxamos apenas o necess√°rio: Split da string e busca direta no Form
+                auto tokens = split(f.formIDStr, '|'); // Fun√ß√£o auxiliar definida em Rule.h
                 if (tokens.size() == 2 && dataHandler) {
                     try {
                         uint32_t localID = std::stoul(tokens[1], nullptr, 16);
@@ -204,7 +204,7 @@ namespace SPIDUI {
         return std::find(list.begin(), list.end(), id) != list.end();
     }
 
-    // Substitua sua funÁ„o DrawSelectionTable em UI.cpp por esta:
+    // Substitua sua fun√ß√£o DrawSelectionTable em UI.cpp por esta:
     void DrawSelectionTable(Rule& rule, std::string& listType, bool isRewardMode,
         RewardGroup* targetGroup = nullptr,
         std::vector<BlacklistFilter>* blacklistTarget = nullptr) {
@@ -235,12 +235,12 @@ namespace SPIDUI {
         ImGuiMCP::SetNextItemWidth(200.0f);
         if (ImGuiMCP::BeginCombo("##FilterType", listType.c_str())) {
             std::vector<const char*> options = isRewardMode ?
-                std::vector<const char*>{ "All", "Selected", "Perk", "Spell", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" } :
+                std::vector<const char*>{ "All", "Selected", "Perk", "Spell", "Shout", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" } :
                 std::vector<const char*>{
-            "All", "Selected", "NPC", "Faction", "Keyword", "Race",
-            "Combat Style", "Voice Type", "Class", "Location",
-            "Hair", "Facial Hair" 
-            };
+                "All", "Selected", "NPC", "Faction", "Keyword", "Race", 
+                "Package", "Combat Style", "Voice Type", "Class", "Location",
+                "Hair", "Facial Hair", "Leveled NPC" 
+                };
 
             for (auto opt : options) {
                 if (ImGuiMCP::Selectable(opt, listType == opt)) {
@@ -256,7 +256,7 @@ namespace SPIDUI {
         if (listType == "All") {
             if (isRewardMode) {
                 if (rewardAllCache.empty()) {
-                    for (auto& type : { "Spell", "Perk", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" }) {
+                    for (auto& type : { "Spell", "Shout", "Perk", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" }) {
                         auto& l = Manager::GetSingleton()->GetList(type);
                         rewardAllCache.insert(rewardAllCache.end(), l.begin(), l.end());
                     }
@@ -268,7 +268,7 @@ namespace SPIDUI {
                     for (auto& type : {
                         "NPC", "Faction", "Keyword", "Race",
                         "Combat Style", "Voice Type", "Class", "Location",
-                        "Hair", "Facial Hair"
+                        "Hair", "Facial Hair", "Leveled NPC"
                         }) {
                         auto& l = Manager::GetSingleton()->GetList(type);
                         filterAllCache.insert(filterAllCache.end(), l.begin(), l.end());
@@ -278,7 +278,7 @@ namespace SPIDUI {
             }
         }
         else if (listType == "Selected") {
-            // LÛgica de cache para itens selecionados (j· existente, mas otimizada)
+            // L√≥gica de cache para itens selecionados (j√° existente, mas otimizada)
             static std::vector<InternalFormInfo> selectedCache;
             if (isRewardMode && targetGroup) {
                 if (targetGroup != lastTargetPtr || targetGroup->rewards.size() != lastTargetSize) changed = true;
@@ -347,7 +347,7 @@ namespace SPIDUI {
         if (lastListType != listType) {
             changed = true;
         }
-        // 3. PROCESSAMENTO DO FILTRO (Apenas se necess·rio)
+        // 3. PROCESSAMENTO DO FILTRO (Apenas se necess√°rio)
         if (needsRebuildFiltered || lastListType != listType) {
             currentCache.clear();
 
@@ -374,14 +374,14 @@ namespace SPIDUI {
         ImGuiMCP::ImVec2 avail;
         ImGuiMCP::GetContentRegionAvail(&avail);
 
-        // No ImGuiMCP, usamos GetScrollY e o tamanho da regi„o visÌvel para definir o range
+        // No ImGuiMCP, usamos GetScrollY e o tamanho da regi√£o vis√≠vel para definir o range
 
         float tableHeight = avail.y; // Mesma altura definida no BeginTable
         // 4. TABELA COM IMGUILISTCLIPPER
         bool showTypeColumn = (listType == "All" || listType == "Selected");
-        int columns = 4; // Active, FormID, Name, Plugin
-        if (showTypeColumn) columns += 1; // Type
-        if (isRewardMode)   columns += 3; // Qty, Chance, Sleep
+        int columns = 5; // Active, FormID, Name, Plugin
+        //if (showTypeColumn) columns += 1; // Type
+        if (isRewardMode)   columns += 4; // Qty, Chance, Sleep
 
         auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg |
             ImGuiMCP::ImGuiTableFlags_Resizable | ImGuiMCP::ImGuiTableFlags_ScrollY;
@@ -390,12 +390,13 @@ namespace SPIDUI {
             ImGuiMCP::TableSetupColumn("Active", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
             ImGuiMCP::TableSetupColumn("FormID", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
             ImGuiMCP::TableSetupColumn("Name", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
-            if (showTypeColumn) ImGuiMCP::TableSetupColumn("Type", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGuiMCP::TableSetupColumn("Type", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 130.0f);
             ImGuiMCP::TableSetupColumn("Plugin", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             if (isRewardMode) {
                 ImGuiMCP::TableSetupColumn("Qty", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
                 ImGuiMCP::TableSetupColumn("Chance", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
-                ImGuiMCP::TableSetupColumn("Sleep", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGuiMCP::TableSetupColumn("Persist", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                ImGuiMCP::TableSetupColumn("Mode", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 130.0f);
             }
             ImGuiMCP::TableHeadersRow();
             int totalItems = static_cast<int>(currentCache.size());
@@ -406,14 +407,14 @@ namespace SPIDUI {
 
             while (ImGuiMCP::ImGuiListClipperManager::Step(clipper)) {
                 for (int i = clipper->DisplayStart; i < clipper->DisplayEnd; i++) {
-                    // SeguranÁa contra Ìndices inv·lidos
+                    // Seguran√ßa contra √≠ndices inv√°lidos
                     if (i < 0 || i >= totalItems) {
                         continue;
                     }
 
                     size_t sourceIdx = currentCache[i];
 
-                    // Outra trava: verificar se o Ìndice do sourceIdx ainda È v·lido no sourceList
+                    // Outra trava: verificar se o √≠ndice do sourceIdx ainda √© v√°lido no sourceList
                     if (sourceIdx >= sourceList->size()) {
                         continue;
                     }
@@ -423,7 +424,7 @@ namespace SPIDUI {
                     ImGuiMCP::TableNextRow();
                     ImGuiMCP::TableSetColumnIndex(0);
 
-                    // Checkbox e LÛgica de SeleÁ„o
+                    // Checkbox e L√≥gica de Sele√ß√£o
                     if (blacklistTarget) {
                         auto it = std::find_if(blacklistTarget->begin(), blacklistTarget->end(), [&](const BlacklistFilter& f) { return f.formIDStr == internalID; });
                         bool selected = (it != blacklistTarget->end());
@@ -443,15 +444,11 @@ namespace SPIDUI {
 
                     ImGuiMCP::TableSetColumnIndex(1); ImGuiMCP::Text("%08X", item.formID);
                     ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::TextUnformatted(item.GetDisplayName().c_str());
-                    int nextCol = 3; // ComeÁamos a controlar o Ìndice dinamicamente
+                    ImGuiMCP::TableSetColumnIndex(3); ImGuiMCP::TextUnformatted(item.formType.c_str()); // Renderiza sem condi√ß√£o
+                    ImGuiMCP::TableSetColumnIndex(4); ImGuiMCP::TextUnformatted(item.pluginName.c_str());
+                    int nextCol = 3; // Come√ßamos a controlar o √≠ndice dinamicamente
 
-                    if (showTypeColumn) {
-                        ImGuiMCP::TableSetColumnIndex(nextCol++);
-                        ImGuiMCP::TextUnformatted(item.formType.c_str());
-                    }
-
-                    ImGuiMCP::TableSetColumnIndex(nextCol++);
-                    ImGuiMCP::TextUnformatted(item.pluginName.c_str());
+                    
 
                     if (isRewardMode && targetGroup) {
                         auto it = std::find_if(targetGroup->rewards.begin(), targetGroup->rewards.end(), [&](const Reward& r) {
@@ -459,19 +456,33 @@ namespace SPIDUI {
                             });
 
                         if (it != targetGroup->rewards.end()) {
-                            // Usa o nextCol para garantir que estamos na coluna certa (5 e 6 ou 4 e 5)
-                            ImGuiMCP::TableSetColumnIndex(nextCol++);
+                            ImGuiMCP::TableSetColumnIndex(5);
                             ImGuiMCP::SetNextItemWidth(-1.0f);
                             int val = (int)it->amount;
                             if (ImGuiMCP::InputInt(("##q" + internalID).c_str(), &val, 0, 0)) it->amount = (uint32_t)val;
 
-                            ImGuiMCP::TableSetColumnIndex(nextCol++);
+                            ImGuiMCP::TableSetColumnIndex(6);
                             ImGuiMCP::SetNextItemWidth(-1.0f);
                             ImGuiMCP::InputFloat(("##c" + internalID).c_str(), &it->chanceReward, 0, 0, "%.1f");
 
-                            ImGuiMCP::TableSetColumnIndex(nextCol++);
-                            if (item.formType == "Outfit") {
-                                ImGuiMCP::Checkbox(("##slp" + internalID).c_str(), &it->isSleepOutfit);
+                            ImGuiMCP::TableSetColumnIndex(7); // Nova Coluna para Persist
+                            ImGuiMCP::Checkbox(("##per" + internalID).c_str(), &it->isPersistent);
+                            if (ImGuiMCP::IsItemHovered()) ImGuiMCP::SetTooltip("If checked, item won't be removed when rule becomes invalid.");
+
+                            ImGuiMCP::TableSetColumnIndex(8);
+                            if (item.formType == "Outfit" || item.formType == "Spell") {
+                                const char* modes[] = { "Standard", "Special", "Both" };
+                                ImGuiMCP::SetNextItemWidth(-1.0f); // Aplicando sua d√∫vida anterior
+                                if (ImGuiMCP::BeginCombo(("##mode" + internalID).c_str(), modes[it->functionOnType])) {
+                                    for (int m = 0; m < 3; m++) {
+                                        if (ImGuiMCP::Selectable(modes[m], it->functionOnType == m)) it->functionOnType = m;
+                                    }
+                                    ImGuiMCP::EndCombo();
+                                }
+                                if (ImGuiMCP::IsItemHovered()) {
+                                    if (item.formType == "Outfit") ImGuiMCP::SetTooltip("0: Normal, 1: Sleep(beta), 2: Both(beta)");
+                                    else ImGuiMCP::SetTooltip("0: Teach, 1: Cast/Apply, 2: Both");
+                                }
                             }
                             else {
                                 ImGuiMCP::TextDisabled("-");
@@ -490,7 +501,23 @@ namespace SPIDUI {
         ImGuiMCP::SameLine();
 
         if (ImGuiMCP::Button("+ New Group")) {
-            rule.rewardGroups.push_back({ "New Group", false, 100.0f, {} });
+            std::string baseName = "New Group";
+            std::string finalName = baseName;
+            int counter = 1;
+            bool exists = true;
+
+            // Loop para encontrar um nome que n√£o esteja em uso na regra atual
+            while (exists) {
+                exists = false;
+                for (const auto& g : rule.rewardGroups) {
+                    if (g.name == finalName) {
+                        finalName = baseName + " (" + std::to_string(counter++) + ")";
+                        exists = true;
+                        break;
+                    }
+                }
+            }
+            rule.rewardGroups.push_back({ finalName, false, 100.0f, {} });
         }
         if (rule.isExclusive) {
             float totalGroupsChance = 0.0f;
@@ -510,7 +537,7 @@ namespace SPIDUI {
             auto& group = rule.rewardGroups[gIdx];
             ImGuiMCP::PushID(static_cast<int>(gIdx));
 
-            // TÌtulo do CollapsingHeader com informaÁıes do grupo
+            // T√≠tulo do CollapsingHeader com informa√ß√µes do grupo
             std::string headerLabel = group.name + " (" + std::to_string(group.rewards.size()) + " rewards)";
             if (group.isExclusive) headerLabel = "[EXCL] " + headerLabel;
             headerLabel += "###header_group_" + std::to_string(gIdx);
@@ -521,7 +548,33 @@ namespace SPIDUI {
                 char nameBuf[64];
                 strcpy_s(nameBuf, group.name.c_str());
                 ImGuiMCP::SetNextItemWidth(200.0f);
-                if (ImGuiMCP::InputText("Group Name", nameBuf, sizeof(nameBuf))) group.name = nameBuf;
+                static std::string lastDuplicateAttempt = "";
+                static size_t duplicateGroupIdx = -1;
+                if (ImGuiMCP::InputText("Group Name", nameBuf, sizeof(nameBuf))) {
+                    std::string newName = nameBuf;
+                    bool alreadyTaken = false;
+
+                    // Verifica se algum OUTRO grupo j√° usa esse nome
+                    for (size_t i = 0; i < rule.rewardGroups.size(); i++) {
+                        if (i != gIdx && rule.rewardGroups[i].name == newName) {
+                            alreadyTaken = true;
+                            break;
+                        }
+                    }
+
+                    if (!alreadyTaken && !newName.empty()) {
+                        group.name = newName;
+                        if (duplicateGroupIdx == gIdx) duplicateGroupIdx = -1; // Limpa o erro se corrigido
+                    }
+                    else if (alreadyTaken) {
+                        lastDuplicateAttempt = newName;
+                        duplicateGroupIdx = gIdx;
+                    }
+                }
+                if (duplicateGroupIdx == gIdx) {
+                    ImGuiMCP::SameLine();
+                    ImGuiMCP::TextColored({ 1.0f, 0.2f, 0.2f, 1.0f }, " [!] This name is already in use");
+                }
 
                 ImGuiMCP::SameLine();
                 if (ImGuiMCP::Button("Delete Group")) {
@@ -556,14 +609,15 @@ namespace SPIDUI {
                 ImGuiMCP::Spacing();
                 ImGuiMCP::Text("Rewards in Group:");
 
-                // --- Tabela de VisualizaÁ„o de Rewards ---
+                // --- Tabela de Visualiza√ß√£o de Rewards ---
                 auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg | ImGuiMCP::ImGuiTableFlags_Resizable;
-                if (ImGuiMCP::BeginTable("GroupRewardsSummary", 6, tableFlags)) {
+                if (ImGuiMCP::BeginTable("GroupRewardsSummary", 7, tableFlags)) {
                     ImGuiMCP::TableSetupColumn("Type", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
                     ImGuiMCP::TableSetupColumn("Reward", ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
                     ImGuiMCP::TableSetupColumn("Qty", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 50.0f);
                     ImGuiMCP::TableSetupColumn("Chance", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
-                    ImGuiMCP::TableSetupColumn("Sleep", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 45.0f);
+                    ImGuiMCP::TableSetupColumn("Persist", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f); // Nova
+                    ImGuiMCP::TableSetupColumn("Mode", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
                     ImGuiMCP::TableSetupColumn("Action", ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 40.0f);
                     ImGuiMCP::TableHeadersRow();
 
@@ -595,18 +649,28 @@ namespace SPIDUI {
                         ImGuiMCP::TableSetColumnIndex(3); ImGuiMCP::Text("%.1f%%", r.chanceReward);
 
                         ImGuiMCP::TableSetColumnIndex(4);
-                        if (r.typeReward == "Outfit") {
-                            ImGuiMCP::Checkbox(("##slpsum" + std::to_string(rIdx)).c_str(), &r.isSleepOutfit);
+                        std::string persistID = "##p" + std::to_string(gIdx) + "_" + std::to_string(rIdx);
+                        if (ImGuiMCP::Checkbox(persistID.c_str(), &r.isPersistent)) {
+                            // A refer√™ncia '&r.isPersistent' j√° atualiza o valor automaticamente
+                        }
+                        if (ImGuiMCP::IsItemHovered()) {
+                            ImGuiMCP::SetTooltip("If checked, item won't be removed when rule becomes invalid.");
+                        }
+
+                        ImGuiMCP::TableSetColumnIndex(5);
+                        if (r.typeReward == "Outfit" || r.typeReward == "Spell") {
+                            const char* modeNames[] = { "Standard", "Special", "Both" };
+                            ImGuiMCP::Text("%s", modeNames[r.functionOnType]);
                         }
                         else {
                             ImGuiMCP::TextDisabled("-");
                         }
 
-                        // Coluna 4: AÁ„o de Remover (Bot„o X)
-                        ImGuiMCP::TableSetColumnIndex(5);
+                        // Coluna 4: A√ß√£o de Remover (Bot√£o X)
+                        ImGuiMCP::TableSetColumnIndex(6);
                         if (ImGuiMCP::Button(("X##r" + std::to_string(rIdx)).c_str())) {
                             group.rewards.erase(group.rewards.begin() + rIdx);
-                            break; // Interrompe o frame para evitar erro de Ìndice apÛs remoÁ„o
+                            break; // Interrompe o frame para evitar erro de √≠ndice ap√≥s remo√ß√£o
                         }
                     }
                     ImGuiMCP::EndTable();
@@ -662,7 +726,7 @@ namespace SPIDUI {
     void RenderRuleEditor(Rule& rule) {
         ImGuiMCP::PushID(rule.id.c_str());
         if (ImGuiMCP::Checkbox("Rule Enabled", &rule.isEnabled)) {
-            // Opcional: VocÍ pode forÁar um save ou apenas deixar o hash detectar
+            // Opcional: Voc√™ pode for√ßar um save ou apenas deixar o hash detectar
         }
 
         ImGuiMCP::SameLine();
@@ -750,7 +814,7 @@ namespace SPIDUI {
 
         for (const auto& item : npcList) {
             if (auto npc = RE::TESForm::LookupByID<RE::TESNPC>(item.formID)) {
-                // Reutiliza sua lÛgica de checagem (Target e Blacklist)
+                // Reutiliza sua l√≥gica de checagem (Target e Blacklist)
                 if (IsNPCMatchingTargets(npc, const_cast<Rule&>(rule), false) &&
                     !IsNPCMatchingTargets(npc, const_cast<Rule&>(rule), true)) {
                     matches.push_back(&item);
@@ -762,19 +826,19 @@ namespace SPIDUI {
 
 
     void Render() {
-
-        // 1. Bot„o Criar Regra
+        Manager::GetSingleton()->PopulateAllLists();
+        // 1. Bot√£o Criar Regra
         if (ImGuiMCP::Button(" + New Rule ")) {
             ImGuiMCP::OpenPopup("PopupNovaRegra");
         }
 
-        // LÛgica do Popup de CriaÁ„o
+        // L√≥gica do Popup de Cria√ß√£o
         if (ImGuiMCP::BeginPopup("PopupNovaRegra")) {
             static char nBuf[64] = "";
             if (ImGuiMCP::InputText("Name", nBuf, sizeof(nBuf),
                 ImGuiMCP::ImGuiInputTextFlags_CallbackCharFilter, FilterFileNameChars))
             {
-                // O texto j· sai filtrado aqui
+                // O texto j√° sai filtrado aqui
             }
             if (ImGuiMCP::Button("Create")) {
                 auto& r = RuleManager::GetSingleton()->CreateRule();
@@ -790,6 +854,41 @@ namespace SPIDUI {
             RuleManager::GetSingleton()->SaveRules();
             RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
             needsNPCListUpdate = true;
+            auto saveMgr = SaveStateManager::GetSingleton();
+            auto player = RE::PlayerCharacter::GetSingleton();
+
+            // VERIFICA√á√ÉO: Contexto v√°lido + Player existe + Player est√° em uma c√©lula carregada
+            // Se player->GetParentCell() for null, o jogador n√£o est√° no mundo (Main Menu)
+            if (saveMgr->GetCurrentContext().isValid && player && player->GetParentCell()) {
+                logger::info("[UI] Mundo ativo detectado. Aplicando regras em tempo real...");
+
+                // Aplica ao Player
+                ApplyRulesToInstance(player);
+
+                // Aplica aos NPCs pr√≥ximos
+                auto processLists = RE::ProcessLists::GetSingleton();
+                if (processLists) {
+                    for (auto& handle : processLists->highActorHandles) {
+                        auto actorPtr = handle.get();
+                        if (actorPtr) {
+                            RE::Actor* npc = actorPtr.get();
+
+                            // Filtros: Existe, n√£o √© o player, n√£o est√° morto
+                            if (npc && npc != player && !npc->IsDead()) {
+                                // Verifica se a regra editada afeta este NPC espec√≠fico
+                                if (RuleManager::GetSingleton()->IsAffected(npc)) {
+                                    logger::debug("[UI-LiveUpdate] Atualizando NPC: {}", npc->GetName());
+                                    ApplyRulesToInstance(npc);
+                                }
+                            }
+                        }
+                    }
+                }
+                logger::info("[UI] Atualiza√ß√£o conclu√≠da com sucesso.");
+            }
+            else {
+                logger::info("[UI] Regras salvas. Nenhuma aplica√ß√£o imediata (fora do jogo ou no Menu Principal).");
+            }
         }
 
 
@@ -817,10 +916,10 @@ namespace SPIDUI {
             
             label += " [V:" + std::to_string(rule.version) + "]###" + rule.id;
 
-            // --- LÛgica de Cor do Header e Texto ---
+            // --- L√≥gica de Cor do Header e Texto ---
             bool stylePushed = false;
             if (!rule.isEnabled) {
-                // Escurece o cabeÁalho e o texto se estiver OFF
+                // Escurece o cabe√ßalho e o texto se estiver OFF
                 ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Text, { 0.5f, 0.5f, 0.5f, 1.0f }); // Cinza
                 ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Header, { 0.1f, 0.1f, 0.1f, 1.0f }); // Dark
                 stylePushed = true;
@@ -845,7 +944,7 @@ namespace SPIDUI {
 
         if (!toDelete.empty()) {
             RuleManager::GetSingleton()->DeleteRule(toDelete);
-            // Recalcula apÛs deletar
+            // Recalcula ap√≥s deletar
             RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
             needsNPCListUpdate = true;
         }
@@ -920,7 +1019,7 @@ namespace SPIDUI {
                 // Atualiza o cache se mudamos de regra
                 if (lastPreviewID != activeRuleID) {
                     affectedCache = GetNPCsForRule(*activeRule);
-                    lastPreviewID = activeRuleID; // Usar activeRuleID, n„o rule.id
+                    lastPreviewID = activeRuleID; // Usar activeRuleID, n√£o rule.id
                 }
 
                 ImGuiMCP::Text("NPCs affected by '%s': %zu", activeRule->name.c_str(), affectedCache.size());
@@ -1011,7 +1110,7 @@ namespace SPIDUI {
                 // OU se ele passaria em alguma regra modificada (Preview)
                 bool isAffected = affectedDB.contains(item.formID);
 
-                // OtimizaÁ„o: Se n„o estiver no DB, checamos se passaria em alguma regra modificada
+                // Otimiza√ß√£o: Se n√£o estiver no DB, checamos se passaria em alguma regra modificada
                 if (!isAffected && showOnlyAffected) {
                     if (auto npc = RE::TESForm::LookupByID<RE::TESNPC>(item.formID)) {
                         for (const auto& rule : allRules) {
@@ -1071,8 +1170,8 @@ namespace SPIDUI {
 
                 std::vector<std::string> previewRules;
 
-                // 2. L”GICA DE PREVIEW (Apenas para novos NPCs)
-                // Se j· tem regras salvas, n„o processamos preview para este NPC
+                // 2. L√ìGICA DE PREVIEW (Apenas para novos NPCs)
+                // Se j√° tem regras salvas, n√£o processamos preview para este NPC
                 if (!hasSavedRules) {
                     if (auto npc = RE::TESForm::LookupByID<RE::TESNPC>(item.formID)) {
                         for (const auto& rule : allRules) {
@@ -1111,7 +1210,7 @@ namespace SPIDUI {
                 if (hasSavedRules) {
                     for (const auto& ruleID : it->second.ruleIDs) {
                         auto rIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
-                        // SÛ mostra se a regra n„o estiver na lista de preview (para n„o duplicar)
+                        // S√≥ mostra se a regra n√£o estiver na lista de preview (para n√£o duplicar)
                         if (rIt != allRules.end()) {
                             bool beingModified = std::find(previewRules.begin(), previewRules.end(), rIt->name) != previewRules.end();
                             if (!beingModified) {

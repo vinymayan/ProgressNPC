@@ -1,12 +1,11 @@
-
-
+ï»¿
 //namespace DynamicHeadPartUtils
 //{
-//    using json = nlohmann::json;
+//    using rapidjson Document
 //
 //    RE::BGSHeadPart* CreateHeadPartFromJson(const json& a_data)
 //    {
-//        // 1. Cria a instância utilizando o helper de template do ConcreteFormFactory.h
+//        // 1. Cria a instï¿½ncia utilizando o helper de template do ConcreteFormFactory.h
 //        // Isso resolve automaticamente a factory para FormType::HeadPart
 //        auto newPart = RE::IFormFactory::Create<RE::BGSHeadPart>();
 //        if (!newPart) return nullptr;
@@ -45,7 +44,7 @@
 //            }
 //        }
 //
-//        // 7. Configura as Raças Válidas (RNAM)
+//        // 7. Configura as Raï¿½as Vï¿½lidas (RNAM)
 //        if (a_data.contains("validRacesListID")) {
 //            auto dataHandler = RE::TESDataHandler::GetSingleton();
 //            if (dataHandler) {
@@ -66,7 +65,7 @@
 //    {
 //        if (!a_actor) return;
 //
-//        // Obtém o Base NPC para modificar o array de partes
+//        // Obtï¿½m o Base NPC para modificar o array de partes
 //        auto baseNPC = a_actor->GetActorBase();
 //        if (!baseNPC) return;
 //
@@ -77,7 +76,7 @@
 //            // ChangeHeadPart substitui a parte existente do mesmo tipo no array headParts
 //            baseNPC->ChangeHeadPart(customPart);
 //
-//            // Força a atualização do modelo 3D do Actor para refletir a mudança
+//            // Forï¿½a a atualizaï¿½ï¿½o do modelo 3D do Actor para refletir a mudanï¿½a
 //            a_actor->Update3DModel();
 //        }
 //    }
@@ -87,7 +86,7 @@
 
 //namespace HeadPartCreator
 //{
-//    using json = nlohmann::json;
+//    using rapidjson Document
 //
 //    RE::BGSHeadPart* CreateHeadPartFromJson(const json& a_data);
 //

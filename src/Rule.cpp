@@ -1,5 +1,8 @@
 #include "Rule.h"
 #include <miniz.h> // Inclua a biblioteca miniz
+#include <rapidjson/istreamwrapper.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 namespace fs = std::filesystem;
 // Helper to split string
@@ -22,11 +25,11 @@ std::string FormatLocalFormID(uint32_t a_formID, const std::string& a_pluginName
     auto file = dataHandler ? dataHandler->LookupModByName(plugin) : nullptr;
 
     char buf[10];
-    // Plugins "Light" (ESL ou ESP com flag FE) usam os últimos 3 dígitos (12 bits)
+    // Plugins "Light" (ESL ou ESP com flag FE) usam os Ãºltimos 3 dÃ­gitos (12 bits)
     if (file && file->IsLight()) {
         sprintf_s(buf, "%03X", a_formID & 0x00000FFF);
     }
-    // Plugins "Full" (ESM e ESP comuns) usam os últimos 6 dígitos (24 bits)
+    // Plugins "Full" (ESM e ESP comuns) usam os Ãºltimos 6 dÃ­gitos (24 bits)
     else {
         sprintf_s(buf, "%06X", a_formID & 0x00FFFFFF);
     }
@@ -63,97 +66,275 @@ std::string SanitizeFilename(std::string name) {
             c = '_'; // Substitui por underscore
         }
     }
-    // Remove espaços no fim ou pontos que podem causar problemas
+    // Remove espaÃ§os no fim ou pontos que podem causar problemas
     while (!name.empty() && (name.back() == ' ' || name.back() == '.')) {
         name.pop_back();
     }
     return name;
 }
 
-void to_json(json& j, const Reward& p) {
-    j = json{
-        {"typeReward", p.typeReward},
-        {"FormID", p.formIDStr},
-        {"Amount", p.amount},
-        {"Chance", p.chanceReward},
-        {"isSleepOutfit", p.isSleepOutfit}
-        //{"Lootable", p.lootable} 
-    };
+namespace {
+    using JsonAllocator = rapidjson::Document::AllocatorType;
+
+    const rapidjson::Value* FindMember(const rapidjson::Value& obj, const char* key) {
+        if (!obj.IsObject()) return nullptr;
+        auto it = obj.FindMember(key);
+        return it != obj.MemberEnd() ? &it->value : nullptr;
+    }
+
+    std::string GetString(const rapidjson::Value& obj, const char* key, const std::string& fallback = {}) {
+        auto value = FindMember(obj, key);
+        return value && value->IsString() ? value->GetString() : fallback;
+    }
+
+    bool GetBool(const rapidjson::Value& obj, const char* key, bool fallback = false) {
+        auto value = FindMember(obj, key);
+        return value && value->IsBool() ? value->GetBool() : fallback;
+    }
+
+    int GetInt(const rapidjson::Value& obj, const char* key, int fallback = 0) {
+        auto value = FindMember(obj, key);
+        return value && value->IsInt() ? value->GetInt() : fallback;
+    }
+
+    uint32_t GetUint(const rapidjson::Value& obj, const char* key, uint32_t fallback = 0) {
+        auto value = FindMember(obj, key);
+        return value && value->IsUint() ? value->GetUint() : fallback;
+    }
+
+    float GetFloat(const rapidjson::Value& obj, const char* key, float fallback = 0.0f) {
+        auto value = FindMember(obj, key);
+        return value && value->IsNumber() ? value->GetFloat() : fallback;
+    }
+
+    void AddString(rapidjson::Value& obj, JsonAllocator& alloc, const char* key, const std::string& value) {
+        rapidjson::Value jsonKey;
+        jsonKey.SetString(key, alloc);
+        rapidjson::Value jsonValue;
+        jsonValue.SetString(value.c_str(), static_cast<rapidjson::SizeType>(value.size()), alloc);
+        obj.AddMember(jsonKey, jsonValue, alloc);
+    }
+
+    void AddBool(rapidjson::Value& obj, JsonAllocator& alloc, const char* key, bool value) {
+        rapidjson::Value jsonKey;
+        jsonKey.SetString(key, alloc);
+        obj.AddMember(jsonKey, value, alloc);
+    }
+
+    void AddInt(rapidjson::Value& obj, JsonAllocator& alloc, const char* key, int value) {
+        rapidjson::Value jsonKey;
+        jsonKey.SetString(key, alloc);
+        obj.AddMember(jsonKey, value, alloc);
+    }
+
+    void AddUint(rapidjson::Value& obj, JsonAllocator& alloc, const char* key, uint32_t value) {
+        rapidjson::Value jsonKey;
+        jsonKey.SetString(key, alloc);
+        obj.AddMember(jsonKey, value, alloc);
+    }
+
+    void AddFloat(rapidjson::Value& obj, JsonAllocator& alloc, const char* key, float value) {
+        rapidjson::Value jsonKey;
+        jsonKey.SetString(key, alloc);
+        obj.AddMember(jsonKey, value, alloc);
+    }
+
+    rapidjson::Value WriteBlacklistFilter(const BlacklistFilter& p, JsonAllocator& alloc) {
+        rapidjson::Value obj(rapidjson::kObjectType);
+        AddString(obj, alloc, "type", p.type);
+        AddString(obj, alloc, "formID", p.formIDStr);
+        return obj;
+    }
+
+    BlacklistFilter ReadBlacklistFilter(const rapidjson::Value& value) {
+        BlacklistFilter p;
+        p.type = GetString(value, "type");
+        p.formIDStr = GetString(value, "formID");
+        return p;
+    }
+
+    rapidjson::Value WriteFilterArray(const std::vector<BlacklistFilter>& filters, JsonAllocator& alloc) {
+        rapidjson::Value array(rapidjson::kArrayType);
+        for (const auto& filter : filters) {
+            array.PushBack(WriteBlacklistFilter(filter, alloc).Move(), alloc);
+        }
+        return array;
+    }
+
+    std::vector<BlacklistFilter> ReadFilterArray(const rapidjson::Value* value) {
+        std::vector<BlacklistFilter> result;
+        if (!value || !value->IsArray()) return result;
+        result.reserve(value->Size());
+        for (const auto& item : value->GetArray()) {
+            if (item.IsObject()) result.push_back(ReadBlacklistFilter(item));
+        }
+        return result;
+    }
+
+    rapidjson::Value WriteReward(const Reward& p, JsonAllocator& alloc) {
+        rapidjson::Value obj(rapidjson::kObjectType);
+        AddString(obj, alloc, "typeReward", p.typeReward);
+        AddString(obj, alloc, "FormID", p.formIDStr);
+        AddUint(obj, alloc, "Amount", p.amount);
+        AddFloat(obj, alloc, "Chance", p.chanceReward);
+        AddInt(obj, alloc, "functionOnType", p.functionOnType);
+        AddBool(obj, alloc, "isPersistent", p.isPersistent);
+        return obj;
+    }
+
+    Reward ReadReward(const rapidjson::Value& value) {
+        Reward p;
+        p.typeReward = GetString(value, "typeReward");
+        p.formIDStr = GetString(value, "FormID");
+        p.amount = GetUint(value, "Amount", 1);
+        p.chanceReward = GetFloat(value, "Chance", 100.0f);
+        p.functionOnType = GetInt(value, "functionOnType", GetInt(value, "isSleepOutfit", 0));
+        p.isPersistent = GetBool(value, "isPersistent", false);
+        return p;
+    }
+
+    rapidjson::Value WriteRewardArray(const std::vector<Reward>& rewards, JsonAllocator& alloc) {
+        rapidjson::Value array(rapidjson::kArrayType);
+        for (const auto& reward : rewards) {
+            array.PushBack(WriteReward(reward, alloc).Move(), alloc);
+        }
+        return array;
+    }
+
+    std::vector<Reward> ReadRewardArray(const rapidjson::Value* value) {
+        std::vector<Reward> result;
+        if (!value || !value->IsArray()) return result;
+        result.reserve(value->Size());
+        for (const auto& item : value->GetArray()) {
+            if (item.IsObject()) result.push_back(ReadReward(item));
+        }
+        return result;
+    }
+
+    rapidjson::Value WriteRewardGroup(const RewardGroup& p, JsonAllocator& alloc) {
+        rapidjson::Value obj(rapidjson::kObjectType);
+        AddString(obj, alloc, "name", p.name);
+        AddBool(obj, alloc, "exclusive", p.isExclusive);
+        AddFloat(obj, alloc, "chanceGroup", p.chanceGroup);
+        auto rewards = WriteRewardArray(p.rewards, alloc);
+        obj.AddMember("rewards", rewards, alloc);
+        return obj;
+    }
+
+    RewardGroup ReadRewardGroup(const rapidjson::Value& value) {
+        RewardGroup p;
+        p.name = GetString(value, "name", "New Group");
+        p.isExclusive = GetBool(value, "exclusive", false);
+        p.chanceGroup = GetFloat(value, "chanceGroup", 100.0f);
+        p.rewards = ReadRewardArray(FindMember(value, "rewards"));
+        return p;
+    }
+
+    rapidjson::Value WriteRewardGroupArray(const std::vector<RewardGroup>& groups, JsonAllocator& alloc) {
+        rapidjson::Value array(rapidjson::kArrayType);
+        for (const auto& group : groups) {
+            array.PushBack(WriteRewardGroup(group, alloc).Move(), alloc);
+        }
+        return array;
+    }
+
+    std::vector<RewardGroup> ReadRewardGroupArray(const rapidjson::Value* value) {
+        std::vector<RewardGroup> result;
+        if (!value || !value->IsArray()) return result;
+        result.reserve(value->Size());
+        for (const auto& item : value->GetArray()) {
+            if (item.IsObject()) result.push_back(ReadRewardGroup(item));
+        }
+        return result;
+    }
+
+    rapidjson::Value WriteCompactRule(const Rule& p, bool isLatest, JsonAllocator& alloc) {
+        rapidjson::Value obj(rapidjson::kObjectType);
+        if (isLatest) {
+            AddString(obj, alloc, "id", p.id);
+            AddString(obj, alloc, "n", p.name);
+            AddBool(obj, alloc, "en", p.isEnabled);
+        }
+        AddInt(obj, alloc, "v", p.version);
+        AddInt(obj, alloc, "l", p.level);
+        AddInt(obj, alloc, "g", p.targetGender);
+        AddBool(obj, alloc, "ra", p.targetRequiresAll);
+        AddBool(obj, alloc, "ex", p.isExclusive);
+        obj.AddMember("tf", WriteFilterArray(p.targetFilters, alloc), alloc);
+        obj.AddMember("rg", WriteRewardGroupArray(p.rewardGroups, alloc), alloc);
+        AddInt(obj, alloc, "bg", p.blacklistedGender);
+        AddBool(obj, alloc, "bra", p.blacklistRequiresAll);
+        obj.AddMember("bf", WriteFilterArray(p.blacklistFilters, alloc), alloc);
+        return obj;
+    }
+
+    rapidjson::Value WriteHashRule(const Rule& p, JsonAllocator& alloc) {
+        rapidjson::Value obj(rapidjson::kObjectType);
+        AddBool(obj, alloc, "enabled", p.isEnabled);
+        AddString(obj, alloc, "name", p.name);
+        AddInt(obj, alloc, "level", p.level);
+        AddInt(obj, alloc, "t_gender", p.targetGender);
+        AddBool(obj, alloc, "t_reqAll", p.targetRequiresAll);
+        obj.AddMember("t_filters", WriteFilterArray(p.targetFilters, alloc), alloc);
+        obj.AddMember("groups", WriteRewardGroupArray(p.rewardGroups, alloc), alloc);
+        AddInt(obj, alloc, "b_gender", p.blacklistedGender);
+        AddBool(obj, alloc, "b_reqAll", p.blacklistRequiresAll);
+        obj.AddMember("b_filters", WriteFilterArray(p.blacklistFilters, alloc), alloc);
+        AddBool(obj, alloc, "isExclusive", p.isExclusive);
+        for (const auto& group : p.rewardGroups) {
+            const auto key = "g_chance_" + group.name;
+            AddFloat(obj, alloc, key.c_str(), group.chanceGroup);
+        }
+        return obj;
+    }
+
+    std::string SerializeJson(const rapidjson::Value& value) {
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        value.Accept(writer);
+        return buffer.GetString();
+    }
 }
 
-void from_json(const json& j, Reward& p) {
-    j.at("typeReward").get_to(p.typeReward);
-    j.at("FormID").get_to(p.formIDStr);
-    p.amount = j.value("Amount", 1);
-    p.chanceReward = j.value("Chance", 100.0f);
-    p.isSleepOutfit = j.value("isSleepOutfit", false);
-    //p.lootable = j.value("Lootable", true); 
+std::string Rule::CalculateHash() const {
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto& alloc = doc.GetAllocator();
+    auto hashValue = WriteHashRule(*this, alloc);
+    return std::to_string(std::hash<std::string>{}(SerializeJson(hashValue)));
 }
 
-void to_json(json& j, const RewardGroup& p) {
-    j = json{
-        {"name", p.name},
-        {"exclusive", p.isExclusive},
-        {"chanceGroup", p.chanceGroup}, 
-        {"rewards", p.rewards}
-    };
-}
+Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId, const std::string& fallbackName, bool fallbackEnabled) {
+    Rule p;
+    p.id = GetString(j, "id", fallbackId);
+    p.name = GetString(j, "n", GetString(j, "name", fallbackName));
+    p.isEnabled = GetBool(j, "en", GetBool(j, "enabled", fallbackEnabled));
 
-void from_json(const json& j, RewardGroup& p) {
-    j.at("name").get_to(p.name);
-    j.at("exclusive").get_to(p.isExclusive);
-    p.chanceGroup = j.value("chanceGroup", 100.0f);
-    j.at("rewards").get_to(p.rewards);
-}
+    p.version = GetInt(j, "v", GetInt(j, "version", 1));
+    p.level = GetInt(j, "l", GetInt(j, "level", 1));
+    p.targetGender = GetInt(j, "g", GetInt(j, "targetGender", 0));
+    p.targetRequiresAll = GetBool(j, "ra", GetBool(j, "targetRequiresAll", false));
+    p.isExclusive = GetBool(j, "ex", GetBool(j, "ruleExclusive", false));
 
-void to_json(json& j, const BlacklistFilter& p) {
-    j = json{ {"type", p.type}, {"formID", p.formIDStr} };
-}
+    if (auto value = FindMember(j, "tf")) p.targetFilters = ReadFilterArray(value);
+    else p.targetFilters = ReadFilterArray(FindMember(j, "targetFilters"));
 
-void from_json(const json& j, BlacklistFilter& p) {
-    j.at("type").get_to(p.type);
-    j.at("formID").get_to(p.formIDStr);
-}
+    if (auto value = FindMember(j, "rg")) p.rewardGroups = ReadRewardGroupArray(value);
+    else p.rewardGroups = ReadRewardGroupArray(FindMember(j, "RewardGroups"));
 
-// Atualize o to_json e from_json da Rule:
-void to_json(json& j, const Rule& p) {
-    j = json{
-        {"id", p.id}, {"name", p.name},
-        {"enabled", p.isEnabled},
-        {"level", p.level}, {"version", p.version},
-        {"targetGender", p.targetGender},
-        {"targetRequiresAll", p.targetRequiresAll},
-        {"targetFilters", p.targetFilters},
-        {"RewardGroups", p.rewardGroups},
-        {"blacklistedGender", p.blacklistedGender},
-        {"blacklistRequiresAll", p.blacklistRequiresAll},
-        {"blacklistFilters", p.blacklistFilters},
-        {"ruleExclusive", p.isExclusive}
-    };
-}
+    p.blacklistedGender = GetInt(j, "bg", GetInt(j, "blacklistedGender", 0));
+    p.blacklistRequiresAll = GetBool(j, "bra", GetBool(j, "blacklistRequiresAll", false));
 
-void from_json(const json& j, Rule& p) {
-    j.at("id").get_to(p.id);
-    p.isEnabled = j.value("enabled", true);
-    p.name = j.value("name", "Sem Nome");
-    p.level = j.value("level", 1);
-    p.version = j.value("version", 1);
-    p.targetGender = j.value("targetGender", 0);
-    p.targetRequiresAll = j.value("targetRequiresAll", false);
-    if (j.contains("targetFilters")) j.at("targetFilters").get_to(p.targetFilters);
-    if (j.contains("RewardGroups")) j.at("RewardGroups").get_to(p.rewardGroups);
-    p.blacklistedGender = j.value("blacklistedGender", 0);
-    p.blacklistRequiresAll = j.value("blacklistRequiresAll", false);
-    if (j.contains("blacklistFilters")) j.at("blacklistFilters").get_to(p.blacklistFilters);
-    p.isExclusive = j.value("ruleExclusive", false);
+    if (auto value = FindMember(j, "bf")) p.blacklistFilters = ReadFilterArray(value);
+    else p.blacklistFilters = ReadFilterArray(FindMember(j, "blacklistFilters"));
+
     p.lastSavedHash = p.CalculateHash();
+    return p;
 }
-
-
 bool RuleManager::IsAffected(RE::Actor* actor) {
     if (!actor) return false;
     auto baseNPC = actor->GetActorBase();
-	logger::debug("Verificando NPC: {} (FormID: {:08X})", baseNPC ? baseNPC->GetName() : "Unknown", baseNPC->GetFormID());
+	//logger::debug("Verificando NPC: {} (FormID: {:08X})", baseNPC ? baseNPC->GetName() : "Unknown", baseNPC->GetFormID());
     if (!baseNPC) return false;
 
     // 1. Identificar os 3 IDs principais
@@ -163,8 +344,8 @@ bool RuleManager::IsAffected(RE::Actor* actor) {
     // Acessa o baseTemplateForm (TPLT) definido em TESActorBaseData
     RE::TESForm* baseTemplate = actor->GetTemplateBase();
     RE::FormID templateID = baseTemplate ? baseTemplate->GetFormID() : 0;
-	logger::debug("IDs para verificação - ActorID: {:08X}, BaseID: {:08X}, TemplateID: {:08X}", actorID, baseID, templateID);
-    // 2. Busca "em massa": Se qualquer um dos IDs estiver no banco, o ator é afetado
+	logger::debug("IDs para verificaÃ§Ã£o - ActorID: {:08X}, BaseID: {:08X}, TemplateID: {:08X}", actorID, baseID, templateID);
+    // 2. Busca "em massa": Se qualquer um dos IDs estiver no banco, o ator Ã© afetado
     if (_affectedNPCsDatabase.contains(actorID)) return true;
     if (_affectedNPCsDatabase.contains(baseID)) return true;
 
@@ -176,24 +357,43 @@ bool RuleManager::IsAffected(RE::Actor* actor) {
     return false;
 }
 
+bool IsNPCInLeveledList(RE::TESNPC* a_npc, RE::TESLevCharacter* a_levList) {
+    if (!a_npc || !a_levList) return false;
+
+    for (auto& entry : a_levList->entries) {
+        auto form = entry.form;
+        if (!form) continue;
+
+        // Se a entrada for o prÃ³prio NPC, encontramos o match
+        if (form->Is(RE::FormType::NPC)) {
+            if (form->GetFormID() == a_npc->GetFormID()) return true;
+        }
+        // Se a entrada for outra Leveled List, entra nela recursivamente
+        else if (form->Is(RE::FormType::LeveledNPC)) {
+            if (IsNPCInLeveledList(a_npc, form->As<RE::TESLevCharacter>())) return true;
+        }
+    }
+    return false;
+}
+
 bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor) {
     // 1. Seleciona os dados baseados no modo (Target vs Blacklist)
     int genderFilter = isBlacklist ? rule.blacklistedGender : rule.targetGender;
     const auto& filters = isBlacklist ? rule.blacklistFilters : rule.targetFilters;
     bool requiresAll = isBlacklist ? rule.blacklistRequiresAll : rule.targetRequiresAll;
 
-    // 2. Verificação de Gênero (0: None, 1: Male, 2: Female)
+    // 2. VerificaÃ§Ã£o de GÃªnero (0: None, 1: Male, 2: Female)
     if (genderFilter != 0) {
         bool isFemale = npc->IsFemale();
         bool genderMatch = (genderFilter == 1 && !isFemale) || (genderFilter == 2 && isFemale);
 
-        if (isBlacklist && genderMatch) return true;  // Se for blacklist e deu match no gênero, bloqueia
-        if (!isBlacklist && !genderMatch) return false; // Se for target e NÃO deu match, descarta
+        if (isBlacklist && genderMatch) return true;  // Se for blacklist e deu match no gÃªnero, bloqueia
+        if (!isBlacklist && !genderMatch) return false; // Se for target e NÃƒO deu match, descarta
     }
 
-    // 3. Se não houver filtros de ID/Keyword/etc
+    // 3. Se nÃ£o houver filtros de ID/Keyword/etc
     if (filters.empty()) {
-        // Na Blacklist, vazio significa "não bloqueia ninguém". No Target, significa "afeta todos".
+        // Na Blacklist, vazio significa "nÃ£o bloqueia ninguÃ©m". No Target, significa "afeta todos".
         return !isBlacklist;
     }
 
@@ -207,6 +407,12 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
 
         if (filter.type == "NPC") {
             if (npc->GetFormID() == fID) {
+                match = true;
+            }
+        }
+        else if (filter.type == "Leveled NPC") {
+            auto levList = RE::TESForm::LookupByID<RE::TESLevCharacter>(fID);
+            if (levList && IsNPCInLeveledList(npc, levList)) {
                 match = true;
             }
         }
@@ -238,24 +444,24 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
             if (npc->npcClass && npc->npcClass->GetFormID() == fID) match = true;
         }
         else if (filter.type == "Skin") {
-            // A Skin do NPC é um ponteiro para um TESObjectARMO (Armor)
+            // A Skin do NPC Ã© um ponteiro para um TESObjectARMO (Armor)
             if (npc->skin && npc->skin->GetFormID() == fID) match = true;
         }
-        else if (filter.type == "Location") {
-            if (actor) {
-                // Estamos em tempo de execução com um Actor real.
-                auto targetLoc = RE::TESForm::LookupByID<RE::BGSLocation>(fID);
-                auto currentLoc = actor->GetCurrentLocation();
-                if (targetLoc && currentLoc) {
-                    if (currentLoc == targetLoc || currentLoc->IsParent(targetLoc)) {
+        else if (filter.type == "Package") {
+            auto pkg = RE::TESForm::LookupByID<RE::TESPackage>(fID);
+            if (pkg) {
+                // Verifica na lista de pacotes do NPC base
+                for (auto* pak : npc->aiPackages.packages) {
+                    if (pak && pak->GetFormID() == fID) {
                         match = true;
+                        break;
                     }
                 }
-            } 
+            }
         }
         else if (filter.type == "Hair" || filter.type == "Facial Hair") {
-            if (npc->headParts) {
-                for (uint32_t i = 0; i < npc->numHeadParts; i++) {
+            if (npc->headParts && npc->numHeadParts > 0) {
+                for (std::int8_t i = 0; i < npc->numHeadParts; i++) {
                     if (npc->headParts[i] && npc->headParts[i]->GetFormID() == fID) {
                         match = true;
                         break;
@@ -263,17 +469,29 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
                 }
             }
         }
-        
+        else if (filter.type == "Location") {
+            if (actor) {
+                // Estamos em tempo de execuÃ§Ã£o com um Actor real.
+                auto targetLoc = RE::TESForm::LookupByID<RE::BGSLocation>(fID);
+                auto currentLoc = actor->GetCurrentLocation();
+                if (targetLoc && currentLoc) {
+                    if (currentLoc == targetLoc || currentLoc->IsParent(targetLoc)) {
+                        match = true;
+                    }
+                }
+            }
+        }
+
+
 
         if (match) {
             matches++;
-            if (!requiresAll) return true; // Se não exige todos, o primeiro match já valida
+            if (!requiresAll) return true; // Se nÃ£o exige todos, o primeiro match jÃ¡ valida
         }
     }
 
     return (requiresAll && matches == filters.size() && matches > 0);
 }
-
 
 void RuleManager::LoadRules() {
     _rules.clear();
@@ -289,16 +507,31 @@ void RuleManager::LoadRules() {
         if (entry.path().extension() == ".json") {
             std::ifstream i(entry.path());
             try {
-                json j;
-                i >> j;
-                // Cada arquivo agora é uma lista (histórico)
-                auto history = j.get<std::vector<Rule>>();
-                if (!history.empty()) {
-                    // A primeira posição [0] deve ser sempre a versão mais recente
-                    std::string id = history[0].id;
-                    _ruleHistories[id] = history;
-                    _rules.push_back(history[0]);
-                    _ruleIdToFileName[id] = entry.path().stem().string();
+                rapidjson::IStreamWrapper stream(i);
+                rapidjson::Document j;
+                j.ParseStream(stream);
+
+                if (!j.HasParseError() && j.IsArray() && !j.Empty()) {
+                    std::vector<Rule> history;
+
+                    // A primeira entrada [0] Ã© a mais recente e contÃ©m os metadados completos
+                    const rapidjson::Value& latestJson = j[0];
+                    Rule latest = ProcessRuleVersion(latestJson, "", "Sem Nome", true);
+
+                    std::string ruleId = latest.id;
+                    std::string ruleName = latest.name;
+                    bool ruleEnabled = latest.isEnabled;
+
+                    history.push_back(latest);
+
+                    // Processa o restante do histÃ³rico usando os metadados da versÃ£o mais recente como fallback
+                    for (rapidjson::SizeType idx = 1; idx < j.Size(); ++idx) {
+                        history.push_back(ProcessRuleVersion(j[idx], ruleId, ruleName, ruleEnabled));
+                    }
+
+                    _ruleHistories[ruleId] = history;
+                    _rules.push_back(latest);
+                    _ruleIdToFileName[ruleId] = entry.path().stem().string();
                 }
             }
             catch (const std::exception& e) {
@@ -306,10 +539,11 @@ void RuleManager::LoadRules() {
             }
         }
     }
-    logger::info("Carregadas {} regras com seus históricos.", _rules.size());
+    logger::info("Carregadas {} regras com seus histÃ³ricos (Suporte a Formato Compacto ativado).", _rules.size());
 }
 
 void RuleManager::SaveRules() {
+    const size_t MAX_HISTORY = 100;
     int updatedTotal = 0;
 
     for (const auto& filePath : _rulesToDelete) {
@@ -324,7 +558,7 @@ void RuleManager::SaveRules() {
     for (auto& currentRule : _rules) {
         std::string currentContentHash = currentRule.CalculateHash();
 
-        // Se o hash atual for diferente do último salvo
+        // Se o hash atual for diferente do Ãºltimo salvo
         if (currentRule.lastSavedHash != currentContentHash) {
 
             std::string newFileName = SanitizeFilename(currentRule.name);
@@ -339,22 +573,34 @@ void RuleManager::SaveRules() {
                 }
             }
             _ruleIdToFileName[currentRule.id] = newFileName;
-            // 1. Incrementa a versão numérica
+            // 1. Incrementa a versÃ£o numÃ©rica
             currentRule.version++;
             currentRule.lastSavedHash = currentContentHash;
 
-            // 2. Atualiza o histórico em memória
+            // 2. Atualiza o histÃ³rico em memÃ³ria
             auto& history = _ruleHistories[currentRule.id];
-            history.insert(history.begin(), currentRule); // Adiciona a nova versão no topo
+            history.insert(history.begin(), currentRule);
 
-            // 3. Salva o arquivo individual com o histórico completo
+            // PODA: MantÃ©m apenas as Ãºltimas X versÃµes
+            if (history.size() > MAX_HISTORY) {
+                history.resize(MAX_HISTORY);
+            }
+
+            // SALVAMENTO OTIMIZADO
+            rapidjson::Document historyDoc;
+            historyDoc.SetArray();
+            auto& alloc = historyDoc.GetAllocator();
+            for (size_t i = 0; i < history.size(); ++i) {
+                historyDoc.PushBack(WriteCompactRule(history[i], i == 0, alloc).Move(), alloc);
+            }
+
             std::string filePath = _rulesDir + newFileName + ".json";
             std::ofstream o(filePath);
-            json j = history; // O arquivo contém o array de versões
-            o << std::setw(4) << j << std::endl;
+            // Salva sem indentaÃ§Ã£o (dump) para velocidade e espaÃ§o
+            o << SerializeJson(historyDoc) << std::endl;
 
             updatedTotal++;
-            logger::info("Regra '{}' salva. Nova Versão: {}", currentRule.name, currentRule.version);
+            logger::info("Regra '{}' otimizada e salva. VersÃ£o: {}", currentRule.name, currentRule.version);
         }
     }
 
@@ -368,7 +614,7 @@ void RuleManager::ExportRule(const Rule& rule) {
     namespace fs = std::filesystem;
 
     if (!_ruleIdToFileName.contains(rule.id)) {
-        logger::error("Export: ID da regra não encontrado no mapeamento de arquivos.");
+        logger::error("Export: ID da regra nÃ£o encontrado no mapeamento de arquivos.");
         return;
     }
     // 1. Caminhos de origem e destino
@@ -389,8 +635,8 @@ void RuleManager::ExportRule(const Rule& rule) {
         return;
     }
 
-    // 3. Define o caminho interno (onde o arquivo ficará dentro do ZIP)
-    // O usuário quer: SKSE\Plugins\EDF\Rules\nome.json
+    // 3. Define o caminho interno (onde o arquivo ficarÃ¡ dentro do ZIP)
+    // O usuÃ¡rio quer: SKSE\Plugins\EDF\Rules\nome.json
     std::string internalZipPath = "SKSE/Plugins/EDF/Rules/" + ruleFileName;
 
     // 4. Adiciona o arquivo ao ZIP
@@ -436,33 +682,33 @@ void RuleManager::DeleteRule(const std::string& id) {
         std::string fileName = _ruleIdToFileName[id];
         std::string filePath = _rulesDir + fileName + ".json";
 
-        // Adiciona à lista de pendências para deletar do disco no Save
+        // Adiciona Ã  lista de pendÃªncias para deletar do disco no Save
         _rulesToDelete.push_back(filePath);
 
         // Limpa o rastro nos mapas
         _ruleIdToFileName.erase(id);
     }
 
-    // 2. Remove do histórico
+    // 2. Remove do histÃ³rico
     _ruleHistories.erase(id);
 
     // 3. Remove do vetor principal
     std::erase_if(_rules, [&](const Rule& r) { return r.id == id; });
 
-    logger::info("Regra {} marcada para deleção física.", id);
+    logger::info("Regra {} marcada para deleÃ§Ã£o fÃ­sica.", id);
 }
 
 std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {
     std::vector<Reward> applicable;
     if (!npc) return applicable;
 
-    // 1. Obter o identificador do NPC no formato correto (Hexadecimal 5 ou 3 dígitos)
+    // 1. Obter o identificador do NPC no formato correto (Hexadecimal 5 ou 3 dÃ­gitos)
     std::string npcPlugin = "";
     if (auto file = npc->GetFile(0)) {
         npcPlugin = file->GetFilename();
     }
 
-    // CORREÇÃO: Usar FormatLocalFormID em vez de std::to_string
+    // CORREÃ‡ÃƒO: Usar FormatLocalFormID em vez de std::to_string
     std::string npcIdentifier = npcPlugin + "|" + FormatLocalFormID(npc->GetFormID(), npcPlugin);
 
     static std::random_device rd;
@@ -474,7 +720,7 @@ std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {
             // 3. Processa os grupos de recompensa da regra
             for (const auto& group : rule.rewardGroups) {
                 if (group.isExclusive) {
-                    // Lógica de Sorteio Único (Exclusivo)
+                    // LÃ³gica de Sorteio Ãšnico (Exclusivo)
                     float roll = dis(gen);
                     float cumulative = 0.0f;
                     for (const auto& reward : group.rewards) {
@@ -486,19 +732,46 @@ std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {
                     }
                 }
                 else {
-                    // Lógica de Sorteio Independente
+                    // LÃ³gica de Sorteio Independente
                     for (const auto& reward : group.rewards) {
                         if (dis(gen) <= reward.chanceReward) {
                             applicable.push_back(reward);
                         }
                     }
                 }
-            }  
-            
+            }
+
         }
     }
 
     return applicable;
+}
+
+std::vector<RewardGroup> RuleManager::RollForGroups(RE::TESNPC* npc, const Rule& rule) {
+    std::vector<RewardGroup> wonGroups;
+    if (!npc) return wonGroups;
+
+    if (rule.isExclusive) {
+        // LÃ³gica: Escolhe apenas UM grupo da regra baseado nas chances (chanceGroup)
+        float roll = GetRandomFloat(0.0f, 100.0f);
+        float cumulative = 0.0f;
+        for (const auto& group : rule.rewardGroups) {
+            cumulative += group.chanceGroup;
+            if (roll <= cumulative) {
+                wonGroups.push_back(group);
+                break;
+            }
+        }
+    }
+    else {
+        // LÃ³gica: Testa cada grupo independentemente
+        for (const auto& group : rule.rewardGroups) {
+            if (GetRandomFloat(0.0f, 100.0f) <= group.chanceGroup) {
+                wonGroups.push_back(group);
+            }
+        }
+    }
+    return wonGroups;
 }
 
 
@@ -537,7 +810,7 @@ std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, cons
         };
 
     if (rule.isExclusive) {
-        // LÓGICA: Escolhe apenas UM grupo da regra baseado nas chances
+        // LÃ“GICA: Escolhe apenas UM grupo da regra baseado nas chances
         float roll = GetRandomFloat(0.0f, 100.0f);
         float cumulative = 0.0f;
         for (const auto& group : rule.rewardGroups) {
@@ -550,7 +823,7 @@ std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, cons
         }
     }
     else {
-        // LÓGICA: Testa cada grupo independentemente
+        // LÃ“GICA: Testa cada grupo independentemente
         for (const auto& group : rule.rewardGroups) {
             if (GetRandomFloat(0.0f, 100.0f) <= group.chanceGroup) {
                 processGroup(group);
@@ -566,7 +839,7 @@ void RuleManager::InitializeAffectedNPCsDatabase() {
     auto& rules = GetRules();
     auto npcList = Manager::GetSingleton()->GetList("NPC");
 
-    logger::info("--- Iniciando Inicialização do Database de NPCs Afetados ---");
+    logger::info("--- Iniciando InicializaÃ§Ã£o do Database de NPCs Afetados ---");
 
     for (const auto& npcInfo : npcList) {
         auto npc = RE::TESForm::LookupByID<RE::TESNPC>(npcInfo.formID);
@@ -575,7 +848,7 @@ void RuleManager::InitializeAffectedNPCsDatabase() {
         AffectedNPC affectedInfo;
         for (const auto& rule : rules) {
             if (!rule.isEnabled) continue;
-            // Verifica se o NPC passa nos filtros de Target e não está na Blacklist
+            // Verifica se o NPC passa nos filtros de Target e nÃ£o estÃ¡ na Blacklist
             if (IsNPCMatchingTargets(npc, rule, false) && !IsNPCMatchingTargets(npc, rule, true)) {
                 affectedInfo.ruleIDs.push_back(rule.id);
             }
@@ -586,7 +859,5 @@ void RuleManager::InitializeAffectedNPCsDatabase() {
         }
     }
 
-    logger::info("--- Inicialização Concluída. Total de NPCs no Database: {} ---", _affectedNPCsDatabase.size());
+    logger::info("--- InicializaÃ§Ã£o ConcluÃ­da. Total de NPCs no Database: {} ---", _affectedNPCsDatabase.size());
 }
-
-
