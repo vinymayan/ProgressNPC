@@ -1,48 +1,35 @@
-#include "logger.h"
+﻿#include "logger.h"
 #include "hooks.h"
 #include "UI.h"
 #include "Events.h"
 #include "Manager.h"
 #include "Rule.h"
 
-#include <filesystem>
-#include <system_error>
-
-
-
 namespace {
-    bool IsDynamicFormsGeneratorInstalled()
-    {
-        std::error_code ec;
-        return std::filesystem::exists("Data/SKSE/Plugins/DynamicFormsGenerator.dll", ec) && !ec;
-    }
-
-    void PopulateRuntimeData()
-    {
-        Manager::GetSingleton()->PopulateAllLists();
-        RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
-    }
-
-    void PopulateRuntimeDataWhenReady()
-    {
-        if (IsDynamicFormsGeneratorInstalled() && !DynamicFormsGeneratorEvents::HasLoaded()) {
-            logger::info("DynamicFormsGenerator.dll encontrada; aguardando DynamicFormsGeneratorLoaded para PopulateAllLists.");
-            return;
-        }
-
-        PopulateRuntimeData();
-    }
+    bool hasDFG = false;
 }
+
 void OnMessage(SKSE::MessagingInterface::Message* message) {
+    if (message->type == SKSE::MessagingInterface::kPostLoad) {
+        hasDFG = GetModuleHandleA("DynamicFormsGenerator.dll") != nullptr;
+        if (hasDFG) {
+            logger::info("DynamicFormsGenerator.dll found");
+        }
+    }
+
     if (message->type == SKSE::MessagingInterface::kDataLoaded) {
 		Hooks::Install();
         // Init Rules
         RuleManager::GetSingleton()->LoadRules();
-        PopulateRuntimeDataWhenReady();
+        if(!hasDFG) {
+            Manager::GetSingleton()->PopulateAllLists();
+            RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
+		}
 		//Manager::GetSingleton()->ConvertAllNPCOutfitsToInventory();
        // CellAttachHandler::Register();
         //CellFullyLoadedHandler::Register();
         LoadEventHandler::Register();
+        PersistentItemTransferHandler::Register();
         PlayerLevel::Register();
 		CombatEventHandler::Register();
         //auto ui = RE::UI::GetSingleton();

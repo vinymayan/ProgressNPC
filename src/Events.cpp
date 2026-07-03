@@ -1,18 +1,6 @@
-#include "Events.h"
+﻿#include "Events.h"
 #include "Manager.h"
 #include "Rule.h"
-
-namespace {
-    bool g_dynamicFormsGeneratorLoaded = false;
-}
-
-namespace DynamicFormsGeneratorEvents {
-    bool HasLoaded()
-    {
-        return g_dynamicFormsGeneratorLoaded;
-    }
-}
-
 
 RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE::ModCallbackEvent* a_event, RE::BSTEventSource<SKSE::ModCallbackEvent>*)
 {
@@ -20,15 +8,12 @@ RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE:
 
     std::string_view eventName = a_event->eventName.c_str();
     if (eventName == "DynamicFormsGeneratorLoaded") {
-        g_dynamicFormsGeneratorLoaded = true;
-        logger::info("[DynamicFormsGenerator] Loaded recebido; populando listas e banco de regras.");
         Manager::GetSingleton()->PopulateAllLists();
         RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
         return RE::BSEventNotifyControl::kContinue;
     }
 
     if (eventName == "DynamicFormsGeneratorUpdated") {
-        logger::info("[DynamicFormsGenerator] Updated recebido; repopulando listas e banco de regras.");
         Manager::GetSingleton()->PopulateAllLists(true);
         RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
         return RE::BSEventNotifyControl::kContinue;
@@ -36,6 +21,7 @@ RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE:
 
     return RE::BSEventNotifyControl::kContinue;
 }
+
 RE::TESObjectREFR* GetContainerFromMenu() {
     auto ui = RE::UI::GetSingleton();
     if (!ui) return nullptr;

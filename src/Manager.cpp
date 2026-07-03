@@ -25,6 +25,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     PopulateList<RE::TESObjectBOOK>("Book");
     PopulateList<RE::TESAmmo>("Ammo");
     PopulateList<RE::TESObjectMISC>("Misc");
+    PopulateList<RE::TESSoulGem>("SoulGem");
     PopulateList<RE::TESKey>("Key");
     // - v.1.2.0
     PopulateList<RE::TESCombatStyle>("Combat Style");

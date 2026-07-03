@@ -1,4 +1,5 @@
 #include "Rule.h"
+#include "SaveState.h"
 #include <miniz.h> // Inclua a biblioteca miniz
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/stringbuffer.h>
@@ -418,13 +419,13 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         }
         else if (filter.type == "Keyword") {
             auto kwd = RE::TESForm::LookupByID<RE::BGSKeyword>(fID);
-            if (kwd && (npc->HasKeyword(kwd))) {
+            if (kwd && (npc->HasKeyword(kwd) || SaveStateManager::GetSingleton()->HasVirtualKeyword(actor, kwd))) {
                 match = true;
             }
         }
         else if (filter.type == "Faction") {
             auto fact = RE::TESForm::LookupByID<RE::TESFaction>(fID);
-            if (fact && (npc->IsInFaction(fact))) {
+            if (fact && ((actor && actor->IsInFaction(fact)) || npc->IsInFaction(fact))) {
                 match = true;
             }
         }

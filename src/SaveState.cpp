@@ -48,6 +48,29 @@ namespace {
         value.Accept(writer);
         return buffer.GetString();
     }
+
+    RE::TESBoundObject* LookupBoundObjectByKey(const std::string& a_key) {
+        auto tokens = split(a_key, '|');
+        if (tokens.size() != 2) return nullptr;
+
+        try {
+            auto dataHandler = RE::TESDataHandler::GetSingleton();
+            if (!dataHandler) return nullptr;
+
+            auto localID = static_cast<RE::FormID>(std::stoul(tokens[1], nullptr, 16));
+            auto formID = dataHandler->LookupFormID(localID, tokens[0]);
+            return RE::TESForm::LookupByID<RE::TESBoundObject>(formID);
+        }
+        catch (...) {
+            return nullptr;
+        }
+    }
+
+    uint32_t GetInventoryCount(RE::Actor* a_actor, RE::TESBoundObject* a_item) {
+        if (!a_actor || !a_item) return 0;
+        const auto count = a_actor->GetInventoryCount(a_item);
+        return count > 0 ? static_cast<uint32_t>(count) : 0;
+    }
 }
 
 SaveStateManager* SaveStateManager::GetSingleton() {
@@ -88,6 +111,9 @@ void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) 
         for (auto& entry : history) {
             if (entry.saveNumber == a_saveNum) {
                 _sessionData.npcRuleVersions = entry.npcRuleVersions;
+                _sessionData.persistentItems = entry.persistentItems;
+                _sessionData.virtualKeywords = entry.virtualKeywords;
+                _sessionData.addedFactions = entry.addedFactions;
                 logger::info("[SaveManager] Contexto restaurado com sucesso do save #{}", a_saveNum);
                 return;
             }
@@ -98,9 +124,26 @@ void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) 
 
         if (bestSnapshot) {
             _sessionData.npcRuleVersions = bestSnapshot->npcRuleVersions;
+            _sessionData.persistentItems = bestSnapshot->persistentItems;
+            _sessionData.virtualKeywords = bestSnapshot->virtualKeywords;
+            _sessionData.addedFactions = bestSnapshot->addedFactions;
             logger::info("[SaveManager] Contexto herdado do save anterior #{}", bestSnapshot->saveNumber);
         }
     }
+}
+
+std::string SaveStateManager::BuildFormKey(RE::TESForm* a_form) {
+    if (!a_form) return "";
+
+    std::string fileNameStr = "Dynamic";
+    if (auto file = a_form->GetFile(0)) {
+        fileNameStr = file->GetFilename();
+    }
+    else if (a_form->IsDynamicForm()) {
+        fileNameStr = "Created";
+    }
+
+    return fileNameStr + "|" + FormatLocalFormID(a_form->GetFormID(), fileNameStr);
 }
 
 void SaveStateManager::PersistCurrentSave(const std::string& a_saveName) {
@@ -147,6 +190,7 @@ void SaveStateManager::PersistCurrentSave(const std::string& a_saveName) {
     _sessionData.saveNumber = newSaveNumber;
     logger::info("[SaveManager] Sincronizando dados para o Save #{}...", newSaveNumber);
 
+    RefreshPersistentItemsForLoadedActors();
     UpdateSaveEntry(context.charID, _sessionData);
     context.saveNumber = newSaveNumber; // Atualiza o contexto para o novo número
 }
@@ -174,6 +218,218 @@ std::string SaveStateManager::BuildNPCKey(RE::Actor* a_actor) {
     }
 
     return fileNameStr + "|" + FormatLocalFormID(a_actor->GetFormID(), fileNameStr);
+}
+
+void SaveStateManager::TrackPersistentItemGrant(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_count,
+    const std::string& a_ruleID, const std::string& a_groupName)
+{
+    if (!a_actor || !a_item || a_count == 0) return;
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    const auto itemKey = BuildFormKey(a_item);
+    if (npcKey.empty() || itemKey.empty()) return;
+
+    auto& itemState = _sessionData.persistentItems[npcKey][itemKey];
+    itemState.expectedCount += a_count;
+    itemState.ruleID = itemState.ruleID.empty() ? a_ruleID : itemState.ruleID;
+    itemState.groupName = itemState.groupName.empty() ? a_groupName : itemState.groupName;
+
+    const auto currentCount = GetInventoryCount(a_actor, a_item);
+    itemState.missingCount = itemState.expectedCount > currentCount ? itemState.expectedCount - currentCount : 0;
+
+    logger::debug("[PersistentLedger] Grant registrado: NPC '{}' Item '{}' Esperado {} Ausente {}",
+        a_actor->GetName(), a_item->GetName(), itemState.expectedCount, itemState.missingCount);
+}
+
+void SaveStateManager::EnsurePersistentItemTracked(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_expectedCount,
+    const std::string& a_ruleID, const std::string& a_groupName)
+{
+    if (!a_actor || !a_item || a_expectedCount == 0) return;
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    const auto itemKey = BuildFormKey(a_item);
+    if (npcKey.empty() || itemKey.empty()) return;
+
+    auto& npcItems = _sessionData.persistentItems[npcKey];
+    if (npcItems.contains(itemKey)) return;
+
+    const auto currentCount = GetInventoryCount(a_actor, a_item);
+    if (currentCount == 0) return;
+
+    auto& itemState = npcItems[itemKey];
+    itemState.expectedCount = a_expectedCount;
+    itemState.missingCount = itemState.expectedCount > currentCount ? itemState.expectedCount - currentCount : 0;
+    itemState.ruleID = a_ruleID;
+    itemState.groupName = a_groupName;
+
+    logger::debug("[PersistentLedger] Item existente adotado: NPC '{}' Item '{}' Esperado {} Ausente {}",
+        a_actor->GetName(), a_item->GetName(), itemState.expectedCount, itemState.missingCount);
+}
+
+void SaveStateManager::AuditPersistentItems(RE::Actor* a_actor)
+{
+    if (!a_actor) return;
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    if (npcKey.empty()) return;
+
+    auto npcIt = _sessionData.persistentItems.find(npcKey);
+    if (npcIt == _sessionData.persistentItems.end()) return;
+
+    for (auto& [itemKey, itemState] : npcIt->second) {
+        auto item = LookupBoundObjectByKey(itemKey);
+        if (!item || itemState.expectedCount == 0) continue;
+
+        const auto currentCount = GetInventoryCount(a_actor, item);
+        const auto oldMissing = itemState.missingCount;
+        const auto minimumMissing = itemState.expectedCount > currentCount ? itemState.expectedCount - currentCount : 0;
+        itemState.missingCount = std::max(itemState.missingCount, minimumMissing);
+
+        if (oldMissing != itemState.missingCount) {
+            logger::info("[PersistentLedger] NPC '{}' Item '{}' Esperado {} Atual {} Ausente {}",
+                a_actor->GetName(), item->GetName(), itemState.expectedCount, currentCount, itemState.missingCount);
+        }
+    }
+}
+
+void SaveStateManager::RefreshPersistentItemsForLoadedActors()
+{
+    auto processLists = RE::ProcessLists::GetSingleton();
+    if (!processLists) return;
+
+    auto auditList = [&](auto& handles) {
+        for (auto& handle : handles) {
+            auto actorPtr = handle.get();
+            if (actorPtr) {
+                AuditPersistentItems(actorPtr.get());
+            }
+        }
+        };
+
+    if (auto player = RE::PlayerCharacter::GetSingleton()) {
+        AuditPersistentItems(player);
+    }
+
+    auditList(processLists->highActorHandles);
+    auditList(processLists->middleHighActorHandles);
+    auditList(processLists->lowActorHandles);
+}
+
+void SaveStateManager::HandleContainerChanged(const RE::TESContainerChangedEvent* a_event)
+{
+    if (!a_event || !_currentContext.isValid || a_event->itemCount <= 0) return;
+
+    auto item = RE::TESForm::LookupByID<RE::TESBoundObject>(a_event->baseObj);
+    if (!item) return;
+
+    auto applyTransfer = [&](RE::FormID a_containerID, bool a_enteringOwner) {
+        if (a_containerID == 0) return;
+
+        auto actor = RE::TESForm::LookupByID<RE::Actor>(a_containerID);
+        if (!actor) return;
+
+        const auto npcKey = BuildNPCKey(actor);
+        const auto itemKey = BuildFormKey(item);
+        auto npcIt = _sessionData.persistentItems.find(npcKey);
+        if (npcIt == _sessionData.persistentItems.end() || !npcIt->second.contains(itemKey)) return;
+
+        auto& itemState = npcIt->second[itemKey];
+        const auto oldMissing = itemState.missingCount;
+        const auto movedCount = static_cast<uint32_t>(a_event->itemCount);
+
+        if (a_enteringOwner) {
+            itemState.missingCount = movedCount >= itemState.missingCount ? 0 : itemState.missingCount - movedCount;
+        }
+        else {
+            const auto maxMissing = itemState.expectedCount;
+            const auto newMissing = itemState.missingCount + movedCount;
+            itemState.missingCount = std::min(newMissing, maxMissing);
+        }
+
+        if (oldMissing != itemState.missingCount) {
+            logger::info("[PersistentLedger] Transferencia: Dono '{}' Item '{}' Esperado {} Ausente {} -> {}",
+                actor->GetName(), item->GetName(), itemState.expectedCount, oldMissing, itemState.missingCount);
+        }
+        };
+
+    applyTransfer(a_event->oldContainer, false);
+    applyTransfer(a_event->newContainer, true);
+}
+
+bool SaveStateManager::AddVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword)
+{
+    if (!a_actor || !a_keyword) return false;
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    const auto keywordKey = BuildFormKey(a_keyword);
+    if (npcKey.empty() || keywordKey.empty()) return false;
+
+    auto& keywords = _sessionData.virtualKeywords[npcKey];
+    const auto [it, inserted] = keywords.insert(keywordKey);
+    if (inserted) {
+        logger::info("[TagDelta] Virtual keyword '{}' adicionada para '{}'", a_keyword->GetFormEditorID(), a_actor->GetName());
+    }
+    return inserted;
+}
+
+bool SaveStateManager::HasVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword) const
+{
+    if (!a_actor || !a_keyword) return false;
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    const auto keywordKey = BuildFormKey(a_keyword);
+    if (npcKey.empty() || keywordKey.empty()) return false;
+
+    auto npcIt = _sessionData.virtualKeywords.find(npcKey);
+    return npcIt != _sessionData.virtualKeywords.end() && npcIt->second.contains(keywordKey);
+}
+
+bool SaveStateManager::RemoveVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword)
+{
+    if (!a_actor || !a_keyword) return false;
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    const auto keywordKey = BuildFormKey(a_keyword);
+    auto npcIt = _sessionData.virtualKeywords.find(npcKey);
+    if (npcIt == _sessionData.virtualKeywords.end()) return false;
+
+    return npcIt->second.erase(keywordKey) > 0;
+}
+
+bool SaveStateManager::AddManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_faction, int a_rank)
+{
+    if (!a_actor || !a_faction) return false;
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    const auto factionKey = BuildFormKey(a_faction);
+    if (npcKey.empty() || factionKey.empty()) return false;
+
+    const auto rank = std::clamp(a_rank, -128, 127);
+    auto& factions = _sessionData.addedFactions[npcKey];
+    auto it = factions.find(factionKey);
+    const bool changed = it == factions.end() || it->second != rank || !a_actor->IsInFaction(a_faction);
+
+    if (changed) {
+        a_actor->AddToFaction(a_faction, static_cast<std::int8_t>(rank));
+        factions[factionKey] = rank;
+        logger::info("[TagDelta] Faction '{}' rank {} adicionada para '{}'", a_faction->GetFormEditorID(), rank, a_actor->GetName());
+    }
+
+    return changed;
+}
+
+bool SaveStateManager::RemoveManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_faction)
+{
+    if (!a_actor || !a_faction) return false;
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    const auto factionKey = BuildFormKey(a_faction);
+    auto npcIt = _sessionData.addedFactions.find(npcKey);
+    if (npcIt == _sessionData.addedFactions.end() || !npcIt->second.contains(factionKey)) return false;
+
+    a_actor->RemoveFromFaction(a_faction);
+    npcIt->second.erase(factionKey);
+    return true;
 }
 
 std::string SaveStateManager::GetCharacterPath(uint32_t characterID) {
@@ -246,6 +502,8 @@ void SaveStateManager::LoadCharacterData(uint32_t characterID) {
         auto plugins = ReadStringArray(FindMember(doc, "p_plugins"));
         auto rules = ReadStringArray(FindMember(doc, "p_rules"));
         auto groups = ReadStringArray(FindMember(doc, "p_groups"));
+        auto items = ReadStringArray(FindMember(doc, "p_items"));
+        auto tags = ReadStringArray(FindMember(doc, "p_tags"));
         auto historyArray = FindMember(doc, "history");
         if (!historyArray || !historyArray->IsArray()) return;
 
@@ -289,6 +547,51 @@ void SaveStateManager::LoadCharacterData(uint32_t characterID) {
                     }
                     entry.npcRuleVersions[npcKey][rules[rIdx]] = state;
                 }
+
+                if (npcItem.Size() >= 4 && npcItem[3].IsObject()) {
+                    const auto& itemsMap = npcItem[3];
+                    for (auto itemIt = itemsMap.MemberBegin(); itemIt != itemsMap.MemberEnd(); ++itemIt) {
+                        if (!itemIt->name.IsString() || !itemIt->value.IsArray() || itemIt->value.Size() < 4) continue;
+
+                        int itemIdx = std::stoi(itemIt->name.GetString());
+                        if (itemIdx < 0 || static_cast<size_t>(itemIdx) >= items.size()) continue;
+
+                        const auto& itemData = itemIt->value;
+                        PersistentItemState itemState;
+                        itemState.expectedCount = GetJsonUint(itemData[0]);
+                        itemState.missingCount = GetJsonUint(itemData[1]);
+
+                        int rIdx = itemData[2].IsInt() ? itemData[2].GetInt() : -1;
+                        int gIdx = itemData[3].IsInt() ? itemData[3].GetInt() : -1;
+                        if (rIdx >= 0 && static_cast<size_t>(rIdx) < rules.size()) itemState.ruleID = rules[rIdx];
+                        if (gIdx >= 0 && static_cast<size_t>(gIdx) < groups.size()) itemState.groupName = groups[gIdx];
+
+                        if (itemState.expectedCount > 0) {
+                            entry.persistentItems[npcKey][items[itemIdx]] = itemState;
+                        }
+                    }
+                }
+
+                if (npcItem.Size() >= 5 && npcItem[4].IsArray()) {
+                    for (const auto& tagIndex : npcItem[4].GetArray()) {
+                        int tIdx = tagIndex.IsInt() ? tagIndex.GetInt() : -1;
+                        if (tIdx >= 0 && static_cast<size_t>(tIdx) < tags.size()) {
+                            entry.virtualKeywords[npcKey].insert(tags[tIdx]);
+                        }
+                    }
+                }
+
+                if (npcItem.Size() >= 6 && npcItem[5].IsObject()) {
+                    const auto& factionsMap = npcItem[5];
+                    for (auto factIt = factionsMap.MemberBegin(); factIt != factionsMap.MemberEnd(); ++factIt) {
+                        if (!factIt->name.IsString() || !factIt->value.IsInt()) continue;
+
+                        int fIdx = std::stoi(factIt->name.GetString());
+                        if (fIdx >= 0 && static_cast<size_t>(fIdx) < tags.size()) {
+                            entry.addedFactions[npcKey][tags[fIdx]] = factIt->value.GetInt();
+                        }
+                    }
+                }
             }
             decodedHistory.push_back(entry);
         }
@@ -318,7 +621,7 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
     logger::info("[SaveManager] Iniciando compressão para escrita (Save #{})", newEntry.saveNumber);
 
     // --- COMPRESSÃO ---
-    std::vector<std::string> p_plugins, p_rules, p_groups;
+    std::vector<std::string> p_plugins, p_rules, p_groups, p_items, p_tags;
 
     try {
         rapidjson::Document doc;
@@ -356,6 +659,46 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
                     jRules.AddMember(ruleKey, jState, alloc);
                 }
                 jNPC.PushBack(jRules, alloc);
+
+                rapidjson::Value jItems(rapidjson::kObjectType);
+                auto itemNpcIt = entry.persistentItems.find(npcKey);
+                if (itemNpcIt != entry.persistentItems.end()) {
+                    for (auto const& [itemKey, itemState] : itemNpcIt->second) {
+                        rapidjson::Value jItemState(rapidjson::kArrayType);
+                        jItemState.PushBack(itemState.expectedCount, alloc);
+                        jItemState.PushBack(itemState.missingCount, alloc);
+                        jItemState.PushBack(GetPoolIndex(p_rules, itemState.ruleID), alloc);
+                        jItemState.PushBack(GetPoolIndex(p_groups, itemState.groupName), alloc);
+
+                        const auto itemIndex = std::to_string(GetPoolIndex(p_items, itemKey));
+                        rapidjson::Value itemJsonKey;
+                        itemJsonKey.SetString(itemIndex.c_str(), static_cast<rapidjson::SizeType>(itemIndex.size()), alloc);
+                        jItems.AddMember(itemJsonKey, jItemState, alloc);
+                    }
+                }
+                jNPC.PushBack(jItems, alloc);
+
+                rapidjson::Value jVirtualKeywords(rapidjson::kArrayType);
+                auto keywordNpcIt = entry.virtualKeywords.find(npcKey);
+                if (keywordNpcIt != entry.virtualKeywords.end()) {
+                    for (const auto& keywordKey : keywordNpcIt->second) {
+                        jVirtualKeywords.PushBack(GetPoolIndex(p_tags, keywordKey), alloc);
+                    }
+                }
+                jNPC.PushBack(jVirtualKeywords, alloc);
+
+                rapidjson::Value jFactions(rapidjson::kObjectType);
+                auto factionNpcIt = entry.addedFactions.find(npcKey);
+                if (factionNpcIt != entry.addedFactions.end()) {
+                    for (const auto& [factionKey, rank] : factionNpcIt->second) {
+                        const auto factionIndex = std::to_string(GetPoolIndex(p_tags, factionKey));
+                        rapidjson::Value factionJsonKey;
+                        factionJsonKey.SetString(factionIndex.c_str(), static_cast<rapidjson::SizeType>(factionIndex.size()), alloc);
+                        jFactions.AddMember(factionJsonKey, rank, alloc);
+                    }
+                }
+                jNPC.PushBack(jFactions, alloc);
+
                 jNPCs.PushBack(jNPC, alloc);
             }
             jEntry.AddMember("npcs", jNPCs, alloc);
@@ -365,6 +708,8 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
         doc.AddMember("p_plugins", WriteStringArray(p_plugins, alloc), alloc);
         doc.AddMember("p_rules", WriteStringArray(p_rules, alloc), alloc);
         doc.AddMember("p_groups", WriteStringArray(p_groups, alloc), alloc);
+        doc.AddMember("p_items", WriteStringArray(p_items, alloc), alloc);
+        doc.AddMember("p_tags", WriteStringArray(p_tags, alloc), alloc);
         doc.AddMember("history", jHistory, alloc);
 
         std::string path = GetCharacterPath(characterID);
@@ -573,6 +918,25 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
                     }
                 }
             }
+            else if (reward.typeReward == "Shout") {
+                if (auto shout = rewardForm->As<RE::TESShout>()) {
+                    if (!isPlayer) {
+                        if (auto spellList = baseNPC->GetSpellList(); spellList && spellList->GetIndex(shout).has_value()) {
+                            spellList->RemoveShout(shout);
+                        }
+                    }
+                }
+            }
+            else if (reward.typeReward == "Keyword") {
+                if (auto keyword = rewardForm->As<RE::BGSKeyword>()) {
+                    SaveStateManager::GetSingleton()->RemoveVirtualKeyword(a_actor, keyword);
+                }
+            }
+            else if (reward.typeReward == "Faction") {
+                if (auto faction = rewardForm->As<RE::TESFaction>()) {
+                    SaveStateManager::GetSingleton()->RemoveManagedFaction(a_actor, faction);
+                }
+            }
             //else if (reward.typeReward == "Package") {
             //    if (auto pkg = rewardForm->As<RE::TESPackage>()) {
             //        auto& packageList = baseNPC->aiPackages.packages;
@@ -649,6 +1013,11 @@ void ApplyRewardPhysical(RE::Actor* a_actor, const Reward& reward, bool isPlayer
             }
         }
     }
+    else if (reward.typeReward == "Shout") {
+        if (auto shout = rewardForm->As<RE::TESShout>()) {
+            if (!a_actor->HasShout(shout)) a_actor->AddShout(shout);
+        }
+    }
     else if (reward.typeReward == "Outfit") {
         if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
             // Sempre adicionamos os itens ao inventário do NPC
@@ -677,6 +1046,88 @@ void ApplyRewardPhysical(RE::Actor* a_actor, const Reward& reward, bool isPlayer
         }
     }
 }
+
+void TrackPersistentRewardItems(RE::Actor* a_actor, const Reward& reward, const std::string& ruleID, const std::string& groupName)
+{
+    if (!a_actor || !reward.isPersistent) return;
+
+    auto [plugin, fID] = reward.ParseFormID();
+    auto rewardForm = RE::TESForm::LookupByID(fID);
+    if (!rewardForm) return;
+
+    auto saveManager = SaveStateManager::GetSingleton();
+    if (reward.typeReward == "Outfit") {
+        if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
+            for (auto* form : outfit->outfitItems) {
+                if (auto* bound = form->As<RE::TESBoundObject>()) {
+                    saveManager->TrackPersistentItemGrant(a_actor, bound, 1, ruleID, groupName);
+                }
+            }
+        }
+    }
+    else if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
+        saveManager->TrackPersistentItemGrant(a_actor, bound, reward.amount, ruleID, groupName);
+    }
+}
+
+void EnsurePersistentRewardTracked(RE::Actor* a_actor, const Reward& reward, const std::string& ruleID, const std::string& groupName)
+{
+    if (!a_actor || !reward.isPersistent) return;
+
+    auto [plugin, fID] = reward.ParseFormID();
+    auto rewardForm = RE::TESForm::LookupByID(fID);
+    if (!rewardForm) return;
+
+    auto saveManager = SaveStateManager::GetSingleton();
+    if (reward.typeReward == "Outfit") {
+        if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
+            for (auto* form : outfit->outfitItems) {
+                if (auto* bound = form->As<RE::TESBoundObject>()) {
+                    saveManager->EnsurePersistentItemTracked(a_actor, bound, 1, ruleID, groupName);
+                }
+            }
+        }
+    }
+    else if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
+        saveManager->EnsurePersistentItemTracked(a_actor, bound, reward.amount, ruleID, groupName);
+    }
+}
+
+void ApplyRewardPhysicalTracked(RE::Actor* a_actor, const Reward& reward, bool isPlayer, std::vector<PendingEquip>& equipQueue,
+    const std::string& ruleID, const std::string& groupName)
+{
+    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+    TrackPersistentRewardItems(a_actor, reward, ruleID, groupName);
+}
+
+bool IsTagReward(const Reward& reward)
+{
+    return reward.typeReward == "Keyword" || reward.typeReward == "Faction";
+}
+
+bool ApplyTagReward(RE::Actor* a_actor, const Reward& reward)
+{
+    if (!a_actor || !IsTagReward(reward)) return false;
+
+    auto [plugin, fID] = reward.ParseFormID();
+    auto rewardForm = RE::TESForm::LookupByID(fID);
+    if (!rewardForm) return false;
+
+    auto saveManager = SaveStateManager::GetSingleton();
+    if (reward.typeReward == "Keyword") {
+        if (auto keyword = rewardForm->As<RE::BGSKeyword>()) {
+            return saveManager->AddVirtualKeyword(a_actor, keyword);
+        }
+    }
+    else if (reward.typeReward == "Faction") {
+        if (auto faction = rewardForm->As<RE::TESFaction>()) {
+            return saveManager->AddManagedFaction(a_actor, faction, static_cast<int>(reward.amount));
+        }
+    }
+
+    return false;
+}
+
 void DebugLogInventory(RE::Actor* a_actor) {
     if (!a_actor) return;
     auto inventory = a_actor->GetInventory();
@@ -799,12 +1250,68 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
     auto templateBase = a_actor->GetTemplateBase();
     if (templateBase) addRulesFromID(templateBase->GetFormID());
 
+    auto& allRulesForTags = RuleManager::GetSingleton()->GetRules();
+    for (const auto& rule : allRulesForTags) {
+        if (std::find(rulesToProcess.begin(), rulesToProcess.end(), rule.id) == rulesToProcess.end()) {
+            rulesToProcess.push_back(rule.id);
+        }
+    }
+
     if (rulesToProcess.empty()) {
         logger::debug("[ApplyRules] FINALIZADO: Nenhuma regra aplicável para {}", actorName);
         return;
     }
 
     // --- PROCESSAMENTO E APLICAÇÃO ---
+    constexpr int kMaxTagPasses = 8;
+    for (int pass = 0; pass < kMaxTagPasses; ++pass) {
+        bool changed = false;
+
+        for (const auto& ruleID : rulesToProcess) {
+            auto& allRules = RuleManager::GetSingleton()->GetRules();
+            auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
+            if (ruleIt == allRules.end()) continue;
+
+            const Rule& currentRule = *ruleIt;
+            if (!currentRule.isEnabled) continue;
+
+            if (!IsNPCMatchingTargets(baseNPC, currentRule, false, a_actor) ||
+                IsNPCMatchingTargets(baseNPC, currentRule, true, a_actor)) {
+                continue;
+            }
+
+            int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
+            if (level < currentRule.level) continue;
+
+            AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
+            if (state.appliedGroups.empty()) {
+                auto wonGroups = RuleManager::GetSingleton()->RollForGroups(baseNPC, currentRule);
+                for (const auto& group : wonGroups) {
+                    state.appliedGroups.push_back(group.name);
+                }
+            }
+
+            for (const auto& groupName : state.appliedGroups) {
+                auto groupIt = std::find_if(currentRule.rewardGroups.begin(), currentRule.rewardGroups.end(), [&](const RewardGroup& group) {
+                    return group.name == groupName;
+                    });
+                if (groupIt == currentRule.rewardGroups.end()) continue;
+
+                for (const auto& reward : groupIt->rewards) {
+                    if (!IsTagReward(reward)) continue;
+                    if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
+                        changed = ApplyTagReward(a_actor, reward) || changed;
+                    }
+                }
+            }
+        }
+
+        if (!changed) break;
+        if (pass == kMaxTagPasses - 1) {
+            logger::warn("[TagDelta] Limite de {} passes atingido para '{}'; possivel ciclo de regras por Keyword/Faction.", kMaxTagPasses, actorName);
+        }
+    }
+
     std::vector<PendingEquip> equipQueue;
     for (const auto& ruleID : rulesToProcess) {
         auto& allRules = RuleManager::GetSingleton()->GetRules();
@@ -829,9 +1336,22 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
         if (oldVersion == 0) {
             logger::debug("  [Novo NPC] Aplicando regra '{}' pela primeira vez em {}.", currentRule.name, actorName);
             // --- 1. APLICAÇÃO INICIAL (NPC Novo) ---
-            std::vector<RewardGroup> wonGroups = RuleManager::GetSingleton()->RollForGroups(baseNPC, currentRule);
+            std::vector<RewardGroup> wonGroups;
+            if (state.appliedGroups.empty()) {
+                wonGroups = RuleManager::GetSingleton()->RollForGroups(baseNPC, currentRule);
+                for (const auto& group : wonGroups) {
+                    state.appliedGroups.push_back(group.name);
+                }
+            }
+            else {
+                for (const auto& group : currentRule.rewardGroups) {
+                    if (std::find(state.appliedGroups.begin(), state.appliedGroups.end(), group.name) != state.appliedGroups.end()) {
+                        wonGroups.push_back(group);
+                    }
+                }
+            }
+
             for (const auto& group : wonGroups) {
-                state.appliedGroups.push_back(group.name);
                 // Se o grupo for exclusivo, sorteia apenas UM item
                 if (group.isExclusive) {
                     float roll = RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f);
@@ -839,7 +1359,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                     for (const auto& reward : group.rewards) {
                         cumulative += reward.chanceReward;
                         if (roll <= cumulative) {
-                            ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                            ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
                             break;
                         }
                     }
@@ -848,7 +1368,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                     // Grupo normal: sorteia cada item individualmente
                     for (const auto& reward : group.rewards) {
                         if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
-                            ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                            ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
                         }
                     }
                 }
@@ -888,7 +1408,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 
                             if (isNewReward) {
                                 if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
-                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                                    ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
                                 }
                             }
                             else if (!reward.isPersistent) {
@@ -908,7 +1428,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                             for (const auto& reward : group.rewards) {
                                 cumulative += reward.chanceReward;
                                 if (roll <= cumulative) {
-                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                                    ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
                                     break;
                                 }
                             }
@@ -916,7 +1436,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                         else {
                             for (const auto& reward : group.rewards) {
                                 if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
-                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                                    ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
                                 }
                             }
                         }
@@ -934,7 +1454,11 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                             if (!reward.isPersistent) {
                                 ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
                             }
-                            else if (!isPlayer) {
+                            else {
+                                EnsurePersistentRewardTracked(a_actor, reward, ruleID, group.name);
+                                SaveStateManager::GetSingleton()->AuditPersistentItems(a_actor);
+                                continue;
+
                                 auto [plugin, fID] = reward.ParseFormID();
                                 auto rewardForm = RE::TESForm::LookupByID(fID);
                                 if (!rewardForm) continue;
@@ -1014,12 +1538,12 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                 for (auto& entry : equipQueue) {
                     if (entry.object->IsArmor()) {
                         auto newArmor = entry.object->As<RE::TESObjectARMO>();
-                        auto newSlotMask = static_cast<uint32_t>(newArmor->GetSlotMask());
+                        auto newSlotMask = newArmor->GetSlotMask();
 
                         for (auto& [item, invData] : inventory) {
                             if (invData.second->IsWorn() && item->IsArmor()) {
                                 auto wornArmor = item->As<RE::TESObjectARMO>();
-                                if (wornArmor && (static_cast<uint32_t>(wornArmor->GetSlotMask()) & newSlotMask)) {
+                                if (wornArmor && (wornArmor->GetSlotMask() & newSlotMask)) {
                                     if (item->GetFormID() != entry.object->GetFormID()) {
                                         logger::debug("  [EquipManager] Desequipando '{}' para liberar slot para '{}'", item->GetName(), entry.object->GetName());
                                         equipManager->UnequipObject(a_actor, item);

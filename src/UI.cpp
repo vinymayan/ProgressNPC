@@ -235,7 +235,7 @@ namespace SPIDUI {
         ImGuiMCP::SetNextItemWidth(200.0f);
         if (ImGuiMCP::BeginCombo("##FilterType", listType.c_str())) {
             std::vector<const char*> options = isRewardMode ?
-                std::vector<const char*>{ "All", "Selected", "Perk", "Spell", "Shout", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" } :
+                std::vector<const char*>{ "All", "Selected", "Perk", "Spell", "Shout", "Keyword", "Faction", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key", "Outfit" } :
                 std::vector<const char*>{
                 "All", "Selected", "NPC", "Faction", "Keyword", "Race", 
                 "Package", "Combat Style", "Voice Type", "Class", "Location",
@@ -256,7 +256,7 @@ namespace SPIDUI {
         if (listType == "All") {
             if (isRewardMode) {
                 if (rewardAllCache.empty()) {
-                    for (auto& type : { "Spell", "Shout", "Perk", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "Key", "Outfit" }) {
+                    for (auto& type : { "Spell", "Shout", "Perk", "Keyword", "Faction", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key", "Outfit" }) {
                         auto& l = Manager::GetSingleton()->GetList(type);
                         rewardAllCache.insert(rewardAllCache.end(), l.begin(), l.end());
                     }

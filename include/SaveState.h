@@ -1,5 +1,6 @@
 #pragma once
 #include "Rule.h"
+#include <set>
 #include <rapidjson/document.h>
 #include <rapidjson/filereadstream.h>
 #include <rapidjson/filewritestream.h>
@@ -18,6 +19,13 @@ struct AppliedRuleState {
     std::vector<std::string> appliedGroups; // Nomes dos grupos que passaram no sorteio
 };
 
+struct PersistentItemState {
+    uint32_t expectedCount = 0;
+    uint32_t missingCount = 0;
+    std::string ruleID;
+    std::string groupName;
+};
+
 //inline void to_json(rapidjson::Document& j, const AppliedRuleState& p) {
 //    j = rapidjson::Document{ {"version", p.version}, {"appliedGroups", p.appliedGroups} };
 //}
@@ -31,6 +39,9 @@ struct AppliedRuleState {
 struct SaveHistoryEntry {
     uint32_t saveNumber;
     std::map<std::string, std::map<std::string, AppliedRuleState>> npcRuleVersions;
+    std::map<std::string, std::map<std::string, PersistentItemState>> persistentItems;
+    std::map<std::string, std::set<std::string>> virtualKeywords;
+    std::map<std::string, std::map<std::string, int>> addedFactions;
 };
 
 struct CurrentSaveContext {
@@ -53,6 +64,19 @@ public:
     void ClearContext();
     std::vector<SaveHistoryEntry>& GetCharacterHistory(uint32_t characterID);
     SaveHistoryEntry& GetSessionData() { return _sessionData; }
+    void TrackPersistentItemGrant(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_count,
+        const std::string& a_ruleID, const std::string& a_groupName);
+    void EnsurePersistentItemTracked(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_expectedCount,
+        const std::string& a_ruleID, const std::string& a_groupName);
+    void AuditPersistentItems(RE::Actor* a_actor);
+    void RefreshPersistentItemsForLoadedActors();
+    void HandleContainerChanged(const RE::TESContainerChangedEvent* a_event);
+    bool AddVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword);
+    bool RemoveVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword);
+    bool HasVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword) const;
+    bool AddManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_faction, int a_rank);
+    bool RemoveManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_faction);
+    static std::string BuildFormKey(RE::TESForm* a_form);
 
     CurrentSaveContext& GetCurrentContext() { return _currentContext; }
     static std::string BuildNPCKey(RE::Actor* a_actor);
@@ -233,6 +257,28 @@ public:
         }
     }
 
+};
+
+class PersistentItemTransferHandler : public RE::BSTEventSink<RE::TESContainerChangedEvent> {
+public:
+    static PersistentItemTransferHandler* GetSingleton() {
+        static PersistentItemTransferHandler singleton;
+        return &singleton;
+    }
+
+    RE::BSEventNotifyControl ProcessEvent(const RE::TESContainerChangedEvent* a_event,
+        RE::BSTEventSource<RE::TESContainerChangedEvent>*) override {
+        SaveStateManager::GetSingleton()->HandleContainerChanged(a_event);
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    static void Register() {
+        auto scriptEventSourceHolder = RE::ScriptEventSourceHolder::GetSingleton();
+        if (scriptEventSourceHolder) {
+            scriptEventSourceHolder->AddEventSink(GetSingleton());
+            logger::info("PersistentItemTransferHandler registrado.");
+        }
+    }
 };
 
 class PlayerLevel : public RE::BSTEventSink<RE::LevelIncrease::Event> {
