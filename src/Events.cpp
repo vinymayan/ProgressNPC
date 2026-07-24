@@ -14,7 +14,7 @@ RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE:
     }
 
     if (eventName == "DynamicFormsGeneratorUpdated") {
-        Manager::GetSingleton()->PopulateAllLists(true);
+        Manager::GetSingleton()->RefreshLists(a_event->strArg.c_str());
         RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
         return RE::BSEventNotifyControl::kContinue;
     }
@@ -26,7 +26,6 @@ RE::TESObjectREFR* GetContainerFromMenu() {
     auto ui = RE::UI::GetSingleton();
     if (!ui) return nullptr;
 
-    // 1. Tenta o ContainerMenu padrão (Skyrim Vanilla/VR)
     if (const auto ui_menu = ui->GetMenu<RE::ContainerMenu>()) {
         auto ui_refid = ui_menu->GetTargetRefHandle();
         if (ui_refid) {

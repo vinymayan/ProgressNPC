@@ -24,6 +24,7 @@ struct PersistentItemState {
     uint32_t missingCount = 0;
     std::string ruleID;
     std::string groupName;
+    bool isPersistent = true;
 };
 
 //inline void to_json(rapidjson::Document& j, const AppliedRuleState& p) {
@@ -65,9 +66,9 @@ public:
     std::vector<SaveHistoryEntry>& GetCharacterHistory(uint32_t characterID);
     SaveHistoryEntry& GetSessionData() { return _sessionData; }
     void TrackPersistentItemGrant(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_count,
-        const std::string& a_ruleID, const std::string& a_groupName);
+        const std::string& a_ruleID, const std::string& a_groupName, bool a_isPersistent = true);
     void EnsurePersistentItemTracked(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_expectedCount,
-        const std::string& a_ruleID, const std::string& a_groupName);
+        const std::string& a_ruleID, const std::string& a_groupName, bool a_isPersistent = true);
     void AuditPersistentItems(RE::Actor* a_actor);
     void RefreshPersistentItemsForLoadedActors();
     void HandleContainerChanged(const RE::TESContainerChangedEvent* a_event);

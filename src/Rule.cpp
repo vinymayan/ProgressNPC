@@ -1,6 +1,8 @@
 #include "Rule.h"
 #include "SaveState.h"
 #include <miniz.h> // Inclua a biblioteca miniz
+#include <algorithm>
+#include <cctype>
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -27,7 +29,10 @@ std::string FormatLocalFormID(uint32_t a_formID, const std::string& a_pluginName
 
     char buf[10];
     // Plugins "Light" (ESL ou ESP com flag FE) usam os últimos 3 dígitos (12 bits)
-    if (file && file->IsLight()) {
+    if (plugin == "dynamic" || plugin == "created") {
+        sprintf_s(buf, "%08X", a_formID);
+    }
+    else if (file && file->IsLight()) {
         sprintf_s(buf, "%03X", a_formID & 0x00000FFF);
     }
     // Plugins "Full" (ESM e ESP comuns) usam os últimos 6 dígitos (24 bits)
@@ -37,24 +42,113 @@ std::string FormatLocalFormID(uint32_t a_formID, const std::string& a_pluginName
     return std::string(buf);
 }
 
-std::pair<std::string, RE::FormID> Reward::ParseFormID() const {
-    auto tokens = split(formIDStr, '|');
-    if (tokens.size() == 2) {
-        // Plugin | HexID
-        // Agora convertendo explicitamente de Hexadecimal (Base 16)
-        try {
-            uint32_t localID = std::stoul(tokens[1], nullptr, 16);
-            auto dataHandler = RE::TESDataHandler::GetSingleton();
-            if (dataHandler) {
-                auto form = dataHandler->LookupFormID(localID, tokens[0]);
-                return { tokens[0], form };
-            }
+namespace
+{
+    bool IEquals(const std::string& lhs, const std::string& rhs)
+    {
+        return lhs.size() == rhs.size() &&
+            std::equal(lhs.begin(), lhs.end(), rhs.begin(), [](unsigned char a, unsigned char b) {
+                return std::tolower(a) == std::tolower(b);
+            });
+    }
+
+    bool IsDynamicPluginAlias(const std::string& plugin)
+    {
+        return IEquals(plugin, "Dynamic") || IEquals(plugin, "Created");
+    }
+
+    const RE::TESFile* GetSourceFileByFormID(RE::TESForm* a_form)
+    {
+        if (!a_form) return nullptr;
+        if (auto file = a_form->GetFile(0)) return file;
+
+        auto dataHandler = RE::TESDataHandler::GetSingleton();
+        if (!dataHandler) return nullptr;
+
+        const auto formID = a_form->GetFormID();
+        const auto modIndex = static_cast<std::uint8_t>(formID >> 24);
+        if (modIndex == 0xFE) {
+            const auto lightIndex = static_cast<std::uint16_t>((formID >> 12) & 0xFFF);
+            return dataHandler->LookupLoadedLightModByIndex(lightIndex);
         }
-        catch (...) {
-            return { tokens[0], 0 };
+        if (modIndex != 0xFF) {
+            return dataHandler->LookupLoadedModByIndex(modIndex);
+        }
+        return nullptr;
+    }
+
+    RE::FormID ResolvePluginFormID(const std::string& formIDStr)
+    {
+        auto tokens = split(formIDStr, '|');
+        if (tokens.size() < 2) return 0;
+
+        try {
+            auto localID = static_cast<RE::FormID>(std::stoul(tokens[1], nullptr, 16));
+            if (IsDynamicPluginAlias(tokens[0])) {
+                return localID;
+            }
+
+            auto dataHandler = RE::TESDataHandler::GetSingleton();
+            return dataHandler ? dataHandler->LookupFormID(localID, tokens[0]) : 0;
+        } catch (...) {
+            return 0;
         }
     }
-    return { "", 0 };
+}
+
+RE::TESForm* ResolveEDFForm(const std::string& a_type, const std::string& a_editorID, const std::string& a_formIDStr)
+{
+    if (!a_editorID.empty()) {
+        const auto& list = Manager::GetSingleton()->GetList(a_type);
+        auto it = std::find_if(list.begin(), list.end(), [&](const InternalFormInfo& info) {
+            return !info.editorID.empty() && IEquals(info.editorID, a_editorID);
+        });
+        if (it != list.end()) {
+            if (auto form = RE::TESForm::LookupByID(it->formID)) {
+                return form;
+            }
+        }
+    }
+
+    if (auto formID = ResolvePluginFormID(a_formIDStr)) {
+        if (auto form = RE::TESForm::LookupByID(formID)) {
+            return form;
+        }
+    }
+
+    auto tokens = split(a_formIDStr, '|');
+    if (tokens.size() >= 2 && IsDynamicPluginAlias(tokens[0])) {
+        try {
+            const auto legacyLocalID = static_cast<RE::FormID>(std::stoul(tokens[1], nullptr, 16));
+            if (legacyLocalID <= 0x00FFFFFF) {
+                const auto& list = Manager::GetSingleton()->GetList(a_type);
+                auto it = std::find_if(list.begin(), list.end(), [&](const InternalFormInfo& info) {
+                    return (info.formID & 0x00FFFFFF) == legacyLocalID;
+                });
+                if (it != list.end()) {
+                    return RE::TESForm::LookupByID(it->formID);
+                }
+            }
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+    return nullptr;
+}
+
+RE::FormID ResolveEDFFormID(const std::string& a_type, const std::string& a_editorID, const std::string& a_formIDStr)
+{
+    if (auto form = ResolveEDFForm(a_type, a_editorID, a_formIDStr)) {
+        return form->GetFormID();
+    }
+    return 0;
+}
+
+std::pair<std::string, RE::FormID> Reward::ParseFormID() const {
+    auto tokens = split(formIDStr, '|');
+    const auto plugin = tokens.empty() ? "" : tokens[0];
+    return { plugin, ResolveEDFFormID(typeReward, editorID, formIDStr) };
 }
 
 std::string SanitizeFilename(std::string name) {
@@ -76,6 +170,10 @@ std::string SanitizeFilename(std::string name) {
 
 namespace {
     using JsonAllocator = rapidjson::Document::AllocatorType;
+
+    constexpr const char* kRulesDir = "Data/Viny Mods/EDF/Rules/";
+    constexpr const char* kExportDir = "Data/Viny Mods/EDF/Export/";
+    constexpr const char* kLegacyRulesDir = "Data/SKSE/Plugins/EDF/Rules/";
 
     const rapidjson::Value* FindMember(const rapidjson::Value& obj, const char* key) {
         if (!obj.IsObject()) return nullptr;
@@ -144,6 +242,7 @@ namespace {
         rapidjson::Value obj(rapidjson::kObjectType);
         AddString(obj, alloc, "type", p.type);
         AddString(obj, alloc, "formID", p.formIDStr);
+        AddString(obj, alloc, "editorID", p.editorID);
         return obj;
     }
 
@@ -151,6 +250,7 @@ namespace {
         BlacklistFilter p;
         p.type = GetString(value, "type");
         p.formIDStr = GetString(value, "formID");
+        p.editorID = GetString(value, "editorID");
         return p;
     }
 
@@ -176,6 +276,7 @@ namespace {
         rapidjson::Value obj(rapidjson::kObjectType);
         AddString(obj, alloc, "typeReward", p.typeReward);
         AddString(obj, alloc, "FormID", p.formIDStr);
+        AddString(obj, alloc, "editorID", p.editorID);
         AddUint(obj, alloc, "Amount", p.amount);
         AddFloat(obj, alloc, "Chance", p.chanceReward);
         AddInt(obj, alloc, "functionOnType", p.functionOnType);
@@ -187,6 +288,7 @@ namespace {
         Reward p;
         p.typeReward = GetString(value, "typeReward");
         p.formIDStr = GetString(value, "FormID");
+        p.editorID = GetString(value, "editorID");
         p.amount = GetUint(value, "Amount", 1);
         p.chanceReward = GetFloat(value, "Chance", 100.0f);
         p.functionOnType = GetInt(value, "functionOnType", GetInt(value, "isSleepOutfit", 0));
@@ -259,11 +361,15 @@ namespace {
         AddInt(obj, alloc, "v", p.version);
         AddInt(obj, alloc, "l", p.level);
         AddInt(obj, alloc, "g", p.targetGender);
+        AddInt(obj, alloc, "h", p.targetHumanoid);
+        AddInt(obj, alloc, "c", p.targetChild);
         AddBool(obj, alloc, "ra", p.targetRequiresAll);
         AddBool(obj, alloc, "ex", p.isExclusive);
         obj.AddMember("tf", WriteFilterArray(p.targetFilters, alloc), alloc);
         obj.AddMember("rg", WriteRewardGroupArray(p.rewardGroups, alloc), alloc);
         AddInt(obj, alloc, "bg", p.blacklistedGender);
+        AddInt(obj, alloc, "bh", p.blacklistedHumanoid);
+        AddInt(obj, alloc, "bc", p.blacklistedChild);
         AddBool(obj, alloc, "bra", p.blacklistRequiresAll);
         obj.AddMember("bf", WriteFilterArray(p.blacklistFilters, alloc), alloc);
         return obj;
@@ -275,10 +381,14 @@ namespace {
         AddString(obj, alloc, "name", p.name);
         AddInt(obj, alloc, "level", p.level);
         AddInt(obj, alloc, "t_gender", p.targetGender);
+        AddInt(obj, alloc, "t_humanoid", p.targetHumanoid);
+        AddInt(obj, alloc, "t_child", p.targetChild);
         AddBool(obj, alloc, "t_reqAll", p.targetRequiresAll);
         obj.AddMember("t_filters", WriteFilterArray(p.targetFilters, alloc), alloc);
         obj.AddMember("groups", WriteRewardGroupArray(p.rewardGroups, alloc), alloc);
         AddInt(obj, alloc, "b_gender", p.blacklistedGender);
+        AddInt(obj, alloc, "b_humanoid", p.blacklistedHumanoid);
+        AddInt(obj, alloc, "b_child", p.blacklistedChild);
         AddBool(obj, alloc, "b_reqAll", p.blacklistRequiresAll);
         obj.AddMember("b_filters", WriteFilterArray(p.blacklistFilters, alloc), alloc);
         AddBool(obj, alloc, "isExclusive", p.isExclusive);
@@ -294,6 +404,30 @@ namespace {
         rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
         value.Accept(writer);
         return buffer.GetString();
+    }
+
+    void EnsureRuleStorage()
+    {
+        fs::create_directories(kRulesDir);
+        fs::create_directories(kExportDir);
+
+        if (!fs::exists(kLegacyRulesDir)) return;
+
+        for (const auto& entry : fs::directory_iterator(kLegacyRulesDir)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
+
+            const auto targetPath = fs::path(kRulesDir) / entry.path().filename();
+            if (fs::exists(targetPath)) continue;
+
+            std::error_code ec;
+            fs::copy_file(entry.path(), targetPath, fs::copy_options::skip_existing, ec);
+            if (ec) {
+                logger::warn("Rules migration: failed to copy '{}' to '{}': {}", entry.path().string(), targetPath.string(), ec.message());
+            }
+            else {
+                logger::info("Rules migration: copied '{}' to '{}'", entry.path().string(), targetPath.string());
+            }
+        }
     }
 }
 
@@ -314,6 +448,8 @@ Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId
     p.version = GetInt(j, "v", GetInt(j, "version", 1));
     p.level = GetInt(j, "l", GetInt(j, "level", 1));
     p.targetGender = GetInt(j, "g", GetInt(j, "targetGender", 0));
+    p.targetHumanoid = GetInt(j, "h", GetInt(j, "t_humanoid", GetInt(j, "targetHumanoid", 0)));
+    p.targetChild = GetInt(j, "c", GetInt(j, "t_child", GetInt(j, "targetChild", 0)));
     p.targetRequiresAll = GetBool(j, "ra", GetBool(j, "targetRequiresAll", false));
     p.isExclusive = GetBool(j, "ex", GetBool(j, "ruleExclusive", false));
 
@@ -324,6 +460,8 @@ Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId
     else p.rewardGroups = ReadRewardGroupArray(FindMember(j, "RewardGroups"));
 
     p.blacklistedGender = GetInt(j, "bg", GetInt(j, "blacklistedGender", 0));
+    p.blacklistedHumanoid = GetInt(j, "bh", GetInt(j, "b_humanoid", GetInt(j, "blacklistedHumanoid", 0)));
+    p.blacklistedChild = GetInt(j, "bc", GetInt(j, "b_child", GetInt(j, "blacklistedChild", 0)));
     p.blacklistRequiresAll = GetBool(j, "bra", GetBool(j, "blacklistRequiresAll", false));
 
     if (auto value = FindMember(j, "bf")) p.blacklistFilters = ReadFilterArray(value);
@@ -377,9 +515,64 @@ bool IsNPCInLeveledList(RE::TESNPC* a_npc, RE::TESLevCharacter* a_levList) {
     return false;
 }
 
+bool MatchesTriStateFilter(int filter, bool value)
+{
+    if (filter == 0) return true;
+    if (filter == 1) return value;
+    if (filter == 2) return !value;
+    return true;
+}
+
+bool ResolveIsChild(RE::TESNPC* npc, RE::Actor* actor)
+{
+    if (actor) return actor->IsChild();
+    return npc && npc->race && npc->race->IsChildRace();
+}
+
+bool ResolveIsHumanoid(RE::TESNPC* npc, RE::Actor* actor)
+{
+    if (actor) return actor->IsHumanoid();
+    if (npc) {
+        auto dobj = RE::BGSDefaultObjectManager::GetSingleton();
+        if (dobj) {
+            constexpr auto keywordNPCIndex = static_cast<std::size_t>(RE::DEFAULT_OBJECTS::kKeywordNPC);
+            auto keyword = dobj->objects[keywordNPCIndex] ? dobj->objects[keywordNPCIndex]->As<RE::BGSKeyword>() : nullptr;
+            if (keyword) {
+                return npc->HasKeyword(keyword);
+            }
+        }
+    }
+    return true;
+}
+
+int GetFilterValue(const std::vector<std::string>& tokens, int fallback)
+{
+    if (tokens.size() < 3) return fallback;
+    try {
+        return std::stoi(tokens[2]);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+bool IsActorEquippedItem(RE::Actor* actor, RE::TESBoundObject* item)
+{
+    if (!actor || !item) return false;
+
+    if (actor->GetEquippedObject(false) == item || actor->GetEquippedObject(true) == item) {
+        return true;
+    }
+
+    auto inventory = actor->GetInventory();
+    auto it = inventory.find(item);
+    return it != inventory.end() && it->second.second && it->second.second->IsWorn();
+}
+
 bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor) {
     // 1. Seleciona os dados baseados no modo (Target vs Blacklist)
     int genderFilter = isBlacklist ? rule.blacklistedGender : rule.targetGender;
+    int humanoidFilter = isBlacklist ? rule.blacklistedHumanoid : rule.targetHumanoid;
+    int childFilter = isBlacklist ? rule.blacklistedChild : rule.targetChild;
     const auto& filters = isBlacklist ? rule.blacklistFilters : rule.targetFilters;
     bool requiresAll = isBlacklist ? rule.blacklistRequiresAll : rule.targetRequiresAll;
 
@@ -392,7 +585,19 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         if (!isBlacklist && !genderMatch) return false; // Se for target e NÃO deu match, descarta
     }
 
-    // 3. Se não houver filtros de ID/Keyword/etc
+    // 3. Filtros de corpo/idade
+    if (humanoidFilter != 0) {
+        const bool humanoidMatch = MatchesTriStateFilter(humanoidFilter, ResolveIsHumanoid(npc, actor));
+        if (isBlacklist && humanoidMatch) return true;
+        if (!isBlacklist && !humanoidMatch) return false;
+    }
+
+    if (childFilter != 0) {
+        const bool childMatch = MatchesTriStateFilter(childFilter, ResolveIsChild(npc, actor));
+        if (isBlacklist && childMatch) return true;
+        if (!isBlacklist && !childMatch) return false;
+    }
+
     if (filters.empty()) {
         // Na Blacklist, vazio significa "não bloqueia ninguém". No Target, significa "afeta todos".
         return !isBlacklist;
@@ -404,10 +609,13 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         auto tokens = split(filter.formIDStr, '|');
         if (tokens.size() < 2) continue;
 
-        auto fID = RE::TESDataHandler::GetSingleton()->LookupFormID(std::stoul(tokens[1], nullptr, 16), tokens[0]);
+        auto fID = ResolveEDFFormID(filter.type, filter.editorID, filter.formIDStr);
+        const auto filterValue = GetFilterValue(tokens, 1);
 
         if (filter.type == "NPC") {
-            if (npc->GetFormID() == fID) {
+            if (npc->GetFormID() == fID ||
+                (npc->baseTemplateForm && npc->baseTemplateForm->GetFormID() == fID) ||
+                (actor && actor->GetTemplateBase() && actor->GetTemplateBase()->GetFormID() == fID)) {
                 match = true;
             }
         }
@@ -422,10 +630,43 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
             if (kwd && (npc->HasKeyword(kwd) || SaveStateManager::GetSingleton()->HasVirtualKeyword(actor, kwd))) {
                 match = true;
             }
+            if (!match && kwd && npc->race) {
+                npc->race->ForEachKeyword([&](const RE::BGSKeyword* a_keyword) {
+                    if (a_keyword == kwd) {
+                        match = true;
+                        return RE::BSContainer::ForEachResult::kStop;
+                    }
+                    return RE::BSContainer::ForEachResult::kContinue;
+                });
+            }
         }
         else if (filter.type == "Faction") {
             auto fact = RE::TESForm::LookupByID<RE::TESFaction>(fID);
             if (fact && ((actor && actor->IsInFaction(fact)) || npc->IsInFaction(fact))) {
+                match = true;
+            }
+        }
+        else if (filter.type == "Faction Rank") {
+            auto fact = RE::TESForm::LookupByID<RE::TESFaction>(fID);
+            if (actor && fact && actor->GetFactionRank(fact, actor->IsPlayer()) >= filterValue) {
+                match = true;
+            }
+        }
+        else if (filter.type == "Perk") {
+            auto perk = RE::TESForm::LookupByID<RE::BGSPerk>(fID);
+            if (actor && perk && actor->HasPerk(perk)) {
+                match = true;
+            }
+        }
+        else if (filter.type == "Spell") {
+            auto spell = RE::TESForm::LookupByID<RE::SpellItem>(fID);
+            if (actor && spell && actor->HasSpell(spell)) {
+                match = true;
+            }
+        }
+        else if (filter.type == "Shout") {
+            auto shout = RE::TESForm::LookupByID<RE::TESShout>(fID);
+            if (actor && shout && actor->HasShout(shout)) {
                 match = true;
             }
         }
@@ -448,6 +689,29 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
             // A Skin do NPC é um ponteiro para um TESObjectARMO (Armor)
             if (npc->skin && npc->skin->GetFormID() == fID) match = true;
         }
+        else if (filter.type == "Inventory Item") {
+            auto item = RE::TESForm::LookupByID<RE::TESBoundObject>(fID);
+            if (actor && item && actor->GetInventoryCount(item) > 0) {
+                match = true;
+            }
+        }
+        else if (filter.type == "Inventory Count") {
+            auto item = RE::TESForm::LookupByID<RE::TESBoundObject>(fID);
+            if (actor && item && actor->GetInventoryCount(item) >= std::max(1, filterValue)) {
+                match = true;
+            }
+        }
+        else if (filter.type == "Gold") {
+            if (actor && actor->GetGoldAmount() >= std::max(0, filterValue)) {
+                match = true;
+            }
+        }
+        else if (filter.type == "Equipped Item") {
+            auto item = RE::TESForm::LookupByID<RE::TESBoundObject>(fID);
+            if (IsActorEquippedItem(actor, item)) {
+                match = true;
+            }
+        }
         else if (filter.type == "Package") {
             auto pkg = RE::TESForm::LookupByID<RE::TESPackage>(fID);
             if (pkg) {
@@ -460,7 +724,10 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
                 }
             }
         }
-        else if (filter.type == "Hair" || filter.type == "Facial Hair") {
+        else if (filter.type == "Hair" || filter.type == "Facial Hair" ||
+            filter.type == "HeadPart Misc" || filter.type == "HeadPart Face" ||
+            filter.type == "HeadPart Eyes" || filter.type == "HeadPart Scar" ||
+            filter.type == "HeadPart Eyebrows") {
             if (npc->headParts && npc->numHeadParts > 0) {
                 for (std::int8_t i = 0; i < npc->numHeadParts; i++) {
                     if (npc->headParts[i] && npc->headParts[i]->GetFormID() == fID) {
@@ -499,13 +766,14 @@ void RuleManager::LoadRules() {
     _ruleHistories.clear();
     _ruleIdToFileName.clear();
 
-    if (!fs::exists(_rulesDir)) {
-        fs::create_directories(_rulesDir);
-        return;
-    }
+    EnsureRuleStorage();
 
-    for (const auto& entry : fs::directory_iterator(_rulesDir)) {
-        if (entry.path().extension() == ".json") {
+    auto loadDirectory = [&](const fs::path& directory, bool fallbackOnly) {
+        if (!fs::exists(directory)) return;
+
+        for (const auto& entry : fs::directory_iterator(directory)) {
+            if (entry.path().extension() != ".json") continue;
+
             std::ifstream i(entry.path());
             try {
                 rapidjson::IStreamWrapper stream(i);
@@ -515,17 +783,18 @@ void RuleManager::LoadRules() {
                 if (!j.HasParseError() && j.IsArray() && !j.Empty()) {
                     std::vector<Rule> history;
 
-                    // A primeira entrada [0] é a mais recente e contém os metadados completos
                     const rapidjson::Value& latestJson = j[0];
                     Rule latest = ProcessRuleVersion(latestJson, "", "Sem Nome", true);
 
                     std::string ruleId = latest.id;
                     std::string ruleName = latest.name;
                     bool ruleEnabled = latest.isEnabled;
+                    if (fallbackOnly && _ruleHistories.contains(ruleId)) {
+                        continue;
+                    }
 
                     history.push_back(latest);
 
-                    // Processa o restante do histórico usando os metadados da versão mais recente como fallback
                     for (rapidjson::SizeType idx = 1; idx < j.Size(); ++idx) {
                         history.push_back(ProcessRuleVersion(j[idx], ruleId, ruleName, ruleEnabled));
                     }
@@ -539,11 +808,15 @@ void RuleManager::LoadRules() {
                 logger::error("Erro ao carregar regra {}: {}", entry.path().string(), e.what());
             }
         }
-    }
-    logger::info("Carregadas {} regras com seus históricos (Suporte a Formato Compacto ativado).", _rules.size());
-}
+    };
 
+    loadDirectory(_rulesDir, false);
+    loadDirectory(_legacyRulesDir, true);
+    logger::info("Carregadas {} regras com seus historicos (Suporte a Formato Compacto ativado).", _rules.size());
+}
 void RuleManager::SaveRules() {
+    EnsureRuleStorage();
+
     const size_t MAX_HISTORY = 100;
     int updatedTotal = 0;
 
@@ -621,8 +894,14 @@ void RuleManager::ExportRule(const Rule& rule) {
     // 1. Caminhos de origem e destino
     std::string ruleFileName = _ruleIdToFileName[rule.id] + ".json";
     std::string sourcePath = _rulesDir + ruleFileName;
+    if (!fs::exists(sourcePath)) {
+        const auto legacySource = fs::path(_legacyRulesDir) / ruleFileName;
+        if (fs::exists(legacySource)) {
+            sourcePath = legacySource.string();
+        }
+    }
 
-    fs::path exportDir = "Data/SKSE/Plugins/EDF/Exports";
+    fs::path exportDir = _exportDir;
     fs::create_directories(exportDir);
 
     std::string zipPath = (exportDir / (SanitizeFilename(rule.name) + ".zip")).string();
@@ -637,8 +916,7 @@ void RuleManager::ExportRule(const Rule& rule) {
     }
 
     // 3. Define o caminho interno (onde o arquivo ficará dentro do ZIP)
-    // O usuário quer: SKSE\Plugins\EDF\Rules\nome.json
-    std::string internalZipPath = "SKSE/Plugins/EDF/Rules/" + ruleFileName;
+    std::string internalZipPath = "Viny Mods/EDF/Rules/" + ruleFileName;
 
     // 4. Adiciona o arquivo ao ZIP
     // mz_zip_writer_add_file(arquivo_zip, nome_dentro_do_zip, caminho_no_disco, ...)
@@ -654,6 +932,49 @@ void RuleManager::ExportRule(const Rule& rule) {
     mz_zip_writer_end(&zip_archive);
 
     logger::info("Regra '{}' exportada com sucesso para: {}", rule.name, zipPath);
+}
+
+void RuleManager::ExportRulesPackage(const std::string& packageName, const std::set<std::string>& ruleIDs)
+{
+    if (ruleIDs.empty()) {
+        logger::warn("Export: nenhuma regra selecionada.");
+        return;
+    }
+
+    fs::create_directories(_exportDir);
+    const auto safeName = SanitizeFilename(packageName.empty() ? "EDF_Export" : packageName);
+    const auto zipPath = (fs::path(_exportDir) / (safeName + ".zip")).string();
+
+    mz_zip_archive zip_archive;
+    memset(&zip_archive, 0, sizeof(zip_archive));
+    if (!mz_zip_writer_init_file(&zip_archive, zipPath.c_str(), 0)) {
+        logger::error("Export: Falha ao inicializar arquivo ZIP em {}", zipPath);
+        return;
+    }
+
+    std::set<std::string> addedPaths;
+    for (const auto& ruleID : ruleIDs) {
+        auto fileIt = _ruleIdToFileName.find(ruleID);
+        if (fileIt == _ruleIdToFileName.end()) continue;
+
+        const auto ruleFileName = fileIt->second + ".json";
+        fs::path sourcePath = fs::path(_rulesDir) / ruleFileName;
+        if (!fs::exists(sourcePath)) {
+            sourcePath = fs::path(_legacyRulesDir) / ruleFileName;
+        }
+        if (!fs::exists(sourcePath)) continue;
+
+        const auto internalPath = "Viny Mods/EDF/Rules/" + ruleFileName;
+        if (!addedPaths.insert(internalPath).second) continue;
+
+        if (!mz_zip_writer_add_file(&zip_archive, internalPath.c_str(), sourcePath.string().c_str(), nullptr, 0, MZ_BEST_COMPRESSION)) {
+            logger::error("Export: Falha ao adicionar '{}' como '{}'", sourcePath.string(), internalPath);
+        }
+    }
+
+    mz_zip_writer_finalize_archive(&zip_archive);
+    mz_zip_writer_end(&zip_archive);
+    logger::info("Pacote de regras exportado com sucesso para: {}", zipPath);
 }
 
 std::string GenerateUUID() {
@@ -704,8 +1025,8 @@ std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {
     if (!npc) return applicable;
 
     // 1. Obter o identificador do NPC no formato correto (Hexadecimal 5 ou 3 dígitos)
-    std::string npcPlugin = "";
-    if (auto file = npc->GetFile(0)) {
+    std::string npcPlugin = npc->IsDynamicForm() ? "Dynamic" : "";
+    if (auto file = GetSourceFileByFormID(npc)) {
         npcPlugin = file->GetFilename();
     }
 

@@ -1,6 +1,29 @@
 #include "Manager.h"
 #include "SaveState.h"
 
+namespace
+{
+    const RE::TESFile* GetSourceFileByFormID(RE::TESForm* a_form)
+    {
+        if (!a_form) return nullptr;
+        if (auto file = a_form->GetFile(0)) return file;
+
+        auto dataHandler = RE::TESDataHandler::GetSingleton();
+        if (!dataHandler) return nullptr;
+
+        const auto formID = a_form->GetFormID();
+        const auto modIndex = static_cast<std::uint8_t>(formID >> 24);
+        if (modIndex == 0xFE) {
+            const auto lightIndex = static_cast<std::uint16_t>((formID >> 12) & 0xFFF);
+            return dataHandler->LookupLoadedLightModByIndex(lightIndex);
+        }
+        if (modIndex != 0xFF) {
+            return dataHandler->LookupLoadedModByIndex(modIndex);
+        }
+        return nullptr;
+    }
+}
+
 void Manager::PopulateAllLists(bool forceRefresh) {
     if (_isPopulated && !forceRefresh) return;
 
@@ -8,6 +31,13 @@ void Manager::PopulateAllLists(bool forceRefresh) {
 
     PopulateList<RE::BGSKeyword>("Keyword");
     PopulateList<RE::TESFaction>("Faction");
+    auto& factionRankList = _dataStore["Faction Rank"];
+    factionRankList.clear();
+    for (auto faction : _dataStore["Faction"]) {
+        faction.formType = "Faction Rank";
+        factionRankList.push_back(std::move(faction));
+    }
+    logger::info("Carregados {} itens do tipo {}", factionRankList.size(), "Faction Rank");
     PopulateList<RE::TESRace>("Race");
     PopulateList<RE::BGSPerk>("Perk");
     PopulateList<RE::SpellItem>("Spell");
@@ -15,6 +45,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     PopulateList<RE::TESNPC>("NPC");
     PopulateList<RE::TESObjectWEAP>("Weapon");
     PopulateList<RE::TESObjectARMO>("Armor");
+    PopulateList<RE::TESObjectARMO>("Skin");
     PopulateList<RE::BGSOutfit>("Outfit");
 
 
@@ -25,18 +56,68 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     PopulateList<RE::TESObjectBOOK>("Book");
     PopulateList<RE::TESAmmo>("Ammo");
     PopulateList<RE::TESObjectMISC>("Misc");
+    auto& goldList = _dataStore["Gold"];
+    goldList.clear();
+    for (auto gold : _dataStore["Misc"]) {
+        if (gold.formID == 0xF || gold.editorID == "Gold001") {
+            gold.formType = "Gold";
+            goldList.push_back(std::move(gold));
+        }
+    }
+    logger::info("Carregados {} itens do tipo {}", goldList.size(), "Gold");
     PopulateList<RE::TESSoulGem>("SoulGem");
     PopulateList<RE::TESKey>("Key");
+    auto& inventoryItems = _dataStore["Inventory Item"];
+    inventoryItems.clear();
+    for (const auto& typeName : { "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key" }) {
+        const auto& source = _dataStore[typeName];
+        for (auto item : source) {
+            item.formType = "Inventory Item";
+            inventoryItems.push_back(std::move(item));
+        }
+    }
+    logger::info("Carregados {} itens do tipo {}", inventoryItems.size(), "Inventory Item");
+    auto& inventoryCountItems = _dataStore["Inventory Count"];
+    inventoryCountItems = inventoryItems;
+    for (auto& item : inventoryCountItems) {
+        item.formType = "Inventory Count";
+    }
+    logger::info("Carregados {} itens do tipo {}", inventoryCountItems.size(), "Inventory Count");
+    auto& equippedItems = _dataStore["Equipped Item"];
+    equippedItems.clear();
+    for (const auto& typeName : { "Weapon", "Armor", "Ammo" }) {
+        const auto& source = _dataStore[typeName];
+        for (auto item : source) {
+            item.formType = "Equipped Item";
+            equippedItems.push_back(std::move(item));
+        }
+    }
+    logger::info("Carregados {} itens do tipo {}", equippedItems.size(), "Equipped Item");
     // - v.1.2.0
     PopulateList<RE::TESCombatStyle>("Combat Style");
     PopulateList<RE::BGSVoiceType>("Voice Type");
     PopulateList<RE::TESClass>("Class");
     PopulateList<RE::BGSLocation>("Location");
+    PopulateList<RE::BGSHeadPart>("HeadPart Misc", [](RE::BGSHeadPart* hp) {
+        return hp->type == RE::BGSHeadPart::HeadPartType::kMisc;
+        });
+    PopulateList<RE::BGSHeadPart>("HeadPart Face", [](RE::BGSHeadPart* hp) {
+        return hp->type == RE::BGSHeadPart::HeadPartType::kFace;
+        });
+    PopulateList<RE::BGSHeadPart>("HeadPart Eyes", [](RE::BGSHeadPart* hp) {
+        return hp->type == RE::BGSHeadPart::HeadPartType::kEyes;
+        });
     PopulateList<RE::BGSHeadPart>("Hair", [](RE::BGSHeadPart* hp) {
         return hp->type == RE::BGSHeadPart::HeadPartType::kHair;
         });
     PopulateList<RE::BGSHeadPart>("Facial Hair", [](RE::BGSHeadPart* hp) {
         return hp->type == RE::BGSHeadPart::HeadPartType::kFacialHair;
+        });
+    PopulateList<RE::BGSHeadPart>("HeadPart Scar", [](RE::BGSHeadPart* hp) {
+        return hp->type == RE::BGSHeadPart::HeadPartType::kScar;
+        });
+    PopulateList<RE::BGSHeadPart>("HeadPart Eyebrows", [](RE::BGSHeadPart* hp) {
+        return hp->type == RE::BGSHeadPart::HeadPartType::kEyebrows;
         });
     PopulateList<RE::TESLevCharacter>("Leveled NPC", [](RE::TESLevCharacter* lvnc) {
         return lvnc && !lvnc->entries.empty();
@@ -48,6 +129,108 @@ void Manager::PopulateAllLists(bool forceRefresh) {
         if (cb) cb();
     }
     _readyCallbacks.clear();
+}
+
+void Manager::RefreshLists(std::string_view a_signatures) {
+    const auto includes = [a_signatures](std::string_view a_signature) {
+        std::size_t begin = 0;
+        while (begin <= a_signatures.size()) {
+            const auto end = a_signatures.find(',', begin);
+            auto token = a_signatures.substr(begin, end == std::string_view::npos ? a_signatures.size() - begin : end - begin);
+            while (!token.empty() && token.front() == ' ') token.remove_prefix(1);
+            while (!token.empty() && token.back() == ' ') token.remove_suffix(1);
+            if (token == a_signature) return true;
+            if (end == std::string_view::npos) break;
+            begin = end + 1;
+        }
+        return false;
+    };
+
+    if (a_signatures.empty() || includes("All")) {
+        PopulateAllLists(true);
+        return;
+    }
+
+    if (includes("KYWD")) PopulateList<RE::BGSKeyword>("Keyword");
+    if (includes("FACT")) {
+        PopulateList<RE::TESFaction>("Faction");
+        auto& factionRanks = _dataStore["Faction Rank"];
+        factionRanks.clear();
+        for (auto faction : _dataStore["Faction"]) {
+            faction.formType = "Faction Rank";
+            factionRanks.push_back(std::move(faction));
+        }
+    }
+    if (includes("PERK")) PopulateList<RE::BGSPerk>("Perk");
+    if (includes("SPEL")) PopulateList<RE::SpellItem>("Spell");
+    if (includes("SHOU")) PopulateList<RE::TESShout>("Shout");
+    if (includes("NPC_")) PopulateList<RE::TESNPC>("NPC");
+    if (includes("WEAP")) PopulateList<RE::TESObjectWEAP>("Weapon");
+    if (includes("ARMO")) {
+        PopulateList<RE::TESObjectARMO>("Armor");
+        PopulateList<RE::TESObjectARMO>("Skin");
+    }
+    if (includes("OTFT")) PopulateList<RE::BGSOutfit>("Outfit");
+    if (includes("ALCH")) PopulateList<RE::AlchemyItem>("Potion");
+    if (includes("INGR")) PopulateList<RE::IngredientItem>("Ingredient");
+    if (includes("SCRL")) PopulateList<RE::ScrollItem>("Scroll");
+    if (includes("BOOK")) PopulateList<RE::TESObjectBOOK>("Book");
+    if (includes("AMMO")) PopulateList<RE::TESAmmo>("Ammo");
+    if (includes("MISC")) {
+        PopulateList<RE::TESObjectMISC>("Misc");
+        auto& gold = _dataStore["Gold"];
+        gold.clear();
+        for (auto item : _dataStore["Misc"]) {
+            if (item.formID == 0xF || item.editorID == "Gold001") {
+                item.formType = "Gold";
+                gold.push_back(std::move(item));
+            }
+        }
+    }
+    if (includes("SLGM")) PopulateList<RE::TESSoulGem>("SoulGem");
+    if (includes("KEYM")) PopulateList<RE::TESKey>("Key");
+    if (includes("CSTY")) PopulateList<RE::TESCombatStyle>("Combat Style");
+    if (includes("VTYP")) PopulateList<RE::BGSVoiceType>("Voice Type");
+    if (includes("CLAS")) PopulateList<RE::TESClass>("Class");
+    if (includes("HDPT")) {
+        PopulateList<RE::BGSHeadPart>("HeadPart Misc", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kMisc; });
+        PopulateList<RE::BGSHeadPart>("HeadPart Face", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kFace; });
+        PopulateList<RE::BGSHeadPart>("HeadPart Eyes", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kEyes; });
+        PopulateList<RE::BGSHeadPart>("Hair", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kHair; });
+        PopulateList<RE::BGSHeadPart>("Facial Hair", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kFacialHair; });
+        PopulateList<RE::BGSHeadPart>("HeadPart Scar", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kScar; });
+        PopulateList<RE::BGSHeadPart>("HeadPart Eyebrows", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kEyebrows; });
+    }
+    if (includes("LVLN")) {
+        PopulateList<RE::TESLevCharacter>("Leveled NPC", [](RE::TESLevCharacter* lvnc) { return lvnc && !lvnc->entries.empty(); });
+    }
+
+    const bool inventoryChanged = includes("WEAP") || includes("ARMO") || includes("ALCH") || includes("INGR") ||
+        includes("SCRL") || includes("BOOK") || includes("AMMO") || includes("MISC") || includes("SLGM") || includes("KEYM");
+    if (inventoryChanged) {
+        auto& inventory = _dataStore["Inventory Item"];
+        inventory.clear();
+        for (const auto& typeName : { "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key" }) {
+            for (auto item : _dataStore[typeName]) {
+                item.formType = "Inventory Item";
+                inventory.push_back(std::move(item));
+            }
+        }
+        auto& inventoryCount = _dataStore["Inventory Count"];
+        inventoryCount = inventory;
+        for (auto& item : inventoryCount) item.formType = "Inventory Count";
+    }
+
+    if (includes("WEAP") || includes("ARMO") || includes("AMMO")) {
+        auto& equipped = _dataStore["Equipped Item"];
+        equipped.clear();
+        for (const auto& typeName : { "Weapon", "Armor", "Ammo" }) {
+            for (auto item : _dataStore[typeName]) {
+                item.formType = "Equipped Item";
+                equipped.push_back(std::move(item));
+            }
+        }
+    }
 }
 
 const std::vector<InternalFormInfo>& Manager::GetList(const std::string& typeName) {
@@ -114,7 +297,7 @@ void Manager::PopulateList(const std::string& a_typeName, std::function<bool(T*)
             currentID = form->GetFormID();
 
             // ObtÃ©m o nome do plugin de origem antes de qualquer processamento complexo
-            if (auto file = form->GetFile(0)) {
+            if (auto file = GetSourceFileByFormID(form)) {
                 currentPlugin = std::string(file->GetFilename());
             }
             else {

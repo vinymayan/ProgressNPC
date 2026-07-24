@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <set>
 #include <rapidjson/document.h>
 #include "Manager.h"
 
@@ -9,6 +10,7 @@ std::vector<std::string> split(const std::string& s, char delimiter);
 struct Reward {
     std::string typeReward; // "Spell", "Perk", "Weapon", "Keyword"
     std::string formIDStr;  // e.g. "Skyrim.esm|D8D4E" (Plugin|FormID) or "D8D4E" (FormID only - unsafe without plugin)
+    std::string editorID;
     uint32_t amount = 1;
     float chanceReward = 100.0f;
     int functionOnType = 0;
@@ -28,6 +30,7 @@ struct RewardGroup {
 struct BlacklistFilter {
     std::string type;      // "NPC", "Faction", "Race", "Keyword"
     std::string formIDStr; // Plugin|FormID
+    std::string editorID;
 };
 
 
@@ -40,12 +43,16 @@ struct Rule {
     int version = 0;
     // Novos campos de Alvos (Substituem type e filterFormIDs)
     int targetGender = 0;
+    int targetHumanoid = 0;  // 0: Both, 1: Only humanoids, 2: Only non-humanoids
+    int targetChild = 0;     // 0: Both, 1: Only children, 2: Only non-children
     bool targetRequiresAll = false;
     bool isExclusive = false;
     std::vector<BlacklistFilter> targetFilters; // Usando a mesma struct de filtro
     std::vector<RewardGroup> rewardGroups;
 
     int blacklistedGender = 0;       // 0: Nenhum, 1: Male, 2: Female
+    int blacklistedHumanoid = 0;     // 0: Nenhum, 1: Humanoid, 2: Non-humanoid
+    int blacklistedChild = 0;        // 0: Nenhum, 1: Child, 2: Non-child
     bool blacklistRequiresAll = false;
     std::vector<BlacklistFilter> blacklistFilters;
 
@@ -79,6 +86,7 @@ public:
     void LoadRules();
     void SaveRules();
     void ExportRule(const Rule& rule);
+    void ExportRulesPackage(const std::string& packageName, const std::set<std::string>& ruleIDs);
     std::vector<Rule>& GetRules() { return _rules; }
 
     // Create specific rule
@@ -109,7 +117,12 @@ private:
     std::map<RE::FormID, AffectedNPC> _affectedNPCsDatabase;
     std::map<std::string, std::string> _ruleIdToFileName;
     std::vector<std::string> _rulesToDelete;
-    const std::string _rulesDir = "Data/SKSE/Plugins/EDF/Rules/";
+    const std::string _modDir = "Data/Viny Mods/EDF";
+    const std::string _rulesDir = "Data/Viny Mods/EDF/Rules/";
+    const std::string _exportDir = "Data/Viny Mods/EDF/Export/";
+    const std::string _legacyRulesDir = "Data/SKSE/Plugins/EDF/Rules/";
 };
 
 std::string FormatLocalFormID(uint32_t a_formID, const std::string& a_pluginName);
+RE::TESForm* ResolveEDFForm(const std::string& a_type, const std::string& a_editorID, const std::string& a_formIDStr);
+RE::FormID ResolveEDFFormID(const std::string& a_type, const std::string& a_editorID, const std::string& a_formIDStr);

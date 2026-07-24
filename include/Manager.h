@@ -29,6 +29,7 @@ public:
     }
 
     void PopulateAllLists(bool forceRefresh = false);
+    void RefreshLists(std::string_view a_signatures);
     static std::string ToUTF8(std::string_view a_str);
     // Data Store: Map of "TypeName" -> List of InternalFormInfo
     // We use this to feed the UI

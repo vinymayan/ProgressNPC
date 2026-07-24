@@ -10,6 +10,26 @@ static std::mutex g_processingMutex;
 static std::set<RE::FormID> g_actorsInProcess;
 
 namespace {
+    const RE::TESFile* GetSourceFileByFormID(RE::TESForm* a_form)
+    {
+        if (!a_form) return nullptr;
+        if (auto file = a_form->GetFile(0)) return file;
+
+        auto dataHandler = RE::TESDataHandler::GetSingleton();
+        if (!dataHandler) return nullptr;
+
+        const auto formID = a_form->GetFormID();
+        const auto modIndex = static_cast<std::uint8_t>(formID >> 24);
+        if (modIndex == 0xFE) {
+            const auto lightIndex = static_cast<std::uint16_t>((formID >> 12) & 0xFFF);
+            return dataHandler->LookupLoadedLightModByIndex(lightIndex);
+        }
+        if (modIndex != 0xFF) {
+            return dataHandler->LookupLoadedModByIndex(modIndex);
+        }
+        return nullptr;
+    }
+
     const rapidjson::Value* FindMember(const rapidjson::Value& obj, const char* key) {
         if (!obj.IsObject()) return nullptr;
         auto it = obj.FindMember(key);
@@ -49,15 +69,27 @@ namespace {
         return buffer.GetString();
     }
 
+    constexpr char kManagedItemKeyDelimiter = '\x1F';
+
+    std::string GetManagedItemBaseKey(const std::string& a_managedKey)
+    {
+        const auto delimiter = a_managedKey.find(kManagedItemKeyDelimiter);
+        return delimiter == std::string::npos ? a_managedKey : a_managedKey.substr(0, delimiter);
+    }
+
     RE::TESBoundObject* LookupBoundObjectByKey(const std::string& a_key) {
-        auto tokens = split(a_key, '|');
+        auto tokens = split(GetManagedItemBaseKey(a_key), '|');
         if (tokens.size() != 2) return nullptr;
 
         try {
+            auto localID = static_cast<RE::FormID>(std::stoul(tokens[1], nullptr, 16));
+            if (tokens[0] == "Dynamic" || tokens[0] == "Created") {
+                return RE::TESForm::LookupByID<RE::TESBoundObject>(localID);
+            }
+
             auto dataHandler = RE::TESDataHandler::GetSingleton();
             if (!dataHandler) return nullptr;
 
-            auto localID = static_cast<RE::FormID>(std::stoul(tokens[1], nullptr, 16));
             auto formID = dataHandler->LookupFormID(localID, tokens[0]);
             return RE::TESForm::LookupByID<RE::TESBoundObject>(formID);
         }
@@ -70,6 +102,59 @@ namespace {
         if (!a_actor || !a_item) return 0;
         const auto count = a_actor->GetInventoryCount(a_item);
         return count > 0 ? static_cast<uint32_t>(count) : 0;
+    }
+
+    std::string BuildManagedItemKey(const std::string& a_itemKey, const std::string& a_ruleID,
+        const std::string& a_groupName, bool a_isPersistent)
+    {
+        return a_itemKey + kManagedItemKeyDelimiter + (a_isPersistent ? "P" : "T") +
+            kManagedItemKeyDelimiter + a_ruleID + kManagedItemKeyDelimiter + a_groupName;
+    }
+
+    bool ManagedItemMatches(const std::string& a_managedKey, const std::string& a_itemKey,
+        const PersistentItemState& a_state, const std::string& a_ruleID, const std::string& a_groupName,
+        bool a_isPersistent)
+    {
+        return GetManagedItemBaseKey(a_managedKey) == a_itemKey &&
+            a_state.ruleID == a_ruleID &&
+            a_state.groupName == a_groupName &&
+            a_state.isPersistent == a_isPersistent;
+    }
+
+    PersistentItemState* FindManagedItemState(std::map<std::string, PersistentItemState>& a_items,
+        const std::string& a_itemKey, const std::string& a_ruleID, const std::string& a_groupName,
+        bool a_isPersistent)
+    {
+        const auto managedKey = BuildManagedItemKey(a_itemKey, a_ruleID, a_groupName, a_isPersistent);
+        if (auto it = a_items.find(managedKey); it != a_items.end()) {
+            return std::addressof(it->second);
+        }
+
+        for (auto& [key, state] : a_items) {
+            if (ManagedItemMatches(key, a_itemKey, state, a_ruleID, a_groupName, a_isPersistent)) {
+                return std::addressof(state);
+            }
+        }
+
+        return nullptr;
+    }
+
+    const PersistentItemState* FindManagedItemState(const std::map<std::string, PersistentItemState>& a_items,
+        const std::string& a_itemKey, const std::string& a_ruleID, const std::string& a_groupName,
+        bool a_isPersistent)
+    {
+        const auto managedKey = BuildManagedItemKey(a_itemKey, a_ruleID, a_groupName, a_isPersistent);
+        if (auto it = a_items.find(managedKey); it != a_items.end()) {
+            return std::addressof(it->second);
+        }
+
+        for (const auto& [key, state] : a_items) {
+            if (ManagedItemMatches(key, a_itemKey, state, a_ruleID, a_groupName, a_isPersistent)) {
+                return std::addressof(state);
+            }
+        }
+
+        return nullptr;
     }
 }
 
@@ -136,11 +221,11 @@ std::string SaveStateManager::BuildFormKey(RE::TESForm* a_form) {
     if (!a_form) return "";
 
     std::string fileNameStr = "Dynamic";
-    if (auto file = a_form->GetFile(0)) {
+    if (auto file = GetSourceFileByFormID(a_form)) {
         fileNameStr = file->GetFilename();
     }
     else if (a_form->IsDynamicForm()) {
-        fileNameStr = "Created";
+        fileNameStr = "Dynamic";
     }
 
     return fileNameStr + "|" + FormatLocalFormID(a_form->GetFormID(), fileNameStr);
@@ -210,18 +295,18 @@ std::string SaveStateManager::BuildNPCKey(RE::Actor* a_actor) {
     if (!baseNPC) return "";
 
     std::string fileNameStr = "Dynamic";
-    if (auto file = baseNPC->GetFile(0)) {
+    if (auto file = GetSourceFileByFormID(baseNPC)) {
         fileNameStr = file->GetFilename();
     }
     else if (baseNPC->IsDynamicForm()) {
-        fileNameStr = "Created";
+        fileNameStr = "Dynamic";
     }
 
     return fileNameStr + "|" + FormatLocalFormID(a_actor->GetFormID(), fileNameStr);
 }
 
 void SaveStateManager::TrackPersistentItemGrant(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_count,
-    const std::string& a_ruleID, const std::string& a_groupName)
+    const std::string& a_ruleID, const std::string& a_groupName, bool a_isPersistent)
 {
     if (!a_actor || !a_item || a_count == 0) return;
 
@@ -229,10 +314,12 @@ void SaveStateManager::TrackPersistentItemGrant(RE::Actor* a_actor, RE::TESBound
     const auto itemKey = BuildFormKey(a_item);
     if (npcKey.empty() || itemKey.empty()) return;
 
-    auto& itemState = _sessionData.persistentItems[npcKey][itemKey];
+    auto managedKey = BuildManagedItemKey(itemKey, a_ruleID, a_groupName, a_isPersistent);
+    auto& itemState = _sessionData.persistentItems[npcKey][managedKey];
     itemState.expectedCount += a_count;
     itemState.ruleID = itemState.ruleID.empty() ? a_ruleID : itemState.ruleID;
     itemState.groupName = itemState.groupName.empty() ? a_groupName : itemState.groupName;
+    itemState.isPersistent = a_isPersistent;
 
     const auto currentCount = GetInventoryCount(a_actor, a_item);
     itemState.missingCount = itemState.expectedCount > currentCount ? itemState.expectedCount - currentCount : 0;
@@ -242,7 +329,7 @@ void SaveStateManager::TrackPersistentItemGrant(RE::Actor* a_actor, RE::TESBound
 }
 
 void SaveStateManager::EnsurePersistentItemTracked(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_expectedCount,
-    const std::string& a_ruleID, const std::string& a_groupName)
+    const std::string& a_ruleID, const std::string& a_groupName, bool a_isPersistent)
 {
     if (!a_actor || !a_item || a_expectedCount == 0) return;
 
@@ -251,16 +338,18 @@ void SaveStateManager::EnsurePersistentItemTracked(RE::Actor* a_actor, RE::TESBo
     if (npcKey.empty() || itemKey.empty()) return;
 
     auto& npcItems = _sessionData.persistentItems[npcKey];
-    if (npcItems.contains(itemKey)) return;
+    if (FindManagedItemState(npcItems, itemKey, a_ruleID, a_groupName, a_isPersistent)) return;
 
     const auto currentCount = GetInventoryCount(a_actor, a_item);
-    if (currentCount == 0) return;
+    if (currentCount == 0 && a_isPersistent) return;
 
-    auto& itemState = npcItems[itemKey];
+    auto managedKey = BuildManagedItemKey(itemKey, a_ruleID, a_groupName, a_isPersistent);
+    auto& itemState = npcItems[managedKey];
     itemState.expectedCount = a_expectedCount;
-    itemState.missingCount = itemState.expectedCount > currentCount ? itemState.expectedCount - currentCount : 0;
+    itemState.missingCount = a_isPersistent && itemState.expectedCount > currentCount ? itemState.expectedCount - currentCount : 0;
     itemState.ruleID = a_ruleID;
     itemState.groupName = a_groupName;
+    itemState.isPersistent = a_isPersistent;
 
     logger::debug("[PersistentLedger] Item existente adotado: NPC '{}' Item '{}' Esperado {} Ausente {}",
         a_actor->GetName(), a_item->GetName(), itemState.expectedCount, itemState.missingCount);
@@ -281,13 +370,11 @@ void SaveStateManager::AuditPersistentItems(RE::Actor* a_actor)
         if (!item || itemState.expectedCount == 0) continue;
 
         const auto currentCount = GetInventoryCount(a_actor, item);
-        const auto oldMissing = itemState.missingCount;
-        const auto minimumMissing = itemState.expectedCount > currentCount ? itemState.expectedCount - currentCount : 0;
-        itemState.missingCount = std::max(itemState.missingCount, minimumMissing);
+        const auto protectedCount = itemState.expectedCount > itemState.missingCount ? itemState.expectedCount - itemState.missingCount : 0;
 
-        if (oldMissing != itemState.missingCount) {
-            logger::info("[PersistentLedger] NPC '{}' Item '{}' Esperado {} Atual {} Ausente {}",
-                a_actor->GetName(), item->GetName(), itemState.expectedCount, currentCount, itemState.missingCount);
+        if (currentCount < protectedCount) {
+            logger::info("[PersistentLedger] NPC '{}' Item '{}' Esperado {} Atual {} Retirado {} Restauravel {}",
+                a_actor->GetName(), item->GetName(), itemState.expectedCount, currentCount, itemState.missingCount, protectedCount - currentCount);
         }
     }
 }
@@ -331,24 +418,32 @@ void SaveStateManager::HandleContainerChanged(const RE::TESContainerChangedEvent
         const auto npcKey = BuildNPCKey(actor);
         const auto itemKey = BuildFormKey(item);
         auto npcIt = _sessionData.persistentItems.find(npcKey);
-        if (npcIt == _sessionData.persistentItems.end() || !npcIt->second.contains(itemKey)) return;
+        if (npcIt == _sessionData.persistentItems.end()) return;
 
-        auto& itemState = npcIt->second[itemKey];
-        const auto oldMissing = itemState.missingCount;
-        const auto movedCount = static_cast<uint32_t>(a_event->itemCount);
+        auto remainingMovedCount = static_cast<uint32_t>(a_event->itemCount);
+        for (auto& [managedKey, itemState] : npcIt->second) {
+            if (remainingMovedCount == 0) break;
+            if (GetManagedItemBaseKey(managedKey) != itemKey) continue;
 
-        if (a_enteringOwner) {
-            itemState.missingCount = movedCount >= itemState.missingCount ? 0 : itemState.missingCount - movedCount;
-        }
-        else {
-            const auto maxMissing = itemState.expectedCount;
-            const auto newMissing = itemState.missingCount + movedCount;
-            itemState.missingCount = std::min(newMissing, maxMissing);
-        }
+            const auto oldMissing = itemState.missingCount;
+            const auto movedCount = remainingMovedCount;
 
-        if (oldMissing != itemState.missingCount) {
-            logger::info("[PersistentLedger] Transferencia: Dono '{}' Item '{}' Esperado {} Ausente {} -> {}",
-                actor->GetName(), item->GetName(), itemState.expectedCount, oldMissing, itemState.missingCount);
+            if (a_enteringOwner) {
+                const auto restoredCount = std::min(movedCount, itemState.missingCount);
+                itemState.missingCount -= restoredCount;
+                remainingMovedCount -= restoredCount;
+            }
+            else {
+                const auto availableDebt = itemState.expectedCount > itemState.missingCount ? itemState.expectedCount - itemState.missingCount : 0;
+                const auto claimedCount = std::min(movedCount, availableDebt);
+                itemState.missingCount += claimedCount;
+                remainingMovedCount -= claimedCount;
+            }
+
+            if (oldMissing != itemState.missingCount) {
+                logger::info("[PersistentLedger] Transferencia: Dono '{}' Item '{}' Esperado {} Ausente {} -> {}",
+                    actor->GetName(), item->GetName(), itemState.expectedCount, oldMissing, itemState.missingCount);
+            }
         }
         };
 
@@ -435,7 +530,24 @@ bool SaveStateManager::RemoveManagedFaction(RE::Actor* a_actor, RE::TESFaction* 
 std::string SaveStateManager::GetCharacterPath(uint32_t characterID) {
     char hexID[9];
     sprintf_s(hexID, "%08X", characterID);
-    return "Data/SKSE/Plugins/EDF/Saves/" + std::string(hexID) + ".json";
+    const std::string fileName = std::string(hexID) + ".json";
+    const std::filesystem::path newDir = "Data/Viny Mods/EDF/Saves";
+    const std::filesystem::path legacyDir = "Data/SKSE/Plugins/EDF/Saves";
+    std::filesystem::create_directories(newDir);
+
+    const auto newPath = newDir / fileName;
+    const auto legacyPath = legacyDir / fileName;
+    if (!std::filesystem::exists(newPath) && std::filesystem::exists(legacyPath)) {
+        std::error_code ec;
+        std::filesystem::copy_file(legacyPath, newPath, std::filesystem::copy_options::skip_existing, ec);
+        if (ec) {
+            logger::warn("[SaveManager] Falha ao migrar save '{}' para '{}': {}", legacyPath.string(), newPath.string(), ec.message());
+            return legacyPath.string();
+        }
+        logger::info("[SaveManager] Save migrado de '{}' para '{}'", legacyPath.string(), newPath.string());
+    }
+
+    return newPath.string();
 }
 
 void SaveStateManager::LoadCharacterData(uint32_t characterID) {
@@ -565,6 +677,7 @@ void SaveStateManager::LoadCharacterData(uint32_t characterID) {
                         int gIdx = itemData[3].IsInt() ? itemData[3].GetInt() : -1;
                         if (rIdx >= 0 && static_cast<size_t>(rIdx) < rules.size()) itemState.ruleID = rules[rIdx];
                         if (gIdx >= 0 && static_cast<size_t>(gIdx) < groups.size()) itemState.groupName = groups[gIdx];
+                        itemState.isPersistent = itemData.Size() >= 5 && itemData[4].IsBool() ? itemData[4].GetBool() : true;
 
                         if (itemState.expectedCount > 0) {
                             entry.persistentItems[npcKey][items[itemIdx]] = itemState;
@@ -669,6 +782,7 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
                         jItemState.PushBack(itemState.missingCount, alloc);
                         jItemState.PushBack(GetPoolIndex(p_rules, itemState.ruleID), alloc);
                         jItemState.PushBack(GetPoolIndex(p_groups, itemState.groupName), alloc);
+                        jItemState.PushBack(itemState.isPersistent, alloc);
 
                         const auto itemIndex = std::to_string(GetPoolIndex(p_items, itemKey));
                         rapidjson::Value itemJsonKey;
@@ -803,11 +917,11 @@ RE::BGSOutfit* GetAppliedSleepOutfit(RE::Actor* a_actor) {
     // Gerar npcKey consistente com a lógica de salvamento
     RE::FormID actorID = a_actor->GetFormID();
     std::string fileNameStr = "Dynamic";
-    if (auto file = baseNPC->GetFile(0)) {
+    if (auto file = GetSourceFileByFormID(baseNPC)) {
         fileNameStr = file->GetFilename();
     }
     else if (baseNPC->IsDynamicForm()) {
-        fileNameStr = "Created";
+        fileNameStr = "Dynamic";
     }
 
     std::string npcKey = fileNameStr + "|" + FormatLocalFormID(actorID, fileNameStr);
@@ -877,6 +991,47 @@ struct PendingEquip {
     RE::TESBoundObject* object;
     int priority; // 0 para Outfit (Baixa), 1 para Recompensas Individuais (Alta)
 };
+
+void RemoveManagedTemporaryItemOnInvalidation(RE::Actor* a_actor, RE::TESBoundObject* a_item,
+    uint32_t a_fallbackCount, const std::string& a_ruleID, const std::string& a_groupName)
+{
+    if (!a_actor || !a_item || a_fallbackCount == 0) return;
+
+    auto saveManager = SaveStateManager::GetSingleton();
+    const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+    const auto itemKey = SaveStateManager::BuildFormKey(a_item);
+    auto& session = saveManager->GetSessionData();
+    auto npcIt = session.persistentItems.find(npcKey);
+
+    uint32_t removeCount = a_fallbackCount;
+    bool eraseManagedState = false;
+    std::string managedKeyToErase;
+
+    if (npcIt != session.persistentItems.end()) {
+        for (auto& [managedKey, state] : npcIt->second) {
+            if (!ManagedItemMatches(managedKey, itemKey, state, a_ruleID, a_groupName, false)) continue;
+
+            const auto protectedCount = state.expectedCount > state.missingCount ? state.expectedCount - state.missingCount : 0;
+            removeCount = protectedCount;
+            eraseManagedState = state.missingCount == 0;
+            managedKeyToErase = managedKey;
+            break;
+        }
+    }
+
+    const auto currentCount = GetInventoryCount(a_actor, a_item);
+    removeCount = std::min(removeCount, currentCount);
+    if (removeCount > 0) {
+        a_actor->RemoveItem(a_item, static_cast<std::int32_t>(removeCount), RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+    }
+
+    if (eraseManagedState && npcIt != session.persistentItems.end()) {
+        npcIt->second.erase(managedKeyToErase);
+        if (npcIt->second.empty()) {
+            session.persistentItems.erase(npcIt);
+        }
+    }
+}
 
 void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
     if (!a_actor) return;
@@ -978,7 +1133,7 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
                         for (auto* form : outfit->outfitItems) {
                             if (auto* bound = form->As<RE::TESBoundObject>()) {
                                 // Remove apenas 1 unidade (assumindo que foi o que a regra deu)
-                                a_actor->RemoveItem(bound, 1, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+                                RemoveManagedTemporaryItemOnInvalidation(a_actor, bound, 1, a_rule.id, group.name);
                             }
                         }
                     }
@@ -989,7 +1144,7 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
                 if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
                     // Itens são mais difíceis de rastrear se são "nativos",
                     // mas removemos a quantidade estipulada pela regra.
-                    a_actor->RemoveItem(bound, reward.amount, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+                    RemoveManagedTemporaryItemOnInvalidation(a_actor, bound, reward.amount, a_rule.id, group.name);
                 }
             }
         }
@@ -1016,6 +1171,16 @@ void ApplyRewardPhysical(RE::Actor* a_actor, const Reward& reward, bool isPlayer
     else if (reward.typeReward == "Shout") {
         if (auto shout = rewardForm->As<RE::TESShout>()) {
             if (!a_actor->HasShout(shout)) a_actor->AddShout(shout);
+        }
+    }
+    else if (reward.typeReward == "Keyword") {
+        if (auto keyword = rewardForm->As<RE::BGSKeyword>()) {
+            SaveStateManager::GetSingleton()->AddVirtualKeyword(a_actor, keyword);
+        }
+    }
+    else if (reward.typeReward == "Faction") {
+        if (auto faction = rewardForm->As<RE::TESFaction>()) {
+            SaveStateManager::GetSingleton()->AddManagedFaction(a_actor, faction, static_cast<int>(reward.amount));
         }
     }
     else if (reward.typeReward == "Outfit") {
@@ -1049,7 +1214,7 @@ void ApplyRewardPhysical(RE::Actor* a_actor, const Reward& reward, bool isPlayer
 
 void TrackPersistentRewardItems(RE::Actor* a_actor, const Reward& reward, const std::string& ruleID, const std::string& groupName)
 {
-    if (!a_actor || !reward.isPersistent) return;
+    if (!a_actor) return;
 
     auto [plugin, fID] = reward.ParseFormID();
     auto rewardForm = RE::TESForm::LookupByID(fID);
@@ -1060,19 +1225,19 @@ void TrackPersistentRewardItems(RE::Actor* a_actor, const Reward& reward, const 
         if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
             for (auto* form : outfit->outfitItems) {
                 if (auto* bound = form->As<RE::TESBoundObject>()) {
-                    saveManager->TrackPersistentItemGrant(a_actor, bound, 1, ruleID, groupName);
+                    saveManager->TrackPersistentItemGrant(a_actor, bound, 1, ruleID, groupName, reward.isPersistent);
                 }
             }
         }
     }
     else if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
-        saveManager->TrackPersistentItemGrant(a_actor, bound, reward.amount, ruleID, groupName);
+        saveManager->TrackPersistentItemGrant(a_actor, bound, reward.amount, ruleID, groupName, reward.isPersistent);
     }
 }
 
 void EnsurePersistentRewardTracked(RE::Actor* a_actor, const Reward& reward, const std::string& ruleID, const std::string& groupName)
 {
-    if (!a_actor || !reward.isPersistent) return;
+    if (!a_actor) return;
 
     auto [plugin, fID] = reward.ParseFormID();
     auto rewardForm = RE::TESForm::LookupByID(fID);
@@ -1083,13 +1248,75 @@ void EnsurePersistentRewardTracked(RE::Actor* a_actor, const Reward& reward, con
         if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
             for (auto* form : outfit->outfitItems) {
                 if (auto* bound = form->As<RE::TESBoundObject>()) {
-                    saveManager->EnsurePersistentItemTracked(a_actor, bound, 1, ruleID, groupName);
+                    saveManager->EnsurePersistentItemTracked(a_actor, bound, 1, ruleID, groupName, reward.isPersistent);
                 }
             }
         }
     }
     else if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
-        saveManager->EnsurePersistentItemTracked(a_actor, bound, reward.amount, ruleID, groupName);
+        saveManager->EnsurePersistentItemTracked(a_actor, bound, reward.amount, ruleID, groupName, reward.isPersistent);
+    }
+}
+
+uint32_t GetPersistentRestoreCount(RE::Actor* a_actor, RE::TESBoundObject* a_item,
+    const std::string& ruleID, const std::string& groupName, bool isPersistent)
+{
+    if (!a_actor || !a_item) return 0;
+
+    auto saveManager = SaveStateManager::GetSingleton();
+    const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+    const auto itemKey = SaveStateManager::BuildFormKey(a_item);
+    if (npcKey.empty() || itemKey.empty()) return 0;
+
+    auto& session = saveManager->GetSessionData();
+    auto npcIt = session.persistentItems.find(npcKey);
+    if (npcIt == session.persistentItems.end()) return 0;
+
+    auto itemState = FindManagedItemState(npcIt->second, itemKey, ruleID, groupName, isPersistent);
+    if (!itemState) return 0;
+
+    const auto protectedCount = itemState->expectedCount > itemState->missingCount ? itemState->expectedCount - itemState->missingCount : 0;
+    const auto currentCount = GetInventoryCount(a_actor, a_item);
+    return protectedCount > currentCount ? protectedCount - currentCount : 0;
+}
+
+void RestorePersistentBoundObject(RE::Actor* a_actor, RE::TESBoundObject* a_item, uint32_t a_count,
+    bool isPlayer, std::vector<PendingEquip>& equipQueue)
+{
+    if (!a_actor || !a_item || a_count == 0) return;
+
+    a_actor->AddObjectToContainer(a_item, nullptr, static_cast<std::int32_t>(a_count), nullptr);
+    if (!isPlayer && (a_item->IsWeapon() || a_item->IsArmor() || a_item->IsAmmo())) {
+        equipQueue.push_back({ a_item, 1 });
+    }
+
+    logger::info("[PersistentLedger] Restaurado '{}' x{} para '{}'", a_item->GetName(), a_count, a_actor->GetName());
+}
+
+void RestorePersistentRewardIfNeeded(RE::Actor* a_actor, const Reward& reward, bool isPlayer,
+    std::vector<PendingEquip>& equipQueue, const std::string& ruleID, const std::string& groupName)
+{
+    if (!a_actor) return;
+
+    EnsurePersistentRewardTracked(a_actor, reward, ruleID, groupName);
+
+    auto [plugin, fID] = reward.ParseFormID();
+    auto rewardForm = RE::TESForm::LookupByID(fID);
+    if (!rewardForm) return;
+
+    if (reward.typeReward == "Outfit") {
+        if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
+            for (auto* form : outfit->outfitItems) {
+                if (auto* bound = form->As<RE::TESBoundObject>()) {
+                    RestorePersistentBoundObject(a_actor, bound,
+                        GetPersistentRestoreCount(a_actor, bound, ruleID, groupName, reward.isPersistent), isPlayer, equipQueue);
+                }
+            }
+        }
+    }
+    else if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
+        RestorePersistentBoundObject(a_actor, bound,
+            GetPersistentRestoreCount(a_actor, bound, ruleID, groupName, reward.isPersistent), isPlayer, equipQueue);
     }
 }
 
@@ -1103,6 +1330,15 @@ void ApplyRewardPhysicalTracked(RE::Actor* a_actor, const Reward& reward, bool i
 bool IsTagReward(const Reward& reward)
 {
     return reward.typeReward == "Keyword" || reward.typeReward == "Faction";
+}
+
+bool IsManagedPhysicalReward(const Reward& reward)
+{
+    return reward.typeReward != "Spell" &&
+        reward.typeReward != "Shout" &&
+        reward.typeReward != "Keyword" &&
+        reward.typeReward != "Faction" &&
+        reward.typeReward != "Perk";
 }
 
 bool ApplyTagReward(RE::Actor* a_actor, const Reward& reward)
@@ -1126,6 +1362,68 @@ bool ApplyTagReward(RE::Actor* a_actor, const Reward& reward)
     }
 
     return false;
+}
+
+enum class RuleEvaluationPhase
+{
+    kStatic = 0,
+    kTag = 1,
+    kFactionRank = 2,
+    kAbility = 3,
+    kInventory = 4
+};
+
+RuleEvaluationPhase MaxPhase(RuleEvaluationPhase a_lhs, RuleEvaluationPhase a_rhs)
+{
+    return static_cast<int>(a_lhs) >= static_cast<int>(a_rhs) ? a_lhs : a_rhs;
+}
+
+RuleEvaluationPhase GetFilterEvaluationPhase(const std::string& a_type)
+{
+    if (a_type == "Keyword" || a_type == "Faction") {
+        return RuleEvaluationPhase::kTag;
+    }
+    if (a_type == "Faction Rank") {
+        return RuleEvaluationPhase::kFactionRank;
+    }
+    if (a_type == "Perk" || a_type == "Spell" || a_type == "Shout") {
+        return RuleEvaluationPhase::kAbility;
+    }
+    if (a_type == "Inventory Item" || a_type == "Inventory Count" ||
+        a_type == "Gold" || a_type == "Equipped Item") {
+        return RuleEvaluationPhase::kInventory;
+    }
+    return RuleEvaluationPhase::kStatic;
+}
+
+RuleEvaluationPhase GetRuleEvaluationPhase(const Rule& a_rule)
+{
+    auto phase = RuleEvaluationPhase::kStatic;
+    for (const auto& filter : a_rule.targetFilters) {
+        phase = MaxPhase(phase, GetFilterEvaluationPhase(filter.type));
+    }
+    for (const auto& filter : a_rule.blacklistFilters) {
+        phase = MaxPhase(phase, GetFilterEvaluationPhase(filter.type));
+    }
+    return phase;
+}
+
+const char* RuleEvaluationPhaseName(RuleEvaluationPhase a_phase)
+{
+    switch (a_phase) {
+    case RuleEvaluationPhase::kStatic:
+        return "Static";
+    case RuleEvaluationPhase::kTag:
+        return "Keyword/Faction";
+    case RuleEvaluationPhase::kFactionRank:
+        return "Faction Rank";
+    case RuleEvaluationPhase::kAbility:
+        return "Spell/Perk/Shout";
+    case RuleEvaluationPhase::kInventory:
+        return "Inventory";
+    default:
+        return "Unknown";
+    }
 }
 
 void DebugLogInventory(RE::Actor* a_actor) {
@@ -1188,11 +1486,11 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 
     auto& session = SaveStateManager::GetSingleton()->GetSessionData();
     std::string fileNameStr = "Dynamic";
-    if (auto file = baseNPC->GetFile(0)) {
+    if (auto file = GetSourceFileByFormID(baseNPC)) {
         fileNameStr = file->GetFilename();
     }
     else if (baseNPC->IsDynamicForm()) {
-        fileNameStr = "Created";
+        fileNameStr = "Dynamic";
     }
 
     std::string npcKey = fileNameStr + "|" + FormatLocalFormID(actorID, fileNameStr);
@@ -1263,10 +1561,19 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
     }
 
     // --- PROCESSAMENTO E APLICAÇÃO ---
-    constexpr int kMaxTagPasses = 8;
-    for (int pass = 0; pass < kMaxTagPasses; ++pass) {
-        bool changed = false;
+    std::vector<PendingEquip> equipQueue;
+    constexpr std::array rulePhases{
+        RuleEvaluationPhase::kStatic,
+        RuleEvaluationPhase::kTag,
+        RuleEvaluationPhase::kFactionRank,
+        RuleEvaluationPhase::kAbility,
+        RuleEvaluationPhase::kInventory
+    };
 
+    for (const auto phase : rulePhases) {
+        logger::debug("[RulePhase] Processando fase '{}' para '{}'", RuleEvaluationPhaseName(phase), actorName);
+
+        std::vector<std::string> phaseRuleIDs;
         for (const auto& ruleID : rulesToProcess) {
             auto& allRules = RuleManager::GetSingleton()->GetRules();
             auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
@@ -1274,7 +1581,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 
             const Rule& currentRule = *ruleIt;
             if (!currentRule.isEnabled) continue;
-
+            if (GetRuleEvaluationPhase(currentRule) != phase) continue;
             if (!IsNPCMatchingTargets(baseNPC, currentRule, false, a_actor) ||
                 IsNPCMatchingTargets(baseNPC, currentRule, true, a_actor)) {
                 continue;
@@ -1283,54 +1590,20 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
             int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
             if (level < currentRule.level) continue;
 
-            AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
-            if (state.appliedGroups.empty()) {
-                auto wonGroups = RuleManager::GetSingleton()->RollForGroups(baseNPC, currentRule);
-                for (const auto& group : wonGroups) {
-                    state.appliedGroups.push_back(group.name);
-                }
-            }
-
-            for (const auto& groupName : state.appliedGroups) {
-                auto groupIt = std::find_if(currentRule.rewardGroups.begin(), currentRule.rewardGroups.end(), [&](const RewardGroup& group) {
-                    return group.name == groupName;
-                    });
-                if (groupIt == currentRule.rewardGroups.end()) continue;
-
-                for (const auto& reward : groupIt->rewards) {
-                    if (!IsTagReward(reward)) continue;
-                    if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
-                        changed = ApplyTagReward(a_actor, reward) || changed;
-                    }
-                }
-            }
+            phaseRuleIDs.push_back(ruleID);
         }
 
-        if (!changed) break;
-        if (pass == kMaxTagPasses - 1) {
-            logger::warn("[TagDelta] Limite de {} passes atingido para '{}'; possivel ciclo de regras por Keyword/Faction.", kMaxTagPasses, actorName);
-        }
-    }
+        for (const auto& ruleID : phaseRuleIDs) {
+            auto& allRules = RuleManager::GetSingleton()->GetRules();
+            auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
+            if (ruleIt == allRules.end()) continue;
 
-    std::vector<PendingEquip> equipQueue;
-    for (const auto& ruleID : rulesToProcess) {
-        auto& allRules = RuleManager::GetSingleton()->GetRules();
-        auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
-        if (ruleIt == allRules.end()) continue;
+            const Rule& currentRule = *ruleIt;
+            if (!currentRule.isEnabled) continue;
 
-        const Rule& currentRule = *ruleIt;
-        if (!currentRule.isEnabled) continue;
-
-        if (!IsNPCMatchingTargets(baseNPC, currentRule, false, a_actor) ||
-            IsNPCMatchingTargets(baseNPC, currentRule, true, a_actor)) {
-            continue;
-        }
-
-        int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
-        if (level < currentRule.level) continue;
-
-
-        AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
+            int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
+            if (level < currentRule.level) continue;
+AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
         int oldVersion = state.version;
 
         if (oldVersion == 0) {
@@ -1389,7 +1662,14 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                     if (group.isExclusive) {
                         // Caso 1: Grupo Exclusivo - Nada novo entra, apenas mantém o estado visual
                         for (const auto& reward : group.rewards) {
-                            if (!reward.isPersistent) ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                            if (!reward.isPersistent) {
+                                if (IsManagedPhysicalReward(reward)) {
+                                    RestorePersistentRewardIfNeeded(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
+                                }
+                                else {
+                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                                }
+                            }
                         }
                     }
                     else {
@@ -1412,7 +1692,12 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                                 }
                             }
                             else if (!reward.isPersistent) {
-                                ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                                if (IsManagedPhysicalReward(reward)) {
+                                    RestorePersistentRewardIfNeeded(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
+                                }
+                                else {
+                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                                }
                             }
                         }
                     }
@@ -1452,11 +1737,15 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                     if (group.name == groupName) {
                         for (const auto& reward : group.rewards) {
                             if (!reward.isPersistent) {
-                                ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                                if (IsManagedPhysicalReward(reward)) {
+                                    RestorePersistentRewardIfNeeded(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
+                                }
+                                else {
+                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+                                }
                             }
                             else {
-                                EnsurePersistentRewardTracked(a_actor, reward, ruleID, group.name);
-                                SaveStateManager::GetSingleton()->AuditPersistentItems(a_actor);
+                                RestorePersistentRewardIfNeeded(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
                                 continue;
 
                                 auto [plugin, fID] = reward.ParseFormID();
@@ -1581,5 +1870,6 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 			actorName, session.saveNumber, currentRule.name, state.version, fmt::join(state.appliedGroups, ", "));
         // --- LOG DE FINALIZAÇÃO ---
         logger::debug("[ApplyRules] FINALIZADO com sucesso para {} ({:08X})", actorName, actorID);
+    }
     }
 }
