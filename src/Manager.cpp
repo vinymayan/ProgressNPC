@@ -133,13 +133,27 @@ void Manager::PopulateAllLists(bool forceRefresh) {
 
 void Manager::RefreshLists(std::string_view a_signatures) {
     const auto includes = [a_signatures](std::string_view a_signature) {
+        const auto equalsIgnoreCase = [](std::string_view a_left, std::string_view a_right) {
+            if (a_left.size() != a_right.size()) return false;
+
+            for (std::size_t i = 0; i < a_left.size(); ++i) {
+                const auto toUpperASCII = [](char a_character) {
+                    return a_character >= 'a' && a_character <= 'z' ?
+                        static_cast<char>(a_character - ('a' - 'A')) :
+                        a_character;
+                };
+                if (toUpperASCII(a_left[i]) != toUpperASCII(a_right[i])) return false;
+            }
+            return true;
+        };
+
         std::size_t begin = 0;
         while (begin <= a_signatures.size()) {
             const auto end = a_signatures.find(',', begin);
             auto token = a_signatures.substr(begin, end == std::string_view::npos ? a_signatures.size() - begin : end - begin);
             while (!token.empty() && token.front() == ' ') token.remove_prefix(1);
             while (!token.empty() && token.back() == ' ') token.remove_suffix(1);
-            if (token == a_signature) return true;
+            if (equalsIgnoreCase(token, a_signature)) return true;
             if (end == std::string_view::npos) break;
             begin = end + 1;
         }

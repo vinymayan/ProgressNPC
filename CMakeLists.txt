@@ -68,6 +68,7 @@ source_group(
 set(BUILD_TESTS OFF)
 include(${COMMONLIB_SRC_DIR}/cmake/CommonLibSSE.cmake)
 find_package(miniz CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 
 add_commonlibsse_plugin(
@@ -89,6 +90,7 @@ target_link_libraries(
     ${PROJECT_NAME}
     PRIVATE
     miniz::miniz
+    unofficial::sqlite3::sqlite3
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE IS_HOST_PLUGIN)

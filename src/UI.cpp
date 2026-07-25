@@ -2,8 +2,6 @@
 #include <algorithm>
 #include <cctype>
 #include <miniz.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
 #include <rapidjson/document.h>
 #include <chrono>
 #include <filesystem>
@@ -62,6 +60,9 @@ namespace SPIDUI {
     }
 
     static std::set<std::string> activeTypeFilters;
+    static std::string activePackageID = "edf.local-rules";
+    static std::string packageFilterID;
+    static char newPackageName[128] = "";
 
     static std::string activeRuleID = "";      // ID da regra sendo editada no momento
     static int activeGroupIdx = -1;            // Índice do grupo de recompensa ativo
@@ -133,6 +134,83 @@ namespace SPIDUI {
             if (r.id == activeRuleID) return &r;
         }
         return nullptr;
+    }
+
+    const RulePackage* FindPackage(const std::string_view packageID)
+    {
+        const auto& packages = RuleManager::GetSingleton()->GetPackages();
+        const auto found = std::ranges::find_if(packages, [packageID](const RulePackage& package) {
+            return package.id == packageID;
+        });
+        return found == packages.end() ? nullptr : &*found;
+    }
+
+    void RenderPackageWorkspace()
+    {
+        auto manager = RuleManager::GetSingleton();
+        const auto& packages = manager->GetPackages();
+        if (packages.empty()) {
+            return;
+        }
+        if (!FindPackage(activePackageID)) {
+            activePackageID = packages.front().id;
+        }
+
+        ImGuiMCP::TextUnformatted(GetLoc("auto.package_workspace", "Package Workspace"));
+        const auto* active = FindPackage(activePackageID);
+        ImGuiMCP::SetNextItemWidth(260.0f);
+        if (ImGuiMCP::BeginCombo(
+                GetLoc("auto.active_package", "Active Package"),
+                active ? active->displayName.c_str() : "Local Rules")) {
+            for (const auto& package : packages) {
+                const bool selected = package.id == activePackageID;
+                if (ImGuiMCP::Selectable(package.displayName.c_str(), selected)) {
+                    activePackageID = package.id;
+                }
+                if (selected) {
+                    ImGuiMCP::SetItemDefaultFocus();
+                }
+            }
+            ImGuiMCP::EndCombo();
+        }
+
+        ImGuiMCP::SameLine();
+        ImGuiMCP::SetNextItemWidth(220.0f);
+        ImGuiMCP::InputText(
+            GetLoc("auto.new_package", "New Package"),
+            newPackageName,
+            sizeof(newPackageName),
+            ImGuiMCP::ImGuiInputTextFlags_CallbackCharFilter,
+            FilterFileNameChars);
+        ImGuiMCP::SameLine();
+        if (ImGuiMCP::Button(GetLoc("auto.create_package", "Create Package")) && newPackageName[0] != '\0') {
+            if (const auto packageID = manager->CreatePackage(newPackageName)) {
+                activePackageID = *packageID;
+                newPackageName[0] = '\0';
+            }
+        }
+
+        const char* filterLabel = GetLoc("auto.all_packages", "All Packages");
+        if (!packageFilterID.empty()) {
+            if (const auto* package = FindPackage(packageFilterID)) {
+                filterLabel = package->displayName.c_str();
+            }
+        }
+        ImGuiMCP::SetNextItemWidth(260.0f);
+        if (ImGuiMCP::BeginCombo(GetLoc("auto.package_filter", "Package Filter"), filterLabel)) {
+            const bool allSelected = packageFilterID.empty();
+            if (ImGuiMCP::Selectable(GetLoc("auto.all_packages", "All Packages"), allSelected)) {
+                packageFilterID.clear();
+            }
+            for (const auto& package : packages) {
+                const bool selected = package.id == packageFilterID;
+                if (ImGuiMCP::Selectable(package.displayName.c_str(), selected)) {
+                    packageFilterID = package.id;
+                }
+            }
+            ImGuiMCP::EndCombo();
+        }
+        ImGuiMCP::Separator();
     }
 
     bool FilterUsesNumericValue(const std::string& type)
@@ -1009,6 +1087,7 @@ namespace SPIDUI {
 
     void Render() {
         Manager::GetSingleton()->PopulateAllLists();
+        RenderPackageWorkspace();
         // 1. Botão Criar Regra
         if (ImGuiMCP::Button(GetLoc("auto.new_rule", " + New Rule "))) {
             ImGuiMCP::OpenPopup(GetLoc("auto.popupnovaregra", "PopupNovaRegra"));
@@ -1023,7 +1102,7 @@ namespace SPIDUI {
                 // O texto já sai filtrado aqui
             }
             if (ImGuiMCP::Button(GetLoc("auto.create", "Create"))) {
-                auto& r = RuleManager::GetSingleton()->CreateRule();
+                auto& r = RuleManager::GetSingleton()->CreateRule(activePackageID);
                 r.name = nBuf;
                 ImGuiMCP::CloseCurrentPopup();
                 nBuf[0] = '\0';
@@ -1078,14 +1157,25 @@ namespace SPIDUI {
         RenderTypeFilter();
         auto& rules = RuleManager::GetSingleton()->GetRules();
         std::string toDelete = "";
+        std::string lastRenderedPackage;
 
         for (auto& rule : rules) {
+            if (!packageFilterID.empty() && rule.packageID != packageFilterID) {
+                continue;
+            }
             if (!activeTypeFilters.empty()) {
                 bool matchesFilter = false;
                 for (auto& f : rule.targetFilters) {
                     if (activeTypeFilters.contains(f.type)) { matchesFilter = true; break; }
                 }
                 if (!matchesFilter) continue;
+            }
+
+            const auto* ownerPackage = FindPackage(rule.packageID);
+            const auto packageName = ownerPackage ? ownerPackage->displayName : rule.packageID;
+            if (packageName != lastRenderedPackage) {
+                ImGuiMCP::SeparatorText(packageName.c_str());
+                lastRenderedPackage = packageName;
             }
 
             bool modified = rule.IsModified();
@@ -1096,7 +1186,7 @@ namespace SPIDUI {
             }
 
 
-            label += " [V:" + std::to_string(rule.version) + "]###" + rule.id;
+            label += " [" + packageName + "] [V:" + std::to_string(rule.version) + "]###" + rule.id;
 
             // --- Lógica de Cor do Header e Texto ---
             bool stylePushed = false;
@@ -1472,8 +1562,6 @@ namespace SPIDUI {
         };
 
         struct ConvertedEntry {
-            std::string ruleFileName;
-            std::string ruleJson;
             std::string summary;
             std::vector<std::string> rewardIDs;
             Rule rule;
@@ -1828,78 +1916,6 @@ namespace SPIDUI {
             return reward;
         }
 
-        static void AddString(rapidjson::Value& obj, rapidjson::Document::AllocatorType& alloc, const char* key, const std::string& value)
-        {
-            rapidjson::Value k(key, alloc);
-            rapidjson::Value v(value.c_str(), static_cast<rapidjson::SizeType>(value.size()), alloc);
-            obj.AddMember(k, v, alloc);
-        }
-
-        static std::string SerializeRule(const Rule& rule)
-        {
-            rapidjson::Document doc;
-            doc.SetArray();
-            auto& alloc = doc.GetAllocator();
-
-            rapidjson::Value obj(rapidjson::kObjectType);
-            AddString(obj, alloc, "id", rule.id);
-            AddString(obj, alloc, "n", rule.name);
-            obj.AddMember("en", rule.isEnabled, alloc);
-            obj.AddMember("v", rule.version, alloc);
-            obj.AddMember("l", rule.level, alloc);
-            obj.AddMember("g", rule.targetGender, alloc);
-            obj.AddMember("h", rule.targetHumanoid, alloc);
-            obj.AddMember("c", rule.targetChild, alloc);
-            obj.AddMember("ra", rule.targetRequiresAll, alloc);
-            obj.AddMember("ex", rule.isExclusive, alloc);
-
-            rapidjson::Value filters(rapidjson::kArrayType);
-            for (const auto& filter : rule.targetFilters) {
-                rapidjson::Value f(rapidjson::kObjectType);
-                AddString(f, alloc, "type", filter.type);
-                AddString(f, alloc, "formID", filter.formIDStr);
-                AddString(f, alloc, "editorID", filter.editorID);
-                filters.PushBack(f.Move(), alloc);
-            }
-            obj.AddMember("tf", filters, alloc);
-
-            rapidjson::Value groups(rapidjson::kArrayType);
-            for (const auto& group : rule.rewardGroups) {
-                rapidjson::Value g(rapidjson::kObjectType);
-                AddString(g, alloc, "name", group.name);
-                g.AddMember("exclusive", group.isExclusive, alloc);
-                g.AddMember("chanceGroup", group.chanceGroup, alloc);
-
-                rapidjson::Value rewards(rapidjson::kArrayType);
-                for (const auto& reward : group.rewards) {
-                    rapidjson::Value r(rapidjson::kObjectType);
-                    AddString(r, alloc, "typeReward", reward.typeReward);
-                    AddString(r, alloc, "FormID", reward.formIDStr);
-                    AddString(r, alloc, "editorID", reward.editorID);
-                    r.AddMember("Amount", reward.amount, alloc);
-                    r.AddMember("Chance", reward.chanceReward, alloc);
-                    r.AddMember("functionOnType", reward.functionOnType, alloc);
-                    r.AddMember("isPersistent", reward.isPersistent, alloc);
-                    rewards.PushBack(r.Move(), alloc);
-                }
-                g.AddMember("rewards", rewards, alloc);
-                groups.PushBack(g.Move(), alloc);
-            }
-            obj.AddMember("rg", groups, alloc);
-
-            obj.AddMember("bg", rule.blacklistedGender, alloc);
-            obj.AddMember("bh", rule.blacklistedHumanoid, alloc);
-            obj.AddMember("bc", rule.blacklistedChild, alloc);
-            obj.AddMember("bra", rule.blacklistRequiresAll, alloc);
-            obj.AddMember("bf", rapidjson::Value(rapidjson::kArrayType), alloc);
-
-            doc.PushBack(obj.Move(), alloc);
-            rapidjson::StringBuffer buffer;
-            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-            doc.Accept(writer);
-            return buffer.GetString();
-        }
-
         static std::vector<ConvertedEntry> TryConvertLine(const std::string& key, const std::string& value, const fs::path& sourceFile, int lineNumber, std::string& reason)
         {
             std::vector<ConvertedEntry> convertedEntries;
@@ -2140,10 +2156,6 @@ namespace SPIDUI {
                 rule.rewardGroups.push_back(group);
 
                 ConvertedEntry entry;
-                const auto suffix = targetFilterSets.size() > 1 ? "_" + std::to_string(comboIndex + 1) : "";
-                const auto baseName = SanitizeZipName(sourceFile.stem().string() + "_" + type + "_" + rewardRef->localID + "_" + std::to_string(lineNumber) + suffix);
-                entry.ruleFileName = baseName + ".json";
-                entry.ruleJson = SerializeRule(rule);
                 entry.rule = rule;
                 entry.rewardIDs.push_back(reward.formIDStr);
                 entry.summary = std::format("{}:{} -> {} {} amount={} chance={:.1f} targets={} blacklist={}",
@@ -2303,6 +2315,7 @@ namespace SPIDUI {
             std::ostringstream report;
             mz_zip_archive zip;
             bool zipOpen = false;
+            fs::path packageStaging;
 
             try {
                 logger::info("[SPID->EDF] Conversion started. Package='{}'", packageName);
@@ -2375,7 +2388,7 @@ namespace SPIDUI {
                 report << "- Prefer exact EditorID/FormID/form filters when you want automatic conversion; text/location-style matching needs extra review.\n\n";
                 report << "Scanned files: " << files.size() << "\n\n";
 
-                std::set<std::string> usedRuleNames;
+                std::vector<Rule> packageRules;
                 for (const auto& file : files) {
                     logger::info("[SPID->EDF] Processing file '{}'", file.string());
                     result.filesScanned++;
@@ -2454,19 +2467,8 @@ namespace SPIDUI {
                     if (fileChanged) {
                         result.filesChanged++;
                         for (const auto& converted : fileConvertedEntries) {
-                            auto ruleName = converted.ruleFileName;
-                            for (int suffix = 2; !usedRuleNames.insert(ruleName).second; ++suffix) {
-                                ruleName = SanitizeZipName(fs::path(converted.ruleFileName).stem().string() + "_" + std::to_string(suffix)) + ".json";
-                            }
-                            const auto internalPath = "Viny Mods/EDF/Rules/" + ruleName;
-                            const auto ruleJson = SerializeRule(converted.rule);
-                            logger::debug("[SPID->EDF] Adding EDF rule to ZIP as '{}'", internalPath);
-                            if (!mz_zip_writer_add_mem(&zip, internalPath.c_str(), ruleJson.data(), ruleJson.size(), MZ_BEST_COMPRESSION)) {
-                                const auto msg = std::format("Failed to add EDF rule '{}' to ZIP.", internalPath);
-                                logger::error("[SPID->EDF] {}", msg);
-                                details << "[Error] " << msg << "\n";
-                            }
-                            details << "[Converted] " << converted.summary << " -> " << internalPath << "\n";
+                            packageRules.push_back(converted.rule);
+                            details << "[Converted] " << converted.summary << " -> SQL package\n";
                         }
 
                         fs::path sourceRelativePath;
@@ -2499,6 +2501,40 @@ namespace SPIDUI {
                     }
                 }
 
+                if (!packageRules.empty()) {
+                    packageStaging = fs::temp_directory_path() /
+                        std::format("edf_spid_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+                    RulePackage sqlPackage;
+                    if (!RuleManager::GetSingleton()->CreateRulesPackageSnapshot(
+                            safeName,
+                            packageRules,
+                            packageStaging,
+                            sqlPackage)) {
+                        throw std::runtime_error("Failed to build the converted SQL package.");
+                    }
+                    const auto folder = sqlPackage.path.filename().generic_string();
+                    const auto manifestInternal = std::format("Viny Mods/EDF/Packages/{}/manifest.json", folder);
+                    const auto databaseInternal = std::format("Viny Mods/EDF/Packages/{}/package.db", folder);
+                    if (!mz_zip_writer_add_file(
+                            &zip,
+                            manifestInternal.c_str(),
+                            (sqlPackage.path / "manifest.json").string().c_str(),
+                            nullptr,
+                            0,
+                            MZ_BEST_COMPRESSION) ||
+                        !mz_zip_writer_add_file(
+                            &zip,
+                            databaseInternal.c_str(),
+                            (sqlPackage.path / "package.db").string().c_str(),
+                            nullptr,
+                            0,
+                            MZ_BEST_COMPRESSION)) {
+                        throw std::runtime_error("Failed to add the SQL package to the conversion ZIP.");
+                    }
+                    details << "[Package] " << packageRules.size() << " rule(s) -> "
+                            << "Viny Mods/EDF/Packages/" << folder << "/package.db\n";
+                }
+
                 AppendFileList(report, "Converted files", result.convertedFiles);
                 AppendFileList(report, "Partially converted files", result.partiallyConvertedFiles);
                 AppendFileList(report, "Not converted files", result.notConvertedFiles);
@@ -2516,10 +2552,18 @@ namespace SPIDUI {
                     result.report += "\n[Error] Failed to finalize ZIP.\n";
                     mz_zip_writer_end(&zip);
                     zipOpen = false;
+                    if (!packageStaging.empty()) {
+                        std::error_code cleanupError;
+                        fs::remove_all(packageStaging, cleanupError);
+                    }
                     return result;
                 }
                 mz_zip_writer_end(&zip);
                 zipOpen = false;
+                if (!packageStaging.empty()) {
+                    std::error_code cleanupError;
+                    fs::remove_all(packageStaging, cleanupError);
+                }
                 result.success = true;
                 logger::info("[SPID->EDF] Conversion finished. Files={}, changed={}, converted={}, kept={}, zip='{}'",
                     result.filesScanned, result.filesChanged, result.convertedLines, result.unsupportedLines, result.zipPath);
@@ -2536,6 +2580,10 @@ namespace SPIDUI {
 
             if (zipOpen) {
                 mz_zip_writer_end(&zip);
+            }
+            if (!packageStaging.empty()) {
+                std::error_code cleanupError;
+                fs::remove_all(packageStaging, cleanupError);
             }
             return result;
         }
@@ -2633,7 +2681,10 @@ namespace SPIDUI {
         }
         ImGuiMCP::SameLine();
         if (ImGuiMCP::Button(GetLoc("auto.export_selected", "Export Selected"))) {
-            RuleManager::GetSingleton()->ExportRulesPackage(packageName, selectedRules);
+            auto manager = RuleManager::GetSingleton();
+            if (manager->SaveRules()) {
+                manager->ExportRulesPackage(packageName, selectedRules);
+            }
         }
 
         ImGuiMCP::Separator();

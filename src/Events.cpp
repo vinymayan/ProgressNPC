@@ -14,6 +14,7 @@ RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE:
     }
 
     if (eventName == "DynamicFormsGeneratorUpdated") {
+		logger::info("recived DynamicFormsGeneratorUpdated event with arg: {}", a_event->strArg.c_str());
         Manager::GetSingleton()->RefreshLists(a_event->strArg.c_str());
         RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
         return RE::BSEventNotifyControl::kContinue;

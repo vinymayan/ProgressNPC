@@ -13,7 +13,8 @@
     "directxtk",
     "skse-mcp",
     "miniz",
-    "rapidjson"
+    "rapidjson",
+    "sqlite3"
   ],
   "overrides": [
     {

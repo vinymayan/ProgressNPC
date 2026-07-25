@@ -1,8 +1,10 @@
 #include "Rule.h"
+#include "RulePackageStore.h"
 #include "SaveState.h"
 #include <miniz.h> // Inclua a biblioteca miniz
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -170,10 +172,6 @@ std::string SanitizeFilename(std::string name) {
 
 namespace {
     using JsonAllocator = rapidjson::Document::AllocatorType;
-
-    constexpr const char* kRulesDir = "Data/Viny Mods/EDF/Rules/";
-    constexpr const char* kExportDir = "Data/Viny Mods/EDF/Export/";
-    constexpr const char* kLegacyRulesDir = "Data/SKSE/Plugins/EDF/Rules/";
 
     const rapidjson::Value* FindMember(const rapidjson::Value& obj, const char* key) {
         if (!obj.IsObject()) return nullptr;
@@ -406,29 +404,6 @@ namespace {
         return buffer.GetString();
     }
 
-    void EnsureRuleStorage()
-    {
-        fs::create_directories(kRulesDir);
-        fs::create_directories(kExportDir);
-
-        if (!fs::exists(kLegacyRulesDir)) return;
-
-        for (const auto& entry : fs::directory_iterator(kLegacyRulesDir)) {
-            if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
-
-            const auto targetPath = fs::path(kRulesDir) / entry.path().filename();
-            if (fs::exists(targetPath)) continue;
-
-            std::error_code ec;
-            fs::copy_file(entry.path(), targetPath, fs::copy_options::skip_existing, ec);
-            if (ec) {
-                logger::warn("Rules migration: failed to copy '{}' to '{}': {}", entry.path().string(), targetPath.string(), ec.message());
-            }
-            else {
-                logger::info("Rules migration: copied '{}' to '{}'", entry.path().string(), targetPath.string());
-            }
-        }
-    }
 }
 
 std::string Rule::CalculateHash() const {
@@ -470,6 +445,61 @@ Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId
     p.lastSavedHash = p.CalculateHash();
     return p;
 }
+
+bool ParseLegacyRuleFile(
+    const std::filesystem::path& path,
+    Rule& latest,
+    std::vector<Rule>& history,
+    std::string& error)
+{
+    history.clear();
+    std::ifstream input(path);
+    if (!input.is_open()) {
+        error = "could not open file";
+        return false;
+    }
+
+    rapidjson::IStreamWrapper stream(input);
+    rapidjson::Document document;
+    document.ParseStream(stream);
+    if (document.HasParseError()) {
+        error = std::format("invalid JSON at byte {}", document.GetErrorOffset());
+        return false;
+    }
+    if (!document.IsArray() || document.Empty()) {
+        error = "the root must be a non-empty version array";
+        return false;
+    }
+
+    latest = ProcessRuleVersion(document[0], "", "Sem Nome", true);
+    if (latest.id.empty()) {
+        error = "latest version has no rule ID";
+        return false;
+    }
+
+    std::set<int> versions;
+    history.reserve(document.Size());
+    for (rapidjson::SizeType index = 0; index < document.Size(); ++index) {
+        if (!document[index].IsObject()) {
+            error = std::format("version entry {} is not an object", index);
+            return false;
+        }
+        auto version = index == 0
+            ? latest
+            : ProcessRuleVersion(document[index], latest.id, latest.name, latest.isEnabled);
+        if (version.id != latest.id) {
+            error = std::format("version entry {} changes the rule ID", index);
+            return false;
+        }
+        if (!versions.insert(version.version).second) {
+            error = std::format("duplicate version {}", version.version);
+            return false;
+        }
+        history.push_back(std::move(version));
+    }
+    return true;
+}
+
 bool RuleManager::IsAffected(RE::Actor* actor) {
     if (!actor) return false;
     auto baseNPC = actor->GetActorBase();
@@ -761,6 +791,7 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
     return (requiresAll && matches == filters.size() && matches > 0);
 }
 
+#if 0  // Legacy per-file JSON storage retained only as migration reference.
 void RuleManager::LoadRules() {
     _rules.clear();
     _ruleHistories.clear();
@@ -1018,6 +1049,180 @@ void RuleManager::DeleteRule(const std::string& id) {
     std::erase_if(_rules, [&](const Rule& r) { return r.id == id; });
 
     logger::info("Regra {} marcada para deleção física.", id);
+}
+
+#endif
+
+void RuleManager::LoadRules() {
+    if (!RulePackageStore::GetSingleton()->Load(_rules, _ruleHistories, _ruleOwners)) {
+        logger::error("Rules were only partially loaded because one or more packages failed.");
+    }
+}
+
+std::string GenerateRuleUUID() {
+    static std::random_device rd;
+    static std::mt19937_64 gen(rd());
+    static std::uniform_int_distribution<std::uint32_t> dis(0, 0xFFFFFFFF);
+    auto a = dis(gen);
+    auto b = (dis(gen) & 0xFFFF0FFFU) | 0x00004000U;
+    auto c = (dis(gen) & 0x3FFFFFFFU) | 0x80000000U;
+    auto d = dis(gen);
+    return std::format(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:04x}{:08x}",
+        a,
+        b >> 16,
+        b & 0xFFFF,
+        c >> 16,
+        c & 0xFFFF,
+        d);
+}
+
+bool RuleManager::SaveRules() {
+    bool ok = true;
+    int updatedTotal = 0;
+    for (auto& currentRule : _rules) {
+        if (!currentRule.IsModified()) {
+            continue;
+        }
+        auto& history = _ruleHistories[currentRule.id];
+        if (RulePackageStore::GetSingleton()->SaveRule(currentRule, history)) {
+            _ruleOwners[currentRule.id] = currentRule.packageID;
+            ++updatedTotal;
+            logger::info("Rule '{}' saved to package '{}' at version {}.", currentRule.name, currentRule.packageID, currentRule.version);
+        } else {
+            ok = false;
+            logger::error("Rule '{}' could not be saved.", currentRule.name);
+        }
+    }
+    if (updatedTotal > 0) {
+        InitializeAffectedNPCsDatabase();
+    }
+    return ok;
+}
+
+const std::vector<RulePackage>& RuleManager::GetPackages() const {
+    return RulePackageStore::GetSingleton()->GetPackages();
+}
+
+std::optional<std::string> RuleManager::CreatePackage(const std::string_view displayName) {
+    return RulePackageStore::GetSingleton()->CreatePackage(displayName);
+}
+
+Rule& RuleManager::CreateRule(const std::string_view packageID) {
+    Rule rule;
+    do {
+        rule.id = GenerateRuleUUID();
+    } while (_ruleOwners.contains(rule.id));
+    const auto& packages = GetPackages();
+    const auto packageExists = std::ranges::any_of(packages, [packageID](const RulePackage& package) {
+        return package.id == packageID;
+    });
+    rule.packageID = packageExists
+        ? std::string(packageID)
+        : std::string(RulePackageStore::LOCAL_PACKAGE_ID);
+    rule.level = 1;
+    _rules.push_back(rule);
+    _ruleOwners[rule.id] = rule.packageID;
+    return _rules.back();
+}
+
+bool RuleManager::DeleteRule(const std::string& id) {
+    const auto found = std::ranges::find_if(_rules, [&id](const Rule& rule) {
+        return rule.id == id;
+    });
+    if (found == _rules.end()) {
+        return false;
+    }
+    if (found->version > 0 &&
+        !RulePackageStore::GetSingleton()->DeleteRule(id, found->packageID)) {
+        logger::error("Rule '{}' could not be deleted from package '{}'.", id, found->packageID);
+        return false;
+    }
+    _ruleHistories.erase(id);
+    _ruleOwners.erase(id);
+    _rules.erase(found);
+    logger::info("Rule '{}' deleted.", id);
+    return true;
+}
+
+bool RuleManager::CreateRulesPackageSnapshot(
+    const std::string& packageName,
+    const std::vector<Rule>& rules,
+    const fs::path& stagingRoot,
+    RulePackage& outPackage)
+{
+    std::map<std::string, std::vector<Rule>> histories;
+    for (const auto& rule : rules) {
+        if (const auto found = _ruleHistories.find(rule.id); found != _ruleHistories.end()) {
+            histories.emplace(rule.id, found->second);
+        }
+    }
+    return RulePackageStore::GetSingleton()->CreateSnapshot(
+        packageName,
+        rules,
+        histories,
+        stagingRoot,
+        outPackage);
+}
+
+bool RuleManager::ExportRule(const Rule& rule) {
+    return ExportRulesPackage(rule.name.empty() ? "EDF_Rule" : rule.name, { rule.id });
+}
+
+bool RuleManager::ExportRulesPackage(const std::string& packageName, const std::set<std::string>& ruleIDs)
+{
+    if (ruleIDs.empty()) {
+        logger::warn("Export: no rules selected.");
+        return false;
+    }
+
+    std::vector<Rule> selected;
+    for (const auto& rule : _rules) {
+        if (ruleIDs.contains(rule.id)) {
+            selected.push_back(rule);
+        }
+    }
+    if (selected.empty()) {
+        logger::warn("Export: selected rule IDs were not found.");
+        return false;
+    }
+
+    std::error_code ec;
+    fs::create_directories(_exportDir, ec);
+    if (ec) {
+        logger::error("Export: could not create '{}': {}", _exportDir, ec.message());
+        return false;
+    }
+    const auto safeName = SanitizeFilename(packageName.empty() ? "EDF_Export" : packageName);
+    const auto zipPath = fs::path(_exportDir) / (safeName + ".zip");
+    const auto stagingRoot = fs::temp_directory_path() /
+        std::format("edf_export_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    RulePackage package;
+    if (!CreateRulesPackageSnapshot(safeName, selected, stagingRoot, package)) {
+        fs::remove_all(stagingRoot, ec);
+        return false;
+    }
+
+    mz_zip_archive zip{};
+    if (!mz_zip_writer_init_file(&zip, zipPath.string().c_str(), 0)) {
+        fs::remove_all(stagingRoot, ec);
+        return false;
+    }
+    const auto folder = package.path.filename().generic_string();
+    const auto manifestInternal = std::format("Viny Mods/EDF/Packages/{}/manifest.json", folder);
+    const auto databaseInternal = std::format("Viny Mods/EDF/Packages/{}/package.db", folder);
+    const bool ok =
+        mz_zip_writer_add_file(&zip, manifestInternal.c_str(), (package.path / "manifest.json").string().c_str(), nullptr, 0, MZ_BEST_COMPRESSION) &&
+        mz_zip_writer_add_file(&zip, databaseInternal.c_str(), (package.path / "package.db").string().c_str(), nullptr, 0, MZ_BEST_COMPRESSION) &&
+        mz_zip_writer_finalize_archive(&zip);
+    mz_zip_writer_end(&zip);
+    fs::remove_all(stagingRoot, ec);
+    if (!ok) {
+        logger::error("Export: failed to create package ZIP '{}'.", zipPath.string());
+        return false;
+    }
+    logger::info("Rules package exported to '{}'.", zipPath.string());
+    return true;
 }
 
 std::vector<Reward> RuleManager::GetRewardsForNPC(RE::TESNPC* npc) {

@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <filesystem>
+#include <optional>
 #include <rapidjson/document.h>
 #include "Manager.h"
 
@@ -36,6 +38,7 @@ struct BlacklistFilter {
 
 struct Rule {
     std::string id;
+    std::string packageID = "edf.local-rules";
     std::string name;
     bool isEnabled = true;
     std::string type = "NPC";
@@ -65,6 +68,13 @@ struct Rule {
     }
 };
 
+struct RulePackage {
+    std::string id;
+    std::string displayName;
+    bool enabled = true;
+    std::filesystem::path path;
+};
+
 
 bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor = nullptr);
 
@@ -84,14 +94,22 @@ public:
     bool IsAffected(RE::Actor* actor);
 
     void LoadRules();
-    void SaveRules();
-    void ExportRule(const Rule& rule);
-    void ExportRulesPackage(const std::string& packageName, const std::set<std::string>& ruleIDs);
+    bool SaveRules();
+    bool ExportRule(const Rule& rule);
+    bool ExportRulesPackage(const std::string& packageName, const std::set<std::string>& ruleIDs);
     std::vector<Rule>& GetRules() { return _rules; }
+    const std::vector<RulePackage>& GetPackages() const;
+    std::optional<std::string> CreatePackage(std::string_view displayName);
 
     // Create specific rule
-    Rule& CreateRule();
-    void  DeleteRule(const std::string& id);
+    Rule& CreateRule(std::string_view packageID = "edf.local-rules");
+    bool  DeleteRule(const std::string& id);
+
+    bool CreateRulesPackageSnapshot(
+        const std::string& packageName,
+        const std::vector<Rule>& rules,
+        const std::filesystem::path& stagingRoot,
+        RulePackage& outPackage);
 
     // Apply rules to an NPC (Validation logic)
     // Returns list of rewards to apply
@@ -115,13 +133,16 @@ private:
     std::vector<Rule> _rules;
     std::map<std::string, std::vector<Rule>> _ruleHistories;
     std::map<RE::FormID, AffectedNPC> _affectedNPCsDatabase;
-    std::map<std::string, std::string> _ruleIdToFileName;
-    std::vector<std::string> _rulesToDelete;
+    std::map<std::string, std::string> _ruleOwners;
     const std::string _modDir = "Data/Viny Mods/EDF";
-    const std::string _rulesDir = "Data/Viny Mods/EDF/Rules/";
     const std::string _exportDir = "Data/Viny Mods/EDF/Export/";
-    const std::string _legacyRulesDir = "Data/SKSE/Plugins/EDF/Rules/";
 };
+
+bool ParseLegacyRuleFile(
+    const std::filesystem::path& path,
+    Rule& latest,
+    std::vector<Rule>& history,
+    std::string& error);
 
 std::string FormatLocalFormID(uint32_t a_formID, const std::string& a_pluginName);
 RE::TESForm* ResolveEDFForm(const std::string& a_type, const std::string& a_editorID, const std::string& a_formIDStr);
