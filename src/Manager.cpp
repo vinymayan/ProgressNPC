@@ -98,6 +98,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     PopulateList<RE::BGSVoiceType>("Voice Type");
     PopulateList<RE::TESClass>("Class");
     PopulateList<RE::BGSLocation>("Location");
+    PopulateCellList();
     PopulateList<RE::BGSHeadPart>("HeadPart Misc", [](RE::BGSHeadPart* hp) {
         return hp->type == RE::BGSHeadPart::HeadPartType::kMisc;
         });
@@ -206,6 +207,8 @@ void Manager::RefreshLists(std::string_view a_signatures) {
     if (includes("CSTY")) PopulateList<RE::TESCombatStyle>("Combat Style");
     if (includes("VTYP")) PopulateList<RE::BGSVoiceType>("Voice Type");
     if (includes("CLAS")) PopulateList<RE::TESClass>("Class");
+    if (includes("LCTN") || includes("Location")) PopulateList<RE::BGSLocation>("Location");
+    if (includes("CELL") || includes("Cell")) PopulateCellList();
     if (includes("HDPT")) {
         PopulateList<RE::BGSHeadPart>("HeadPart Misc", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kMisc; });
         PopulateList<RE::BGSHeadPart>("HeadPart Face", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kFace; });
@@ -284,6 +287,163 @@ std::string Manager::ToUTF8(std::string_view a_str) {
     if (!u8str.empty() && u8str.back() == '\0') u8str.pop_back();
 
     return u8str;
+}
+
+void Manager::PopulateCellList() {
+    auto dataHandler = RE::TESDataHandler::GetSingleton();
+    if (!dataHandler) return;
+
+    // TESDataHandler::GetFormArray<TESObjectCELL>() only contains Cells that
+    // have been materialized in memory. Read plugin records as the authoritative
+    // catalog, then merge runtime/dynamic Cells that are present in the array.
+    // Record-scanning approach: ModExplorerMenu/BakaHelpExtender (MIT).
+    struct CellRecord {
+        std::string editorID;
+        std::string pluginName;
+    };
+
+    constexpr std::uint32_t kCellRecordType = 0x4C4C4543;  // "CELL" as little-endian uint32
+    constexpr std::uint32_t kEditorIDType = 0x44494445;    // "EDID" as little-endian uint32
+    constexpr std::uint32_t kMaxEditorIDSize = 64 * 1024;
+
+    std::unordered_map<RE::FormID, CellRecord> records;
+    std::size_t scannedFiles = 0;
+
+    const auto scanFile = [&](RE::TESFile* file) {
+        if (!file || !file->OpenTES(RE::NiFile::OpenMode::kReadOnly, false)) {
+            if (file) {
+                logger::warn("[CellCatalog] Não foi possível abrir '{}'.", file->GetFilename());
+            }
+            return;
+        }
+
+        ++scannedFiles;
+        try {
+            do {
+                if (file->currentform.form != kCellRecordType) continue;
+
+                const auto formID = file->GetRuntimeFormID(file->currentform.formID);
+                std::string editorID;
+
+                do {
+                    if (file->GetCurrentSubRecordType() != kEditorIDType) continue;
+
+                    const auto size = file->GetCurrentSubRecordSize();
+                    if (size == 0 || size > kMaxEditorIDSize) break;
+
+                    std::vector<char> buffer(static_cast<std::size_t>(size) + 1, '\0');
+                    if (file->ReadData(buffer.data(), size)) {
+                        const auto end = std::find(buffer.begin(), buffer.begin() + size, '\0');
+                        editorID.assign(buffer.begin(), end);
+                    }
+                    break;
+                } while (file->SeekNextSubrecord());
+
+                // Os plugins são percorridos em load order. A primeira
+                // ocorrência conserva o arquivo proprietário do FormID quando
+                // plugins posteriores apenas sobrescrevem o mesmo record.
+                records.try_emplace(formID, CellRecord{
+                    ToUTF8(editorID),
+                    ToUTF8(file->GetFilename())
+                });
+            } while (file->SeekNextForm(true));
+        }
+        catch (const std::exception& e) {
+            logger::error("[CellCatalog] Falha lendo '{}': {}", file->GetFilename(), e.what());
+        }
+        catch (...) {
+            logger::error("[CellCatalog] Falha desconhecida lendo '{}'.", file->GetFilename());
+        }
+
+        if (!file->CloseTES(false)) {
+            logger::warn("[CellCatalog] Não foi possível fechar '{}'.", file->GetFilename());
+        }
+    };
+
+    for (std::uint8_t i = 0; i < dataHandler->GetLoadedModCount(); ++i) {
+        scanFile(dataHandler->GetLoadedMods()[i]);
+    }
+    for (std::uint16_t i = 0; i < dataHandler->GetLoadedLightModCount(); ++i) {
+        scanFile(dataHandler->GetLoadedLightMods()[i]);
+    }
+
+    auto& list = _dataStore["Cell"];
+    list.clear();
+    list.reserve(records.size());
+
+    std::unordered_map<RE::FormID, std::size_t> indices;
+    indices.reserve(records.size());
+
+    for (const auto& [formID, record] : records) {
+        // Cells sem EDID não são úteis no seletor e tornam a lista de
+        // wilderness excessivamente grande.
+        if (record.editorID.empty()) continue;
+
+        InternalFormInfo info;
+        info.formID = formID;
+        info.editorID = record.editorID;
+        info.pluginName = record.pluginName;
+        info.formType = "Cell";
+
+        if (auto cell = RE::TESForm::LookupByID<RE::TESObjectCELL>(formID)) {
+            if (auto fullName = cell->As<RE::TESFullName>()) {
+                info.name = ToUTF8(fullName->fullName.c_str());
+            }
+        }
+
+        indices.emplace(formID, list.size());
+        list.push_back(std::move(info));
+    }
+
+    std::size_t runtimeCellsAdded = 0;
+    for (auto* cell : dataHandler->GetFormArray<RE::TESObjectCELL>()) {
+        if (!cell) continue;
+
+        try {
+            const auto formID = cell->GetFormID();
+            if (auto found = indices.find(formID); found != indices.end()) {
+                auto& info = list[found->second];
+                if (info.name.empty()) {
+                    if (auto fullName = cell->As<RE::TESFullName>()) {
+                        info.name = ToUTF8(fullName->fullName.c_str());
+                    }
+                }
+                continue;
+            }
+
+            InternalFormInfo info;
+            info.formID = formID;
+            info.formType = "Cell";
+            info.pluginName = "Dynamic";
+            if (auto file = GetSourceFileByFormID(cell)) {
+                info.pluginName = ToUTF8(file->GetFilename());
+            }
+            info.editorID = ToUTF8(clib_util::editorID::get_editorID(cell));
+            if (auto fullName = cell->As<RE::TESFullName>()) {
+                info.name = ToUTF8(fullName->fullName.c_str());
+            }
+
+            indices.emplace(formID, list.size());
+            list.push_back(std::move(info));
+            ++runtimeCellsAdded;
+        }
+        catch (const std::exception& e) {
+            logger::error("[CellCatalog] Falha processando Cell runtime {:08X}: {}",
+                cell->GetFormID(), e.what());
+        }
+        catch (...) {
+            logger::error("[CellCatalog] Falha desconhecida processando Cell runtime {:08X}.",
+                cell->GetFormID());
+        }
+    }
+
+    std::ranges::sort(list, [](const InternalFormInfo& left, const InternalFormInfo& right) {
+        return std::tie(left.pluginName, left.editorID, left.formID) <
+            std::tie(right.pluginName, right.editorID, right.formID);
+    });
+
+    logger::info("[CellCatalog] Carregadas {} Cells de {} plugins ({} adicionadas da memória/runtime).",
+        list.size(), scannedFiles, runtimeCellsAdded);
 }
 
 template <typename T>

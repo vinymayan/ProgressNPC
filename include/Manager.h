@@ -45,6 +45,7 @@ private:
 
     template <typename T>
     void PopulateList(const std::string& a_typeName, std::function<bool(T*)> a_filter = nullptr);
+    void PopulateCellList();
 
     bool _isPopulated = false;
     std::map<std::string, std::vector<InternalFormInfo>> _dataStore;

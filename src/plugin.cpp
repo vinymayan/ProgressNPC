@@ -50,7 +50,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         //}
 
         LocationChangeHandler::Register();
-        //HeadPartCreator::TestCreateHeadPart();
+        ActorCellChangeHandler::Register();
         SPIDUI::Register();
     }
     if (message->type == SKSE::MessagingInterface::kPreLoadGame) {

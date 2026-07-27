@@ -165,7 +165,10 @@ private:
 
 
 
-void ApplyRulesToInstance(RE::Actor* a_actor,int a_forcedLevel = -1);
+void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel = -1);
+void ScheduleRuleEvaluation(RE::Actor* a_actor);
+void ForgetRuleEvaluationRuntimeState(RE::FormID a_actorID);
+void ResetRuleEvaluationRuntimeState();
 
 
 
@@ -196,7 +199,7 @@ private:
                 }
 
                 logger::info("[ShouldBackgroundClone] Rules encontradas para {}, aplicando.", actor->GetName());
-                ApplyRulesToInstance(actor);
+                ScheduleRuleEvaluation(actor);
             }
         }
 
@@ -219,33 +222,18 @@ public:
     RE::BSEventNotifyControl ProcessEvent(const RE::TESObjectLoadedEvent* a_event, RE::BSTEventSource<RE::TESObjectLoadedEvent>*) override {
         if (!a_event) return RE::BSEventNotifyControl::kContinue;
 
+        if (!a_event->loaded) {
+            ForgetRuleEvaluationRuntimeState(a_event->formID);
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
         // 1. Tenta obter a referência do objeto que carregou
         auto form = RE::TESForm::LookupByID(a_event->formID);
         if (!form) return RE::BSEventNotifyControl::kContinue;
         auto actor = form->As<RE::Actor>();
-        if (actor != RE::PlayerCharacter::GetSingleton()) return RE::BSEventNotifyControl::kContinue;
-        auto npcConst = const_cast<RE::Actor*>(actor);
 
-        if (actor == RE::PlayerCharacter::GetSingleton()) {
-            //auto baseNPC = npcConst->GetActorBase();
-            if (RuleManager::GetSingleton()->IsAffected(actor)) {
-                logger::debug("[Player] Rules encontradas para {}, aplicando.", actor->GetName());
-                ApplyRulesToInstance(actor);
-            }
-            //if (baseNPC) {
-            //    const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
-            //    // Se o FormID do NPC Base não estiver no banco de dados, ignoramos o ator imediatamente
-            //    if (affectedDB.find(baseNPC->GetFormID()) == affectedDB.end()) {
-            //        //EquipBestInventoryItems(npcConst);
-            //        logger::debug("sem rules para aplicar para {}", npcConst->GetName());
-            //        return RE::BSEventNotifyControl::kContinue;
-            //    }
-            //    logger::info("[TESObjectLoadedEvent] encontradas para {}, iniciando processo de aplicacao.", npcConst->GetName());
-            //    // Se chegou aqui, o NPC tem regras potenciais
-            //
-
-            //}
-
+        if (actor) {
+            ScheduleRuleEvaluation(actor);
         }
 
         return RE::BSEventNotifyControl::kContinue;
@@ -383,19 +371,14 @@ public:
         static LocationChangeHandler singleton;
         return &singleton;
     }
-    virtual RE::BSEventNotifyControl ProcessEvent(const RE::TESActorLocationChangeEvent* a_event, RE::BSTEventSource<RE::TESActorLocationChangeEvent>* a_source) override {
-        if (a_event && a_event->newLoc) {
+    RE::BSEventNotifyControl ProcessEvent(
+        const RE::TESActorLocationChangeEvent* a_event,
+        RE::BSTEventSource<RE::TESActorLocationChangeEvent>*) override {
+        if (a_event && a_event->actor) {
             auto actor = const_cast<RE::Actor*>(a_event->actor->As<RE::Actor>());
-			//auto actor = a_event->actor->As<RE::Actor>();
-            //RE::FormID actorID = a_event->actor->GetFormID();
-            if (actor  && !actor->IsDead()) {
-                if (RuleManager::GetSingleton()->IsAffected(actor)) {
-                    logger::debug("[LocationChangeHandler] NPC '{}' detectado com regras aplicáveis. Aplicando.", actor->GetName());
-                    ApplyRulesToInstance(actor);
-                }
+            if (actor) {
+                ScheduleRuleEvaluation(actor);
             }
-
-
         }
         return RE::BSEventNotifyControl::kContinue;
     }
@@ -403,6 +386,41 @@ public:
         auto scriptEventSourceHolder = RE::ScriptEventSourceHolder::GetSingleton();
         if (scriptEventSourceHolder) {
             scriptEventSourceHolder->AddEventSink(GetSingleton());
+        }
+    }
+};
+
+class ActorCellChangeHandler : public RE::BSTEventSink<RE::BGSActorCellEvent> {
+public:
+    static ActorCellChangeHandler* GetSingleton() {
+        static ActorCellChangeHandler singleton;
+        return &singleton;
+    }
+
+    RE::BSEventNotifyControl ProcessEvent(
+        const RE::BGSActorCellEvent* a_event,
+        RE::BSTEventSource<RE::BGSActorCellEvent>*) override {
+        if (!a_event || a_event->flags != RE::BGSActorCellEvent::CellFlag::kEnter) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        auto actorPtr = a_event->actor.get();
+        auto actor = actorPtr ? actorPtr.get() : nullptr;
+        if (actor) {
+            ScheduleRuleEvaluation(actor);
+        }
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    static void Register() {
+        auto player = RE::PlayerCharacter::GetSingleton();
+        auto source = player ? player->AsBGSActorCellEventSource() : nullptr;
+        if (source) {
+            source->AddEventSink(GetSingleton());
+            logger::info("ActorCellChangeHandler registrado.");
+        }
+        else {
+            logger::warn("Não foi possível registrar ActorCellChangeHandler.");
         }
     }
 };

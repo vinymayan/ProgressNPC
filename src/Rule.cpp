@@ -96,6 +96,31 @@ namespace
             return 0;
         }
     }
+
+    bool IsActorDependentFilterType(std::string_view type)
+    {
+        return type == "Keyword" ||
+            type == "Faction" ||
+            type == "Faction Rank" ||
+            type == "Perk" ||
+            type == "Spell" ||
+            type == "Shout" ||
+            type == "Inventory Item" ||
+            type == "Inventory Count" ||
+            type == "Gold" ||
+            type == "Equipped Item" ||
+            type == "Location" ||
+            type == "Cell";
+    }
+
+    bool HasActorDependentFilters(const Rule& rule)
+    {
+        return std::ranges::any_of(rule.targetFilters, [](const auto& filter) {
+            return IsActorDependentFilterType(filter.type);
+        }) || std::ranges::any_of(rule.blacklistFilters, [](const auto& filter) {
+            return IsActorDependentFilterType(filter.type);
+        });
+    }
 }
 
 RE::TESForm* ResolveEDFForm(const std::string& a_type, const std::string& a_editorID, const std::string& a_formIDStr)
@@ -506,6 +531,11 @@ bool RuleManager::IsAffected(RE::Actor* actor) {
 	//logger::debug("Verificando NPC: {} (FormID: {:08X})", baseNPC ? baseNPC->GetName() : "Unknown", baseNPC->GetFormID());
     if (!baseNPC) return false;
 
+    // O índice abaixo é construído somente com TESNPC. Se alguma regra depende
+    // do estado da instância, a avaliação completa com Actor não pode ser
+    // bloqueada por esse índice estático.
+    if (_hasActorDependentRules) return true;
+
     // 1. Identificar os 3 IDs principais
     RE::FormID actorID = actor->GetFormID();
     RE::FormID baseID = baseNPC->GetFormID();
@@ -640,6 +670,12 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         if (tokens.size() < 2) continue;
 
         auto fID = ResolveEDFFormID(filter.type, filter.editorID, filter.formIDStr);
+        if (fID == 0 && filter.type == "Cell") {
+            // Plugin-backed Cells may not have a TESObjectCELL instantiated
+            // until the area is loaded. Their runtime FormID can still be
+            // resolved directly from Plugin|LocalFormID.
+            fID = ResolvePluginFormID(filter.formIDStr);
+        }
         const auto filterValue = GetFilterValue(tokens, 1);
 
         if (filter.type == "NPC") {
@@ -776,6 +812,14 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
                     if (currentLoc == targetLoc || currentLoc->IsParent(targetLoc)) {
                         match = true;
                     }
+                }
+            }
+        }
+        else if (filter.type == "Cell") {
+            if (actor) {
+                auto currentCell = actor->GetParentCell();
+                if (currentCell && currentCell->GetFormID() == fID) {
+                    match = true;
                 }
             }
         }
@@ -1364,6 +1408,9 @@ std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, cons
 void RuleManager::InitializeAffectedNPCsDatabase() {
     _affectedNPCsDatabase.clear();
     auto& rules = GetRules();
+    _hasActorDependentRules = std::ranges::any_of(rules, [](const Rule& rule) {
+        return rule.isEnabled && HasActorDependentFilters(rule);
+    });
     auto npcList = Manager::GetSingleton()->GetList("NPC");
 
     logger::info("--- Iniciando Inicialização do Database de NPCs Afetados ---");

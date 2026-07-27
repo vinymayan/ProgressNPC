@@ -134,6 +134,7 @@ private:
     std::map<std::string, std::vector<Rule>> _ruleHistories;
     std::map<RE::FormID, AffectedNPC> _affectedNPCsDatabase;
     std::map<std::string, std::string> _ruleOwners;
+    bool _hasActorDependentRules = false;
     const std::string _modDir = "Data/Viny Mods/EDF";
     const std::string _exportDir = "Data/Viny Mods/EDF/Export/";
 };

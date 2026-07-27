@@ -265,7 +265,7 @@ namespace SPIDUI {
     void RenderTypeFilter() {
         const std::vector<std::string> options = {
         "NPC", "Faction", "Faction Rank", "Keyword", "Race", "Package",
-        "Spell", "Perk", "Shout", "Combat Style", "Voice Type", "Class", "Location", "Skin", "Inventory Item",
+        "Spell", "Perk", "Shout", "Combat Style", "Voice Type", "Class", "Location", "Cell", "Skin", "Inventory Item",
         "Inventory Count", "Gold", "Equipped Item",
         "Hair", "Facial Hair", "HeadPart Misc", "HeadPart Face",
         "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows", "Leveled NPC"
@@ -454,7 +454,7 @@ namespace SPIDUI {
                 std::vector<const char*>{ "All", "Selected", "Perk", "Spell", "Shout", "Keyword", "Faction", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key", "Outfit" } :
                 std::vector<const char*>{
                 "All", "Selected", "NPC", "Faction", "Faction Rank", "Keyword", "Race",
-                "Spell", "Perk", "Shout", "Package", "Combat Style", "Voice Type", "Class", "Location", "Skin", "Inventory Item",
+                "Spell", "Perk", "Shout", "Package", "Combat Style", "Voice Type", "Class", "Location", "Cell", "Skin", "Inventory Item",
                 "Inventory Count", "Gold", "Equipped Item",
                 "Hair", "Facial Hair", "HeadPart Misc", "HeadPart Face",
                 "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows", "Leveled NPC"
@@ -485,7 +485,7 @@ namespace SPIDUI {
                 if (filterAllCache.empty()) {
                     for (auto& type : {
                         "NPC", "Faction", "Faction Rank", "Keyword", "Race",
-                        "Spell", "Perk", "Shout", "Combat Style", "Voice Type", "Class", "Location", "Skin", "Inventory Item",
+                        "Spell", "Perk", "Shout", "Combat Style", "Voice Type", "Class", "Location", "Cell", "Skin", "Inventory Item",
                         "Inventory Count", "Gold", "Equipped Item",
                         "Hair", "Facial Hair", "HeadPart Misc", "HeadPart Face",
                         "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows", "Leveled NPC"
@@ -1810,6 +1810,7 @@ namespace SPIDUI {
             if (form->As<RE::BGSVoiceType>()) return "Voice Type";
             if (form->As<RE::TESClass>()) return "Class";
             if (form->As<RE::BGSLocation>()) return "Location";
+            if (form->As<RE::TESObjectCELL>()) return "Cell";
             if (form->As<RE::TESLevCharacter>()) return "Leveled NPC";
             return std::nullopt;
         }

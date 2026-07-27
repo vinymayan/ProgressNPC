@@ -1,5 +1,7 @@
 #include "SaveState.h"
+#include <atomic>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/stringbuffer.h>
@@ -10,6 +12,42 @@ static std::mutex g_processingMutex;
 static std::set<RE::FormID> g_actorsInProcess;
 
 namespace {
+    std::mutex g_scheduledEvaluationsMutex;
+    std::map<RE::FormID, std::uint64_t> g_scheduledEvaluations;
+    std::atomic_uint64_t g_nextEvaluationToken{ 1 };
+
+    std::mutex g_contextualRuleStateMutex;
+    std::map<RE::FormID, std::map<std::string, bool>> g_contextualRuleState;
+
+    bool IsContextualRule(const Rule& a_rule)
+    {
+        const auto hasContextFilter = [](const auto& a_filters) {
+            return std::ranges::any_of(a_filters, [](const BlacklistFilter& a_filter) {
+                return a_filter.type == "Cell" || a_filter.type == "Location";
+            });
+        };
+
+        return hasContextFilter(a_rule.targetFilters) || hasContextFilter(a_rule.blacklistFilters);
+    }
+
+    std::optional<bool> GetContextualRuleActivity(RE::FormID a_actorID, const std::string& a_ruleID)
+    {
+        std::lock_guard lock(g_contextualRuleStateMutex);
+        const auto actorIt = g_contextualRuleState.find(a_actorID);
+        if (actorIt == g_contextualRuleState.end()) {
+            return std::nullopt;
+        }
+
+        const auto ruleIt = actorIt->second.find(a_ruleID);
+        return ruleIt != actorIt->second.end() ? std::optional{ ruleIt->second } : std::nullopt;
+    }
+
+    void SetContextualRuleActivity(RE::FormID a_actorID, const std::string& a_ruleID, bool a_isActive)
+    {
+        std::lock_guard lock(g_contextualRuleStateMutex);
+        g_contextualRuleState[a_actorID][a_ruleID] = a_isActive;
+    }
+
     const RE::TESFile* GetSourceFileByFormID(RE::TESForm* a_form)
     {
         if (!a_form) return nullptr;
@@ -158,6 +196,86 @@ namespace {
     }
 }
 
+void ScheduleRuleEvaluation(RE::Actor* a_actor)
+{
+    if (!a_actor) {
+        return;
+    }
+
+    auto taskInterface = SKSE::GetTaskInterface();
+    if (!taskInterface) {
+        logger::error("[RuleScheduler] TaskInterface indisponível; avaliação de {:08X} ignorada.",
+            a_actor->GetFormID());
+        return;
+    }
+
+    const auto actorID = a_actor->GetFormID();
+    const auto actorHandle = a_actor->GetHandle();
+    if (!actorHandle) {
+        logger::debug("[RuleScheduler] Ator {:08X} não possui handle válido.", actorID);
+        return;
+    }
+
+    const auto token = g_nextEvaluationToken.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard lock(g_scheduledEvaluationsMutex);
+        if (g_scheduledEvaluations.contains(actorID)) {
+            return;
+        }
+        g_scheduledEvaluations.emplace(actorID, token);
+    }
+
+    taskInterface->AddTask([actorHandle, actorID, token]() {
+        {
+            std::lock_guard lock(g_scheduledEvaluationsMutex);
+            const auto it = g_scheduledEvaluations.find(actorID);
+            if (it == g_scheduledEvaluations.end() || it->second != token) {
+                return;
+            }
+            g_scheduledEvaluations.erase(it);
+        }
+
+        auto actorPtr = actorHandle.get();
+        auto actor = actorPtr ? actorPtr.get() : nullptr;
+        if (!actor || actor->IsDead()) {
+            return;
+        }
+
+        const auto& context = SaveStateManager::GetSingleton()->GetCurrentContext();
+        if (!context.isValid || !RuleManager::GetSingleton()->IsAffected(actor)) {
+            return;
+        }
+
+        logger::debug("[RuleScheduler] Reavaliando regras para '{}' ({:08X}) no thread principal.",
+            actor->GetName(), actorID);
+        ApplyRulesToInstance(actor);
+    });
+}
+
+void ForgetRuleEvaluationRuntimeState(RE::FormID a_actorID)
+{
+    {
+        std::lock_guard lock(g_scheduledEvaluationsMutex);
+        g_scheduledEvaluations.erase(a_actorID);
+    }
+    {
+        std::lock_guard lock(g_contextualRuleStateMutex);
+        g_contextualRuleState.erase(a_actorID);
+    }
+}
+
+void ResetRuleEvaluationRuntimeState()
+{
+    {
+        std::lock_guard lock(g_scheduledEvaluationsMutex);
+        g_scheduledEvaluations.clear();
+    }
+    {
+        std::lock_guard lock(g_contextualRuleStateMutex);
+        g_contextualRuleState.clear();
+    }
+}
+
 SaveStateManager* SaveStateManager::GetSingleton() {
     static SaveStateManager instance;
     return &instance;
@@ -177,6 +295,7 @@ std::vector<SaveHistoryEntry>& SaveStateManager::GetCharacterHistory(uint32_t ch
 
 void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) {
     logger::info("[SaveManager] Definindo contexto: CharID {:08X}, Save #{}", a_charID, a_saveNum);
+    ResetRuleEvaluationRuntimeState();
 
     _currentContext.charID = a_charID;
     _currentContext.saveNumber = a_saveNum;
@@ -283,6 +402,7 @@ void SaveStateManager::PersistCurrentSave(const std::string& a_saveName) {
 void SaveStateManager::ClearContext()
 {
 	logger::info("[SaveManager] Limpando contexto atual para CharID {:08X}", _currentContext.charID);
+    ResetRuleEvaluationRuntimeState();
     _currentContext.isValid = false;
     _currentContext.saveNumber = 0;
     _currentContext.charID = 0;
@@ -1503,6 +1623,10 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
         for (auto it = appliedRulesMap.begin(); it != appliedRulesMap.end();) {
             const std::string& ruleID = it->first;
             auto ruleDefIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
+            const bool isContextual = ruleDefIt != allRules.end() && IsContextualRule(*ruleDefIt);
+            const auto previousContextActivity = isContextual ?
+                GetContextualRuleActivity(actorID, ruleID) :
+                std::optional<bool>{};
 
             bool shouldRemove = false;
             if (ruleDefIt == allRules.end()) {
@@ -1518,10 +1642,17 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
             }
 
             if (shouldRemove) {
-                if (ruleDefIt != allRules.end()) {
+                const bool shouldRemoveRewards =
+                    !isContextual || !previousContextActivity.has_value() || previousContextActivity.value();
+                if (ruleDefIt != allRules.end() && shouldRemoveRewards) {
                     RemoveRuleRewards(a_actor, *ruleDefIt);
                 }
-                //it = appliedRulesMap.erase(it);
+                if (isContextual) {
+                    SetContextualRuleActivity(actorID, ruleID, false);
+                }
+                // Preserva o histórico para que uma reentrada reutilize os
+                // grupos sorteados anteriormente.
+                ++it;
             }
             else {
                 ++it;
@@ -1603,8 +1734,21 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 
             int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
             if (level < currentRule.level) continue;
-AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
-        int oldVersion = state.version;
+            AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
+            int oldVersion = state.version;
+            const bool isContextual = IsContextualRule(currentRule);
+            const auto previousContextActivity = isContextual ?
+                GetContextualRuleActivity(actorID, ruleID) :
+                std::optional<bool>{};
+
+            if (isContextual &&
+                previousContextActivity.value_or(false) &&
+                oldVersion == currentRule.version) {
+                logger::debug(
+                    "  [Contexto inalterado] Regra '{}' já está ativa para {}; evento duplicado ignorado.",
+                    currentRule.name, actorName);
+                continue;
+            }
 
         if (oldVersion == 0) {
             logger::debug("  [Novo NPC] Aplicando regra '{}' pela primeira vez em {}.", currentRule.name, actorName);
@@ -1810,6 +1954,10 @@ AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
                     }
                 }
             }
+        }
+
+        if (isContextual) {
+            SetContextualRuleActivity(actorID, ruleID, true);
         }
 
         // Equipagem final
