@@ -37,6 +37,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
         faction.formType = "Faction Rank";
         factionRankList.push_back(std::move(faction));
     }
+    RebuildEditorIDIndex("Faction Rank");
     logger::info("Carregados {} itens do tipo {}", factionRankList.size(), "Faction Rank");
     PopulateList<RE::TESRace>("Race");
     PopulateList<RE::BGSPerk>("Perk");
@@ -64,6 +65,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
             goldList.push_back(std::move(gold));
         }
     }
+    RebuildEditorIDIndex("Gold");
     logger::info("Carregados {} itens do tipo {}", goldList.size(), "Gold");
     PopulateList<RE::TESSoulGem>("SoulGem");
     PopulateList<RE::TESKey>("Key");
@@ -76,12 +78,14 @@ void Manager::PopulateAllLists(bool forceRefresh) {
             inventoryItems.push_back(std::move(item));
         }
     }
+    RebuildEditorIDIndex("Inventory Item");
     logger::info("Carregados {} itens do tipo {}", inventoryItems.size(), "Inventory Item");
     auto& inventoryCountItems = _dataStore["Inventory Count"];
     inventoryCountItems = inventoryItems;
     for (auto& item : inventoryCountItems) {
         item.formType = "Inventory Count";
     }
+    RebuildEditorIDIndex("Inventory Count");
     logger::info("Carregados {} itens do tipo {}", inventoryCountItems.size(), "Inventory Count");
     auto& equippedItems = _dataStore["Equipped Item"];
     equippedItems.clear();
@@ -92,6 +96,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
             equippedItems.push_back(std::move(item));
         }
     }
+    RebuildEditorIDIndex("Equipped Item");
     logger::info("Carregados {} itens do tipo {}", equippedItems.size(), "Equipped Item");
     // - v.1.2.0
     PopulateList<RE::TESCombatStyle>("Combat Style");
@@ -176,6 +181,7 @@ void Manager::RefreshLists(std::string_view a_signatures) {
             faction.formType = "Faction Rank";
             factionRanks.push_back(std::move(faction));
         }
+        RebuildEditorIDIndex("Faction Rank");
     }
     if (includes("PERK")) PopulateList<RE::BGSPerk>("Perk");
     if (includes("SPEL")) PopulateList<RE::SpellItem>("Spell");
@@ -202,6 +208,7 @@ void Manager::RefreshLists(std::string_view a_signatures) {
                 gold.push_back(std::move(item));
             }
         }
+        RebuildEditorIDIndex("Gold");
     }
     if (includes("SLGM")) PopulateList<RE::TESSoulGem>("SoulGem");
     if (includes("KEYM")) PopulateList<RE::TESKey>("Key");
@@ -237,6 +244,8 @@ void Manager::RefreshLists(std::string_view a_signatures) {
         auto& inventoryCount = _dataStore["Inventory Count"];
         inventoryCount = inventory;
         for (auto& item : inventoryCount) item.formType = "Inventory Count";
+        RebuildEditorIDIndex("Inventory Item");
+        RebuildEditorIDIndex("Inventory Count");
     }
 
     if (includes("WEAP") || includes("ARMO") || includes("AMMO")) {
@@ -248,6 +257,7 @@ void Manager::RefreshLists(std::string_view a_signatures) {
                 equipped.push_back(std::move(item));
             }
         }
+        RebuildEditorIDIndex("Equipped Item");
     }
 
     ++_listRevision;
@@ -260,6 +270,69 @@ const std::vector<InternalFormInfo>& Manager::GetList(const std::string& typeNam
         return it->second;
     }
     return empty;
+}
+
+std::string Manager::NormalizeEditorID(const std::string_view editorID)
+{
+    std::string normalized;
+    normalized.reserve(editorID.size());
+    for (const auto character : editorID) {
+        normalized.push_back(
+            character >= 'A' && character <= 'Z' ?
+                static_cast<char>(character + ('a' - 'A')) :
+                character);
+    }
+    return normalized;
+}
+
+void Manager::RebuildEditorIDIndex(const std::string_view typeName)
+{
+    const auto type = std::string(typeName);
+    auto& index = _formsByEditorID[type];
+    index.clear();
+
+    const auto list = _dataStore.find(type);
+    if (list == _dataStore.end()) {
+        return;
+    }
+
+    index.reserve(list->second.size());
+    std::size_t collisions = 0;
+    for (const auto& info : list->second) {
+        if (info.editorID.empty() || info.formID == 0) {
+            continue;
+        }
+        const auto key = NormalizeEditorID(info.editorID);
+        const auto [found, inserted] = index.try_emplace(key, info.formID);
+        if (!inserted && found->second != info.formID) {
+            ++collisions;
+        }
+    }
+
+    if (collisions > 0) {
+        logger::warn(
+            "[EditorIDIndex] Type '{}' contains {} duplicate EditorID entries; "
+            "the first deterministic entry is authoritative.",
+            type, collisions);
+    }
+}
+
+std::optional<RE::FormID> Manager::FindFormIDByEditorID(
+    const std::string_view typeName,
+    const std::string_view editorID) const
+{
+    if (editorID.empty()) {
+        return std::nullopt;
+    }
+
+    const auto byType = _formsByEditorID.find(std::string(typeName));
+    if (byType == _formsByEditorID.end()) {
+        return std::nullopt;
+    }
+    const auto found = byType->second.find(NormalizeEditorID(editorID));
+    return found != byType->second.end() ?
+        std::optional<RE::FormID>{ found->second } :
+        std::nullopt;
 }
 
 void Manager::RegisterReadyCallback(std::function<void()> callback) {
@@ -444,6 +517,7 @@ void Manager::PopulateCellList() {
         return std::tie(left.pluginName, left.editorID, left.formID) <
             std::tie(right.pluginName, right.editorID, right.formID);
     });
+    RebuildEditorIDIndex("Cell");
 
     logger::info("[CellCatalog] Carregadas {} Cells de {} plugins ({} adicionadas da memória/runtime).",
         list.size(), scannedFiles, runtimeCellsAdded);
@@ -516,6 +590,7 @@ void Manager::PopulateList(const std::string& a_typeName, std::function<bool(T*)
                 currentID, currentPlugin, a_typeName);
         }
     }
+    RebuildEditorIDIndex(a_typeName);
     logger::info("Carregados {} itens do tipo {}", list.size(), a_typeName);
 }
 

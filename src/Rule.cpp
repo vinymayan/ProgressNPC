@@ -126,12 +126,10 @@ namespace
 RE::TESForm* ResolveEDFForm(const std::string& a_type, const std::string& a_editorID, const std::string& a_formIDStr)
 {
     if (!a_editorID.empty()) {
-        const auto& list = Manager::GetSingleton()->GetList(a_type);
-        auto it = std::find_if(list.begin(), list.end(), [&](const InternalFormInfo& info) {
-            return !info.editorID.empty() && IEquals(info.editorID, a_editorID);
-        });
-        if (it != list.end()) {
-            if (auto form = RE::TESForm::LookupByID(it->formID)) {
+        if (const auto formID =
+                Manager::GetSingleton()->FindFormIDByEditorID(
+                    a_type, a_editorID)) {
+            if (auto form = RE::TESForm::LookupByID(*formID)) {
                 return form;
             }
         }
@@ -170,6 +168,52 @@ RE::FormID ResolveEDFFormID(const std::string& a_type, const std::string& a_edit
         return form->GetFormID();
     }
     return 0;
+}
+
+RuleDependencyMask GetFilterDependencyMask(std::string_view a_type)
+{
+    if (a_type == "Keyword" || a_type == "Faction") {
+        return ToMask(RuleDependency::kTag);
+    }
+    if (a_type == "Faction Rank") {
+        return ToMask(RuleDependency::kFactionRank);
+    }
+    if (a_type == "Perk" || a_type == "Spell" || a_type == "Shout") {
+        return ToMask(RuleDependency::kAbility);
+    }
+    if (a_type == "Inventory Item" || a_type == "Inventory Count" ||
+        a_type == "Gold" || a_type == "Equipped Item") {
+        return ToMask(RuleDependency::kInventory);
+    }
+    if (a_type == "Location" || a_type == "Cell") {
+        return ToMask(RuleDependency::kEnvironment);
+    }
+    return ToMask(RuleDependency::kStatic);
+}
+
+RuleDependencyMask GetRewardDependencyMask(std::string_view a_type)
+{
+    if (a_type == "Keyword") {
+        return ToMask(RuleDependency::kTag);
+    }
+    if (a_type == "Faction") {
+        return ToMask(RuleDependency::kTag) |
+            ToMask(RuleDependency::kFactionRank);
+    }
+    if (a_type == "Perk" || a_type == "Spell" || a_type == "Shout") {
+        return ToMask(RuleDependency::kAbility);
+    }
+    if (a_type == "Outfit") {
+        return ToMask(RuleDependency::kInventory) |
+            ToMask(RuleDependency::kSleep);
+    }
+    if (a_type == "Weapon" || a_type == "Armor" || a_type == "Ammo" ||
+        a_type == "Potion" || a_type == "Ingredient" || a_type == "Scroll" ||
+        a_type == "Book" || a_type == "Misc" || a_type == "SoulGem" ||
+        a_type == "Key") {
+        return ToMask(RuleDependency::kInventory);
+    }
+    return ToMask(RuleDependency::kNone);
 }
 
 std::pair<std::string, RE::FormID> Reward::ParseFormID() const {
@@ -531,29 +575,12 @@ bool RuleManager::IsAffected(RE::Actor* actor) {
 	//logger::debug("Verificando NPC: {} (FormID: {:08X})", baseNPC ? baseNPC->GetName() : "Unknown", baseNPC->GetFormID());
     if (!baseNPC) return false;
 
-    // O índice abaixo é construído somente com TESNPC. Se alguma regra depende
-    // do estado da instância, a avaliação completa com Actor não pode ser
-    // bloqueada por esse índice estático.
-    if (_hasActorDependentRules) return true;
-
-    // 1. Identificar os 3 IDs principais
-    RE::FormID actorID = actor->GetFormID();
-    RE::FormID baseID = baseNPC->GetFormID();
-
-    // Acessa o baseTemplateForm (TPLT) definido em TESActorBaseData
-    RE::TESForm* baseTemplate = actor->GetTemplateBase();
-    RE::FormID templateID = baseTemplate ? baseTemplate->GetFormID() : 0;
-	logger::debug("IDs para verificação - ActorID: {:08X}, BaseID: {:08X}, TemplateID: {:08X}", actorID, baseID, templateID);
-    // 2. Busca "em massa": Se qualquer um dos IDs estiver no banco, o ator é afetado
-    if (_affectedNPCsDatabase.contains(actorID)) return true;
-    if (_affectedNPCsDatabase.contains(baseID)) return true;
-
-    if (templateID != 0 && _affectedNPCsDatabase.contains(templateID)) {
-        logger::debug("NPC {} identificado via Template: {:08X}", baseNPC->GetName(), templateID);
-        return true;
-    }
-
-    return false;
+    const auto candidates = GetCandidateRuleIDs(
+        actor, RuleEvaluationDelta::Full());
+    return std::ranges::any_of(candidates, [&](const std::string& a_ruleID) {
+        const auto* rule = FindRule(a_ruleID);
+        return rule && rule->isEnabled;
+    });
 }
 
 bool IsNPCInLeveledList(RE::TESNPC* a_npc, RE::TESLevCharacter* a_levList) {
@@ -1101,6 +1128,7 @@ void RuleManager::LoadRules() {
     if (!RulePackageStore::GetSingleton()->Load(_rules, _ruleHistories, _ruleOwners)) {
         logger::error("Rules were only partially loaded because one or more packages failed.");
     }
+    RebuildDependencyIndex();
 }
 
 std::string GenerateRuleUUID() {
@@ -1148,6 +1176,22 @@ const std::vector<RulePackage>& RuleManager::GetPackages() const {
     return RulePackageStore::GetSingleton()->GetPackages();
 }
 
+Rule* RuleManager::FindRule(const std::string& ruleID) {
+    const auto found = _ruleIndices.find(ruleID);
+    if (found == _ruleIndices.end() || found->second >= _rules.size()) {
+        return nullptr;
+    }
+    return std::addressof(_rules[found->second]);
+}
+
+const Rule* RuleManager::FindRule(const std::string& ruleID) const {
+    const auto found = _ruleIndices.find(ruleID);
+    if (found == _ruleIndices.end() || found->second >= _rules.size()) {
+        return nullptr;
+    }
+    return std::addressof(_rules[found->second]);
+}
+
 std::optional<std::string> RuleManager::CreatePackage(const std::string_view displayName) {
     return RulePackageStore::GetSingleton()->CreatePackage(displayName);
 }
@@ -1167,6 +1211,7 @@ Rule& RuleManager::CreateRule(const std::string_view packageID) {
     rule.level = 1;
     _rules.push_back(rule);
     _ruleOwners[rule.id] = rule.packageID;
+    RebuildDependencyIndex();
     return _rules.back();
 }
 
@@ -1185,6 +1230,7 @@ bool RuleManager::DeleteRule(const std::string& id) {
     _ruleHistories.erase(id);
     _ruleOwners.erase(id);
     _rules.erase(found);
+    RebuildDependencyIndex();
     logger::info("Rule '{}' deleted.", id);
     return true;
 }
@@ -1405,33 +1451,612 @@ std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, cons
 }
 
 
-void RuleManager::InitializeAffectedNPCsDatabase() {
-    _affectedNPCsDatabase.clear();
-    auto& rules = GetRules();
-    _hasActorDependentRules = std::ranges::any_of(rules, [](const Rule& rule) {
-        return rule.isEnabled && HasActorDependentFilters(rule);
-    });
-    auto npcList = Manager::GetSingleton()->GetList("NPC");
+void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
+{
+    _affectedNPCsDatabaseValid = false;
+    _ruleIndices.clear();
+    _rulesByDependency.clear();
+    _rulesByExactDependency.clear();
+    _rulesWithUnresolvedDependency.clear();
+    _ruleDependencyMasks.clear();
+    _broadFullEvaluationRules.clear();
+    _unstableCycleRules.clear();
 
-    logger::info("--- Iniciando Inicialização do Database de NPCs Afetados ---");
+    constexpr std::array dependencyBits{
+        RuleDependency::kStatic,
+        RuleDependency::kTag,
+        RuleDependency::kFactionRank,
+        RuleDependency::kAbility,
+        RuleDependency::kInventory,
+        RuleDependency::kEnvironment,
+        RuleDependency::kLevel,
+        RuleDependency::kSleep
+    };
 
-    for (const auto& npcInfo : npcList) {
-        auto npc = RE::TESForm::LookupByID<RE::TESNPC>(npcInfo.formID);
-        if (!npc) continue;
-
-        AffectedNPC affectedInfo;
-        for (const auto& rule : rules) {
-            if (!rule.isEnabled) continue;
-            // Verifica se o NPC passa nos filtros de Target e não está na Blacklist
-            if (IsNPCMatchingTargets(npc, rule, false) && !IsNPCMatchingTargets(npc, rule, true)) {
-                affectedInfo.ruleIDs.push_back(rule.id);
-            }
-        }
-
-        if (!affectedInfo.ruleIDs.empty()) {
-            _affectedNPCsDatabase[npcInfo.formID] = affectedInfo;
+    _ruleIndices.reserve(_rules.size());
+    for (std::size_t index = 0; index < _rules.size(); ++index) {
+        const auto& ruleID = _rules[index].id;
+        if (!_ruleIndices.emplace(ruleID, index).second) {
+            logger::error(
+                "[RuleIndex] Duplicate rule ID '{}' found while rebuilding the runtime index; "
+                "the first deterministic occurrence remains authoritative.",
+                ruleID);
         }
     }
 
-    logger::info("--- Inicialização Concluída. Total de NPCs no Database: {} ---", _affectedNPCsDatabase.size());
+    const auto addDependency = [&](const Rule& a_rule, RuleDependencyMask a_mask) {
+        for (const auto dependency : dependencyBits) {
+            const auto bit = ToMask(dependency);
+            if ((a_mask & bit) != 0) {
+                _rulesByDependency[bit].insert(a_rule.id);
+            }
+        }
+    };
+
+    const auto addFilter = [&](const Rule& a_rule, const BlacklistFilter& a_filter) {
+        const auto dependency = GetFilterDependencyMask(a_filter.type);
+        addDependency(a_rule, dependency);
+        const auto formID = ResolveEDFFormID(
+            a_filter.type, a_filter.editorID, a_filter.formIDStr);
+        if (formID != 0) {
+            _rulesByExactDependency[dependency][formID].insert(a_rule.id);
+        } else {
+            _rulesWithUnresolvedDependency[dependency].insert(a_rule.id);
+        }
+        return dependency;
+    };
+
+    for (const auto& rule : _rules) {
+        RuleDependencyMask mask = ToMask(RuleDependency::kLevel);
+        if (rule.targetFilters.empty()) {
+            _broadFullEvaluationRules.insert(rule.id);
+        }
+        const bool hasBaseConstraints =
+            rule.targetGender != 0 || rule.targetHumanoid != 0 ||
+            rule.targetChild != 0 || rule.blacklistedGender != 0 ||
+            rule.blacklistedHumanoid != 0 || rule.blacklistedChild != 0;
+        if (hasBaseConstraints ||
+            (rule.targetFilters.empty() && rule.blacklistFilters.empty())) {
+            mask |= ToMask(RuleDependency::kStatic);
+            addDependency(rule, ToMask(RuleDependency::kStatic));
+        }
+
+        for (const auto& filter : rule.targetFilters) {
+            mask |= addFilter(rule, filter);
+            if (filter.type == "Gold" || filter.type == "Leveled NPC" ||
+                ResolveEDFFormID(
+                    filter.type, filter.editorID, filter.formIDStr) == 0) {
+                _broadFullEvaluationRules.insert(rule.id);
+            }
+        }
+        for (const auto& filter : rule.blacklistFilters) {
+            mask |= addFilter(rule, filter);
+        }
+        for (const auto& group : rule.rewardGroups) {
+            for (const auto& reward : group.rewards) {
+                if ((reward.typeReward == "Outfit" ||
+                    reward.typeReward == "Spell") &&
+                    (reward.functionOnType == 1 ||
+                    reward.functionOnType == 2)) {
+                    mask |= ToMask(RuleDependency::kSleep);
+                    addDependency(rule, ToMask(RuleDependency::kSleep));
+                }
+            }
+        }
+
+        addDependency(rule, ToMask(RuleDependency::kLevel));
+        _ruleDependencyMasks[rule.id] = mask;
+    }
+
+    std::map<std::string, std::set<std::string>> dependencyGraph;
+    std::set<std::pair<std::string, std::string>> negativeEdges;
+    for (const auto& producer : _rules) {
+        for (const auto& group : producer.rewardGroups) {
+            for (const auto& reward : group.rewards) {
+                const auto producedMask =
+                    GetRewardDependencyMask(reward.typeReward);
+                const auto [plugin, formID] = reward.ParseFormID();
+                if (producedMask == ToMask(RuleDependency::kNone) ||
+                    formID == 0) {
+                    continue;
+                }
+                for (const auto dependency : dependencyBits) {
+                    const auto bit = ToMask(dependency);
+                    if ((producedMask & bit) == 0) {
+                        continue;
+                    }
+                    const auto byDependency =
+                        _rulesByExactDependency.find(bit);
+                    if (byDependency == _rulesByExactDependency.end()) {
+                        continue;
+                    }
+                    if (const auto consumers =
+                            byDependency->second.find(formID);
+                        consumers != byDependency->second.end()) {
+                        dependencyGraph[producer.id].insert(
+                            consumers->second.begin(), consumers->second.end());
+                        for (const auto& consumerID : consumers->second) {
+                            const auto* consumer = FindRule(consumerID);
+                            if (!consumer) {
+                                continue;
+                            }
+                            const bool isNegative = std::ranges::any_of(
+                                consumer->blacklistFilters,
+                                [&](const BlacklistFilter& a_filter) {
+                                    return (GetFilterDependencyMask(a_filter.type) &
+                                                bit) != 0 &&
+                                        ResolveEDFFormID(
+                                            a_filter.type,
+                                            a_filter.editorID,
+                                            a_filter.formIDStr) == formID;
+                                });
+                            if (isNegative) {
+                                negativeEdges.emplace(producer.id, consumerID);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::map<std::string, std::uint8_t> visitState;
+    std::vector<std::string> visitStack;
+    std::set<std::pair<std::string, std::string>> reportedCycles;
+    std::function<void(const std::string&)> visit =
+        [&](const std::string& a_ruleID) {
+            visitState[a_ruleID] = 1;
+            visitStack.push_back(a_ruleID);
+            if (const auto edges = dependencyGraph.find(a_ruleID);
+                edges != dependencyGraph.end()) {
+                for (const auto& next : edges->second) {
+                    if (visitState[next] == 0) {
+                        visit(next);
+                    } else if (visitState[next] == 1 &&
+                        reportedCycles.emplace(a_ruleID, next).second) {
+                        logger::warn(
+                            "[RuleIndex] Potential nested-rule cycle: '{}' -> '{}'. "
+                            "Runtime state-signature protection is enabled.",
+                            a_ruleID, next);
+                    }
+                }
+            }
+            visitStack.pop_back();
+            visitState[a_ruleID] = 2;
+        };
+    for (const auto& [ruleID, edges] : dependencyGraph) {
+        if (visitState[ruleID] == 0) {
+            visit(ruleID);
+        }
+    }
+
+    std::map<std::string, int> tarjanIndex;
+    std::map<std::string, int> tarjanLowLink;
+    std::set<std::string> tarjanOnStack;
+    std::vector<std::string> tarjanStack;
+    int nextTarjanIndex = 0;
+    std::function<void(const std::string&)> findComponents =
+        [&](const std::string& a_ruleID) {
+            tarjanIndex[a_ruleID] = nextTarjanIndex;
+            tarjanLowLink[a_ruleID] = nextTarjanIndex;
+            ++nextTarjanIndex;
+            tarjanStack.push_back(a_ruleID);
+            tarjanOnStack.insert(a_ruleID);
+
+            if (const auto edges = dependencyGraph.find(a_ruleID);
+                edges != dependencyGraph.end()) {
+                for (const auto& next : edges->second) {
+                    if (!tarjanIndex.contains(next)) {
+                        findComponents(next);
+                        tarjanLowLink[a_ruleID] = std::min(
+                            tarjanLowLink[a_ruleID], tarjanLowLink[next]);
+                    } else if (tarjanOnStack.contains(next)) {
+                        tarjanLowLink[a_ruleID] = std::min(
+                            tarjanLowLink[a_ruleID], tarjanIndex[next]);
+                    }
+                }
+            }
+
+            if (tarjanLowLink[a_ruleID] != tarjanIndex[a_ruleID]) {
+                return;
+            }
+
+            std::set<std::string> component;
+            while (!tarjanStack.empty()) {
+                auto member = std::move(tarjanStack.back());
+                tarjanStack.pop_back();
+                tarjanOnStack.erase(member);
+                component.insert(member);
+                if (member == a_ruleID) {
+                    break;
+                }
+            }
+
+            const bool hasNegativeInternalEdge = std::ranges::any_of(
+                negativeEdges,
+                [&](const auto& a_edge) {
+                    return component.contains(a_edge.first) &&
+                        component.contains(a_edge.second);
+                });
+            if (hasNegativeInternalEdge) {
+                _unstableCycleRules.insert(
+                    component.begin(), component.end());
+                logger::error(
+                    "[RuleIndex] Unstable nested-rule component disabled: {}. "
+                    "It contains a reward-to-blacklist cycle.",
+                    fmt::join(component, ", "));
+            }
+        };
+
+    std::set<std::string> graphVertices;
+    for (const auto& [ruleID, edges] : dependencyGraph) {
+        graphVertices.insert(ruleID);
+        graphVertices.insert(edges.begin(), edges.end());
+    }
+    for (const auto& ruleID : graphVertices) {
+        if (!tarjanIndex.contains(ruleID)) {
+            findComponents(ruleID);
+        }
+    }
+
+    if (invalidateActorSnapshots) {
+        ++_dependencyRevision;
+    }
+    logger::info("[RuleIndex] Compiled {} rules at revision {}.",
+        _rules.size(), _dependencyRevision);
+}
+
+std::vector<std::string> RuleManager::GetCandidateRuleIDs(
+    const RuleEvaluationDelta& a_delta) const
+{
+    if (a_delta.IsFull()) {
+        std::vector<std::string> all;
+        all.reserve(_rules.size());
+        for (const auto& rule : _rules) {
+            all.push_back(rule.id);
+        }
+        return all;
+    }
+
+    std::set<std::string> candidates;
+    constexpr std::array dependencyBits{
+        RuleDependency::kStatic,
+        RuleDependency::kTag,
+        RuleDependency::kFactionRank,
+        RuleDependency::kAbility,
+        RuleDependency::kInventory,
+        RuleDependency::kEnvironment,
+        RuleDependency::kLevel,
+        RuleDependency::kSleep
+    };
+
+    for (const auto dependency : dependencyBits) {
+        const auto bit = ToMask(dependency);
+        if ((a_delta.mask & bit) == 0) {
+            continue;
+        }
+
+        if (a_delta.changedForms.empty()) {
+            if (const auto found = _rulesByDependency.find(bit);
+                found != _rulesByDependency.end()) {
+                candidates.insert(found->second.begin(), found->second.end());
+            }
+            continue;
+        }
+
+        if (const auto unresolved =
+                _rulesWithUnresolvedDependency.find(bit);
+            unresolved != _rulesWithUnresolvedDependency.end()) {
+            candidates.insert(unresolved->second.begin(), unresolved->second.end());
+        }
+        if (const auto exactByForm =
+                _rulesByExactDependency.find(bit);
+            exactByForm != _rulesByExactDependency.end()) {
+            for (const auto formID : a_delta.changedForms) {
+                if (const auto exact = exactByForm->second.find(formID);
+                    exact != exactByForm->second.end()) {
+                    candidates.insert(exact->second.begin(), exact->second.end());
+                }
+            }
+        }
+    }
+
+    return { candidates.begin(), candidates.end() };
+}
+
+std::vector<std::string> RuleManager::GetCandidateRuleIDs(
+    RE::Actor* a_actor,
+    const RuleEvaluationDelta& a_delta) const
+{
+    if (!a_actor || !a_delta.IsFull()) {
+        return GetCandidateRuleIDs(a_delta);
+    }
+
+    auto npc = a_actor->GetActorBase();
+    if (!npc) {
+        return {};
+    }
+
+    std::set<std::string> candidates(
+        _broadFullEvaluationRules.begin(),
+        _broadFullEvaluationRules.end());
+    std::set<RE::FormID> baseForms{
+        a_actor->GetFormID(),
+        npc->GetFormID()
+    };
+    const auto addForm = [&baseForms](const RE::TESForm* a_form) {
+        if (a_form) {
+            baseForms.insert(a_form->GetFormID());
+        }
+    };
+    addForm(a_actor->GetTemplateBase());
+    addForm(npc->baseTemplateForm);
+    addForm(npc->race);
+    addForm(npc->npcClass);
+    addForm(npc->voiceType);
+    addForm(npc->combatStyle);
+    addForm(npc->skin);
+    for (auto* package : npc->aiPackages.packages) {
+        addForm(package);
+    }
+    if (npc->headParts && npc->numHeadParts > 0) {
+        for (std::int8_t index = 0; index < npc->numHeadParts; ++index) {
+            addForm(npc->headParts[index]);
+        }
+    }
+
+    auto inventory = a_actor->GetInventory();
+    std::set<RE::FormID> inventoryForms;
+    for (const auto& [item, data] : inventory) {
+        if (item && data.first > 0) {
+            inventoryForms.insert(item->GetFormID());
+        }
+    }
+    if (auto equipped = a_actor->GetEquippedObject(false)) {
+        inventoryForms.insert(equipped->GetFormID());
+    }
+    if (auto equipped = a_actor->GetEquippedObject(true)) {
+        inventoryForms.insert(equipped->GetFormID());
+    }
+
+    const auto append = [&candidates](
+        const std::set<std::string>& a_rules) {
+        candidates.insert(a_rules.begin(), a_rules.end());
+    };
+    const auto appendExactForms = [&](RuleDependency a_dependency,
+        const std::set<RE::FormID>& a_forms) {
+        const auto dependency = ToMask(a_dependency);
+        const auto byDependency = _rulesByExactDependency.find(dependency);
+        if (byDependency == _rulesByExactDependency.end()) {
+            return;
+        }
+        for (const auto formID : a_forms) {
+            if (const auto found = byDependency->second.find(formID);
+                found != byDependency->second.end()) {
+                append(found->second);
+            }
+        }
+    };
+
+    appendExactForms(RuleDependency::kStatic, baseForms);
+    appendExactForms(RuleDependency::kInventory, inventoryForms);
+
+    const auto appendMatchingExact = [&](RuleDependency a_dependency,
+        const auto& a_matches) {
+        const auto dependency = ToMask(a_dependency);
+        const auto byDependency = _rulesByExactDependency.find(dependency);
+        if (byDependency == _rulesByExactDependency.end()) {
+            return;
+        }
+        for (const auto& [formID, rules] : byDependency->second) {
+            if (a_matches(formID)) {
+                append(rules);
+            }
+        }
+    };
+
+    appendMatchingExact(RuleDependency::kTag, [&](RE::FormID a_formID) {
+        if (auto keyword = RE::TESForm::LookupByID<RE::BGSKeyword>(a_formID)) {
+            if (npc->HasKeyword(keyword) ||
+                SaveStateManager::GetSingleton()->HasVirtualKeyword(
+                    a_actor, keyword)) {
+                return true;
+            }
+            bool raceMatch = false;
+            if (npc->race) {
+                npc->race->ForEachKeyword(
+                    [&](const RE::BGSKeyword* a_keyword) {
+                        if (a_keyword == keyword) {
+                            raceMatch = true;
+                            return RE::BSContainer::ForEachResult::kStop;
+                        }
+                        return RE::BSContainer::ForEachResult::kContinue;
+                    });
+            }
+            return raceMatch;
+        }
+        if (auto faction = RE::TESForm::LookupByID<RE::TESFaction>(a_formID)) {
+            return a_actor->IsInFaction(faction) || npc->IsInFaction(faction);
+        }
+        return false;
+    });
+
+    appendMatchingExact(
+        RuleDependency::kFactionRank,
+        [&](RE::FormID a_formID) {
+            auto faction = RE::TESForm::LookupByID<RE::TESFaction>(a_formID);
+            return faction && a_actor->IsInFaction(faction);
+        });
+
+    appendMatchingExact(RuleDependency::kAbility, [&](RE::FormID a_formID) {
+        if (auto perk = RE::TESForm::LookupByID<RE::BGSPerk>(a_formID)) {
+            return a_actor->HasPerk(perk);
+        }
+        if (auto spell = RE::TESForm::LookupByID<RE::SpellItem>(a_formID)) {
+            return a_actor->HasSpell(spell);
+        }
+        if (auto shout = RE::TESForm::LookupByID<RE::TESShout>(a_formID)) {
+            return a_actor->HasShout(shout);
+        }
+        return false;
+    });
+
+    appendMatchingExact(
+        RuleDependency::kEnvironment,
+        [&](RE::FormID a_formID) {
+            if (auto cell = RE::TESForm::LookupByID<RE::TESObjectCELL>(a_formID)) {
+                return a_actor->GetParentCell() == cell;
+            }
+            if (auto location =
+                    RE::TESForm::LookupByID<RE::BGSLocation>(a_formID)) {
+                auto current = a_actor->GetCurrentLocation();
+                return current &&
+                    (current == location || current->IsParent(location));
+            }
+            return false;
+        });
+
+    return { candidates.begin(), candidates.end() };
+}
+
+RuleDependencyMask RuleManager::GetRuleDependencyMask(
+    const std::string_view a_ruleID) const
+{
+    const auto found = _ruleDependencyMasks.find(std::string(a_ruleID));
+    return found != _ruleDependencyMasks.end()
+        ? found->second
+        : ToMask(RuleDependency::kAll);
+}
+
+bool RuleManager::IsRuleInUnstableCycle(
+    const std::string_view a_ruleID) const
+{
+    return _unstableCycleRules.contains(std::string(a_ruleID));
+}
+
+RuleEvaluationDelta RuleManager::DetectBaseNPCChanges(RE::Actor* a_actor)
+{
+    RuleEvaluationDelta delta;
+    delta.mask = ToMask(RuleDependency::kNone);
+    if (!a_actor) {
+        return delta;
+    }
+
+    auto npc = a_actor->GetActorBase();
+    if (!npc) {
+        return delta;
+    }
+
+    std::uint64_t fingerprint = 1469598103934665603ULL;
+    const auto mix = [&fingerprint](std::uint64_t a_value) {
+        fingerprint ^= a_value;
+        fingerprint *= 1099511628211ULL;
+    };
+    const auto mixForm = [&mix](const RE::TESForm* a_form) {
+        mix(a_form ? a_form->GetFormID() : 0);
+    };
+
+    mix(npc->IsFemale() ? 1u : 0u);
+    mixForm(npc->race);
+    mixForm(npc->npcClass);
+    mixForm(npc->voiceType);
+    mixForm(npc->combatStyle);
+    mixForm(npc->skin);
+    mixForm(npc->baseTemplateForm);
+
+    for (auto* package : npc->aiPackages.packages) {
+        mixForm(package);
+    }
+    if (npc->headParts && npc->numHeadParts > 0) {
+        for (std::int8_t index = 0; index < npc->numHeadParts; ++index) {
+            mixForm(npc->headParts[index]);
+        }
+    }
+    npc->ForEachKeyword([&](const RE::BGSKeyword* a_keyword) {
+        mixForm(a_keyword);
+        return RE::BSContainer::ForEachResult::kContinue;
+    });
+    if (npc->race) {
+        npc->race->ForEachKeyword([&](const RE::BGSKeyword* a_keyword) {
+            mixForm(a_keyword);
+            return RE::BSContainer::ForEachResult::kContinue;
+        });
+    }
+
+    const auto baseID = npc->GetFormID();
+    const auto current = std::pair{ _dependencyRevision, fingerprint };
+    const auto found = _baseNPCFingerprints.find(baseID);
+    if (found == _baseNPCFingerprints.end()) {
+        _baseNPCFingerprints.emplace(baseID, current);
+        delta.mask = ToMask(RuleDependency::kStatic) |
+            ToMask(RuleDependency::kTag);
+        return delta;
+    }
+    if (found->second == current) {
+        return delta;
+    }
+
+    found->second = current;
+    delta.mask = ToMask(RuleDependency::kStatic) |
+        ToMask(RuleDependency::kTag);
+    logger::info(
+        "[RuleSnapshot] Base NPC '{}' ({:08X}) changed; static/tag candidates invalidated.",
+        npc->GetName(), baseID);
+    return delta;
+}
+
+void RuleManager::ResetRuntimeCaches()
+{
+    _baseNPCFingerprints.clear();
+}
+
+const std::map<RE::FormID, AffectedNPC>&
+RuleManager::GetAffectedNPCsDatabase()
+{
+    if (_affectedNPCsDatabaseValid) {
+        return _affectedNPCsDatabase;
+    }
+
+    _affectedNPCsDatabase.clear();
+    const auto& npcList = Manager::GetSingleton()->GetList("NPC");
+    for (const auto& npcInfo : npcList) {
+        auto npc = RE::TESForm::LookupByID<RE::TESNPC>(npcInfo.formID);
+        if (!npc) {
+            continue;
+        }
+
+        AffectedNPC affectedInfo;
+        for (const auto& rule : _rules) {
+            if (!rule.isEnabled || HasActorDependentFilters(rule)) {
+                continue;
+            }
+            if (IsNPCMatchingTargets(npc, rule, false) &&
+                !IsNPCMatchingTargets(npc, rule, true)) {
+                affectedInfo.ruleIDs.push_back(rule.id);
+            }
+        }
+        if (!affectedInfo.ruleIDs.empty()) {
+            affectedInfo.npcFormID = npcInfo.formID;
+            affectedInfo.npcName = npcInfo.name;
+            _affectedNPCsDatabase.emplace(
+                npcInfo.formID, std::move(affectedInfo));
+        }
+    }
+    _affectedNPCsDatabaseValid = true;
+    logger::info(
+        "[RuleIndex] UI affected-NPC preview built lazily with {} entries.",
+        _affectedNPCsDatabase.size());
+    return _affectedNPCsDatabase;
+}
+
+void RuleManager::InitializeAffectedNPCsDatabase() {
+    _affectedNPCsDatabase.clear();
+    _affectedNPCsDatabaseValid = false;
+    auto& rules = GetRules();
+    RebuildDependencyIndex();
+    _hasActorDependentRules = std::ranges::any_of(rules, [](const Rule& rule) {
+        return rule.isEnabled && HasActorDependentFilters(rule);
+    });
+    logger::info(
+        "[RuleIndex] Runtime dependency index ready; affected-NPC preview deferred until UI access.");
 }

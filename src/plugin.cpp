@@ -119,7 +119,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
 
 
     if (message->type == SKSE::MessagingInterface::kNewGame) {
-        logger::info("[Plugin] New Game detectado. Inicializando contexto padrão.");
+        logger::info("[Plugin] New Game detectado. Inicializando contexto padrão");
         // CharID 0 e Save 0 representam uma sessão nova sem persistência de disco ainda.
         SaveStateManager::GetSingleton()->SetCurrentContext(0, 0);
 

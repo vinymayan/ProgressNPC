@@ -77,11 +77,24 @@ public:
     void AuditPersistentItems(RE::Actor* a_actor);
     void RefreshPersistentItemsForLoadedActors();
     void HandleContainerChanged(const RE::TESContainerChangedEvent* a_event);
-    bool AddVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword);
-    bool RemoveVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword);
+    bool AddVirtualKeyword(
+        RE::Actor* a_actor,
+        RE::BGSKeyword* a_keyword,
+        std::string_view a_owner = "legacy");
+    bool RemoveVirtualKeyword(
+        RE::Actor* a_actor,
+        RE::BGSKeyword* a_keyword,
+        std::string_view a_owner = "legacy");
     bool HasVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword) const;
-    bool AddManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_faction, int a_rank);
-    bool RemoveManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_faction);
+    bool AddManagedFaction(
+        RE::Actor* a_actor,
+        RE::TESFaction* a_faction,
+        int a_rank,
+        std::string_view a_owner = "legacy");
+    bool RemoveManagedFaction(
+        RE::Actor* a_actor,
+        RE::TESFaction* a_faction,
+        std::string_view a_owner = "legacy");
     static std::string BuildFormKey(RE::TESForm* a_form);
 
     CurrentSaveContext& GetCurrentContext() { return _currentContext; }
@@ -91,6 +104,12 @@ private:
     std::map<uint32_t, std::vector<SaveHistoryEntry>> _characterHistory; // Cache em memória
     CurrentSaveContext _currentContext;
     SaveHistoryEntry _sessionData;
+    std::map<std::string, std::map<std::string, std::set<std::string>>> _virtualKeywordOwners;
+    std::set<std::string> _virtualKeywordOwnersReady;
+    std::map<std::string, std::map<std::string, std::map<std::string, int>>> _managedFactionOwners;
+    std::set<std::string> _managedFactionOwnersReady;
+    void EnsureVirtualKeywordOwners(RE::Actor* a_actor);
+    void EnsureManagedFactionOwners(RE::Actor* a_actor);
 };
 
 enum class OutfitConversionMode : int {
@@ -172,7 +191,13 @@ private:
 
 
 void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel = -1);
-void ScheduleRuleEvaluation(RE::Actor* a_actor);
+void ApplyRulesToInstance(
+    RE::Actor* a_actor,
+    const RuleEvaluationDelta& a_delta,
+    int a_forcedLevel = -1);
+void ScheduleRuleEvaluation(
+    RE::Actor* a_actor,
+    RuleEvaluationDelta a_delta = RuleEvaluationDelta::Full());
 void ForgetRuleEvaluationRuntimeState(RE::FormID a_actorID);
 void ResetRuleEvaluationRuntimeState();
 
@@ -264,12 +289,14 @@ public:
         RE::BSTEventSource<RE::TESContainerChangedEvent>*) override {
         SaveStateManager::GetSingleton()->HandleContainerChanged(a_event);
         if (a_event) {
+            auto delta = RuleEvaluationDelta::For(
+                RuleDependency::kInventory, a_event->baseObj);
             if (auto oldOwner = RE::TESForm::LookupByID<RE::Actor>(a_event->oldContainer)) {
-                ScheduleRuleEvaluation(oldOwner);
+                ScheduleRuleEvaluation(oldOwner, delta);
             }
             if (a_event->newContainer != a_event->oldContainer) {
                 if (auto newOwner = RE::TESForm::LookupByID<RE::Actor>(a_event->newContainer)) {
-                    ScheduleRuleEvaluation(newOwner);
+                    ScheduleRuleEvaluation(newOwner, delta);
                 }
             }
         }
@@ -304,7 +331,10 @@ public:
         auto player = RE::PlayerCharacter::GetSingleton();
         if (player && !player->IsInCombat()) {
             //logger::debug("[LevelUp] Verificando regras para o Player.");
-            ApplyRulesToInstance(player, static_cast<int>(a_event->newLevel));
+            ApplyRulesToInstance(
+                player,
+                RuleEvaluationDelta::For(RuleDependency::kLevel),
+                static_cast<int>(a_event->newLevel));
         }
 
         // 2. Aplicar regras aos NPCs carregados (próximos)
@@ -320,7 +350,9 @@ public:
                     if (npc && npc != player && !npc->IsDead()) {
                         if (RuleManager::GetSingleton()->IsAffected(npc)) {
                             logger::debug("[LevelUp] NPC '{}' detectado com regras aplicáveis. Aplicando.", npc->GetName());
-                            ApplyRulesToInstance(npc);
+                            ScheduleRuleEvaluation(
+                                npc,
+                                RuleEvaluationDelta::For(RuleDependency::kLevel));
                         }
                     }
                 }
@@ -392,7 +424,9 @@ public:
         if (a_event && a_event->actor) {
             auto actor = const_cast<RE::Actor*>(a_event->actor->As<RE::Actor>());
             if (actor) {
-                ScheduleRuleEvaluation(actor);
+                ScheduleRuleEvaluation(
+                    actor,
+                    RuleEvaluationDelta::For(RuleDependency::kEnvironment));
             }
         }
         return RE::BSEventNotifyControl::kContinue;
@@ -415,14 +449,16 @@ public:
     RE::BSEventNotifyControl ProcessEvent(
         const RE::BGSActorCellEvent* a_event,
         RE::BSTEventSource<RE::BGSActorCellEvent>*) override {
-        if (!a_event || a_event->flags != RE::BGSActorCellEvent::CellFlag::kEnter) {
+        if (!a_event) {
             return RE::BSEventNotifyControl::kContinue;
         }
 
         auto actorPtr = a_event->actor.get();
         auto actor = actorPtr ? actorPtr.get() : nullptr;
         if (actor) {
-            ScheduleRuleEvaluation(actor);
+            ScheduleRuleEvaluation(
+                actor,
+                RuleEvaluationDelta::For(RuleDependency::kEnvironment));
         }
         return RE::BSEventNotifyControl::kContinue;
     }

@@ -252,11 +252,7 @@ namespace SPIDUI {
 
     Rule* GetActiveRule() {
         if (activeRuleID.empty()) return nullptr;
-        auto& rules = RuleManager::GetSingleton()->GetRules();
-        for (auto& r : rules) {
-            if (r.id == activeRuleID) return &r;
-        }
-        return nullptr;
+        return RuleManager::GetSingleton()->FindRule(activeRuleID);
     }
 
     const RulePackage* FindPackage(const std::string_view packageID)
@@ -1449,7 +1445,12 @@ namespace SPIDUI {
                 if (!rulePtr) continue;
                 auto& rule = *rulePtr;
                 const bool modified = rule.IsModified();
+                const bool unstableCycle =
+                    RuleManager::GetSingleton()->IsRuleInUnstableCycle(rule.id);
                 std::string label = rule.name;
+                if (unstableCycle) {
+                    label = "[CYCLE BLOCKED] " + label;
+                }
                 if (!rule.isEnabled) {
                     label = "[OFF] " + label;
                 }
@@ -1475,6 +1476,13 @@ namespace SPIDUI {
 
                 if (ImGuiMCP::CollapsingHeader(label.c_str())) {
                     if (stylePushed) ImGuiMCP::PopStyleColor(rule.isEnabled ? 1 : 2);
+                    if (unstableCycle) {
+                        ImGuiMCP::TextWrapped(
+                            GetLoc(
+                                "auto.unstable_nested_cycle",
+                                "This rule is part of a reward-to-blacklist cycle. "
+                                "Its runtime state is frozen to prevent oscillation."));
+                    }
                     RenderRuleEditor(rule);
                     if (ImGuiMCP::Button(
                             (std::string(GetLoc("auto.delete_rule", "Delete Rule")) +
@@ -1756,12 +1764,12 @@ namespace SPIDUI {
                 // Regras Salvas
                 if (hasSavedRules) {
                     for (const auto& ruleID : it->second.ruleIDs) {
-                        auto rIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
+                        const auto* savedRule = ruleManager->FindRule(ruleID);
                         // Só mostra se a regra não estiver na lista de preview (para não duplicar)
-                        if (rIt != allRules.end()) {
-                            bool beingModified = std::find(previewRules.begin(), previewRules.end(), rIt->name) != previewRules.end();
+                        if (savedRule) {
+                            bool beingModified = std::find(previewRules.begin(), previewRules.end(), savedRule->name) != previewRules.end();
                             if (!beingModified) {
-                                ruleSummary += "[" + (rIt->name.empty() ? ruleID : rIt->name) + "] ";
+                                ruleSummary += "[" + (savedRule->name.empty() ? ruleID : savedRule->name) + "] ";
                             }
                         }
                     }

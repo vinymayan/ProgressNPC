@@ -14,9 +14,11 @@ RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE:
     }
 
     if (eventName == "DynamicFormsGeneratorUpdated") {
-		logger::info("recived DynamicFormsGeneratorUpdated event with arg: {}", a_event->strArg.c_str());
+		logger::info("received DynamicFormsGeneratorUpdated event with arg: {}", a_event->strArg.c_str());
         Manager::GetSingleton()->RefreshLists(a_event->strArg.c_str());
-        RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
+        RuleManager::GetSingleton()->RebuildDependencyIndex(false);
+        logger::info(
+            "[DFG] EditorID and rule dependency indexes refreshed without scheduling actor evaluation.");
         return RE::BSEventNotifyControl::kContinue;
     }
 

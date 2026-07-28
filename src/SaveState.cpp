@@ -3,6 +3,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -13,8 +14,18 @@ static std::set<RE::FormID> g_actorsInProcess;
 
 namespace {
     std::mutex g_scheduledEvaluationsMutex;
-    std::map<RE::FormID, std::uint64_t> g_scheduledEvaluations;
+    struct PendingRuleEvaluation {
+        std::uint64_t token = 0;
+        RE::ActorHandle actorHandle;
+        RuleEvaluationDelta delta;
+    };
+    std::map<RE::FormID, PendingRuleEvaluation> g_scheduledEvaluations;
     std::atomic_uint64_t g_nextEvaluationToken{ 1 };
+    bool g_ruleEvaluationPumpScheduled = false;
+    std::uint64_t g_ruleEvaluationPumpGeneration = 1;
+    void ProcessScheduledRuleEvaluations(std::uint64_t a_generation);
+    thread_local RE::FormID g_activeEvaluationActor = 0;
+    thread_local RuleEvaluationDelta* g_activeProducedDelta = nullptr;
 
     struct PendingSleepUpdate {
         std::uint64_t token = 0;
@@ -46,6 +57,15 @@ namespace {
         append(std::to_string(a_reward.functionOnType));
         append(a_reward.isPersistent ? "1" : "0");
         return key;
+    }
+
+    std::string BuildRewardOwnerKey(
+        std::string_view a_ruleID,
+        const std::string& a_groupName,
+        const Reward& a_reward)
+    {
+        return std::string(a_ruleID) + kRewardStateDelimiter +
+            BuildRewardStateKey(a_groupName, a_reward);
     }
 
     bool ResolveRewardState(
@@ -217,9 +237,15 @@ namespace {
     }
 }
 
-void ScheduleRuleEvaluation(RE::Actor* a_actor)
+void ScheduleRuleEvaluation(RE::Actor* a_actor, RuleEvaluationDelta a_delta)
 {
     if (!a_actor) {
+        return;
+    }
+
+    const auto actorID = a_actor->GetFormID();
+    if (g_activeProducedDelta && g_activeEvaluationActor == actorID) {
+        g_activeProducedDelta->Merge(a_delta);
         return;
     }
 
@@ -230,7 +256,6 @@ void ScheduleRuleEvaluation(RE::Actor* a_actor)
         return;
     }
 
-    const auto actorID = a_actor->GetFormID();
     const auto actorHandle = a_actor->GetHandle();
     if (!actorHandle) {
         logger::debug("[RuleScheduler] Ator {:08X} não possui handle válido.", actorID);
@@ -238,39 +263,103 @@ void ScheduleRuleEvaluation(RE::Actor* a_actor)
     }
 
     const auto token = g_nextEvaluationToken.fetch_add(1, std::memory_order_relaxed);
+    bool startPump = false;
+    std::uint64_t pumpGeneration = 0;
     {
         std::lock_guard lock(g_scheduledEvaluationsMutex);
-        if (g_scheduledEvaluations.contains(actorID)) {
+        if (auto found = g_scheduledEvaluations.find(actorID);
+            found != g_scheduledEvaluations.end()) {
+            found->second.delta.Merge(a_delta);
             return;
         }
-        g_scheduledEvaluations.emplace(actorID, token);
+        g_scheduledEvaluations.emplace(
+            actorID,
+            PendingRuleEvaluation{ token, actorHandle, std::move(a_delta) });
+        if (!g_ruleEvaluationPumpScheduled) {
+            g_ruleEvaluationPumpScheduled = true;
+            startPump = true;
+            pumpGeneration = g_ruleEvaluationPumpGeneration;
+        }
     }
 
-    taskInterface->AddTask([actorHandle, actorID, token]() {
+    if (startPump) {
+        taskInterface->AddTask([pumpGeneration]() {
+            ProcessScheduledRuleEvaluations(pumpGeneration);
+        });
+    }
+}
+
+namespace {
+    void ProcessScheduledRuleEvaluations(std::uint64_t a_generation)
+    {
         {
             std::lock_guard lock(g_scheduledEvaluationsMutex);
-            const auto it = g_scheduledEvaluations.find(actorID);
-            if (it == g_scheduledEvaluations.end() || it->second != token) {
+            if (a_generation != g_ruleEvaluationPumpGeneration) {
                 return;
             }
-            g_scheduledEvaluations.erase(it);
+        }
+        constexpr auto kFrameBudget = std::chrono::microseconds(1500);
+        constexpr std::size_t kMaxActorsPerPump = 8;
+        const auto startedAt = std::chrono::steady_clock::now();
+        std::size_t processed = 0;
+
+        while (processed < kMaxActorsPerPump &&
+            std::chrono::steady_clock::now() - startedAt < kFrameBudget) {
+            RE::FormID actorID = 0;
+            PendingRuleEvaluation pending;
+            {
+                std::lock_guard lock(g_scheduledEvaluationsMutex);
+                if (g_scheduledEvaluations.empty()) {
+                    g_ruleEvaluationPumpScheduled = false;
+                    return;
+                }
+                auto next = g_scheduledEvaluations.begin();
+                actorID = next->first;
+                pending = std::move(next->second);
+                g_scheduledEvaluations.erase(next);
+            }
+
+            auto actorPtr = pending.actorHandle.get();
+            auto actor = actorPtr ? actorPtr.get() : nullptr;
+            if (actor && !actor->IsDead()) {
+                const auto& context =
+                    SaveStateManager::GetSingleton()->GetCurrentContext();
+                if (context.isValid &&
+                    !RuleManager::GetSingleton()->GetRules().empty()) {
+                    pending.delta.Merge(
+                        RuleManager::GetSingleton()->DetectBaseNPCChanges(actor));
+                    logger::debug(
+                        "[RuleScheduler] Reavaliando '{}' ({:08X}); mask={:X}, forms={}.",
+                        actor->GetName(), actorID, pending.delta.mask,
+                        pending.delta.changedForms.size());
+                    ApplyRulesToInstance(actor, pending.delta);
+                }
+            }
+            ++processed;
         }
 
-        auto actorPtr = actorHandle.get();
-        auto actor = actorPtr ? actorPtr.get() : nullptr;
-        if (!actor || actor->IsDead()) {
+        auto taskInterface = SKSE::GetTaskInterface();
+        if (!taskInterface) {
+            std::lock_guard lock(g_scheduledEvaluationsMutex);
+            g_scheduledEvaluations.clear();
+            g_ruleEvaluationPumpScheduled = false;
             return;
         }
 
-        const auto& context = SaveStateManager::GetSingleton()->GetCurrentContext();
-        if (!context.isValid || !RuleManager::GetSingleton()->IsAffected(actor)) {
-            return;
+        bool hasMore = false;
+        {
+            std::lock_guard lock(g_scheduledEvaluationsMutex);
+            hasMore = !g_scheduledEvaluations.empty();
+            if (!hasMore) {
+                g_ruleEvaluationPumpScheduled = false;
+            }
         }
-
-        logger::debug("[RuleScheduler] Reavaliando regras para '{}' ({:08X}) no thread principal.",
-            actor->GetName(), actorID);
-        ApplyRulesToInstance(actor);
-    });
+        if (hasMore) {
+            taskInterface->AddTask([a_generation]() {
+                ProcessScheduledRuleEvaluations(a_generation);
+            });
+        }
+    }
 }
 
 void ScheduleSleepOutfitUpdate(RE::Actor* a_actor, bool a_isEntering)
@@ -341,12 +430,15 @@ void ResetRuleEvaluationRuntimeState()
     {
         std::lock_guard lock(g_scheduledEvaluationsMutex);
         g_scheduledEvaluations.clear();
+        g_ruleEvaluationPumpScheduled = false;
+        ++g_ruleEvaluationPumpGeneration;
     }
     {
         std::lock_guard lock(g_sleepUpdatesMutex);
         g_sleepUpdates.clear();
         g_sleepEquippedItems.clear();
     }
+    RuleManager::GetSingleton()->ResetRuntimeCaches();
 }
 
 SaveStateManager* SaveStateManager::GetSingleton() {
@@ -369,6 +461,10 @@ std::vector<SaveHistoryEntry>& SaveStateManager::GetCharacterHistory(uint32_t ch
 void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) {
     logger::info("[SaveManager] Definindo contexto: CharID {:08X}, Save #{}", a_charID, a_saveNum);
     ResetRuleEvaluationRuntimeState();
+    _virtualKeywordOwners.clear();
+    _virtualKeywordOwnersReady.clear();
+    _managedFactionOwners.clear();
+    _managedFactionOwnersReady.clear();
 
     _currentContext.charID = a_charID;
     _currentContext.saveNumber = a_saveNum;
@@ -480,6 +576,10 @@ void SaveStateManager::ClearContext()
     _currentContext.saveNumber = 0;
     _currentContext.charID = 0;
     _sessionData = SaveHistoryEntry{};
+    _virtualKeywordOwners.clear();
+    _virtualKeywordOwnersReady.clear();
+    _managedFactionOwners.clear();
+    _managedFactionOwnersReady.clear();
 }
 
 std::string SaveStateManager::BuildNPCKey(RE::Actor* a_actor) {
@@ -644,7 +744,72 @@ void SaveStateManager::HandleContainerChanged(const RE::TESContainerChangedEvent
     applyTransfer(a_event->newContainer, true);
 }
 
-bool SaveStateManager::AddVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword)
+void SaveStateManager::EnsureVirtualKeywordOwners(RE::Actor* a_actor)
+{
+    if (!a_actor) {
+        return;
+    }
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    if (npcKey.empty() || !_virtualKeywordOwnersReady.insert(npcKey).second) {
+        return;
+    }
+
+    auto& ownersByKeyword = _virtualKeywordOwners[npcKey];
+    if (const auto npcRules = _sessionData.npcRuleVersions.find(npcKey);
+        npcRules != _sessionData.npcRuleVersions.end()) {
+        for (const auto& [ruleID, state] : npcRules->second) {
+            if (!state.isActive) {
+                continue;
+            }
+
+            const Rule* rule = RuleManager::GetSingleton()->GetRuleVersion(
+                ruleID, state.version);
+            if (!rule) {
+                const auto& currentRules = RuleManager::GetSingleton()->GetRules();
+                const auto current = std::ranges::find_if(
+                    currentRules,
+                    [&ruleID](const Rule& a_rule) { return a_rule.id == ruleID; });
+                if (current != currentRules.end()) {
+                    rule = std::addressof(*current);
+                }
+            }
+            if (!rule) {
+                continue;
+            }
+
+            for (const auto& rewardKey : state.activeRewardKeys) {
+                const RewardGroup* group = nullptr;
+                const Reward* reward = nullptr;
+                if (!ResolveRewardState(*rule, rewardKey, group, reward) ||
+                    !group || !reward || reward->typeReward != "Keyword") {
+                    continue;
+                }
+                const auto [plugin, formID] = reward->ParseFormID();
+                auto keyword = RE::TESForm::LookupByID<RE::BGSKeyword>(formID);
+                if (!keyword) {
+                    continue;
+                }
+                ownersByKeyword[BuildFormKey(keyword)].insert(
+                    BuildRewardOwnerKey(ruleID, group->name, *reward));
+            }
+        }
+    }
+
+    if (const auto effective = _sessionData.virtualKeywords.find(npcKey);
+        effective != _sessionData.virtualKeywords.end()) {
+        for (const auto& keywordKey : effective->second) {
+            if (ownersByKeyword[keywordKey].empty()) {
+                ownersByKeyword[keywordKey].insert("legacy");
+            }
+        }
+    }
+}
+
+bool SaveStateManager::AddVirtualKeyword(
+    RE::Actor* a_actor,
+    RE::BGSKeyword* a_keyword,
+    std::string_view a_owner)
 {
     if (!a_actor || !a_keyword) return false;
 
@@ -652,12 +817,18 @@ bool SaveStateManager::AddVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_k
     const auto keywordKey = BuildFormKey(a_keyword);
     if (npcKey.empty() || keywordKey.empty()) return false;
 
+    EnsureVirtualKeywordOwners(a_actor);
+    auto& owners = _virtualKeywordOwners[npcKey][keywordKey];
+    const auto ownerInserted = owners.insert(std::string(a_owner)).second;
     auto& keywords = _sessionData.virtualKeywords[npcKey];
     const auto [it, inserted] = keywords.insert(keywordKey);
     if (inserted) {
         logger::info("[TagDelta] Virtual keyword '{}' adicionada para '{}'", a_keyword->GetFormEditorID(), a_actor->GetName());
+        ScheduleRuleEvaluation(
+            a_actor,
+            RuleEvaluationDelta::For(RuleDependency::kTag, a_keyword->GetFormID()));
     }
-    return inserted;
+    return inserted || ownerInserted;
 }
 
 bool SaveStateManager::HasVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword) const
@@ -672,19 +843,109 @@ bool SaveStateManager::HasVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_k
     return npcIt != _sessionData.virtualKeywords.end() && npcIt->second.contains(keywordKey);
 }
 
-bool SaveStateManager::RemoveVirtualKeyword(RE::Actor* a_actor, RE::BGSKeyword* a_keyword)
+bool SaveStateManager::RemoveVirtualKeyword(
+    RE::Actor* a_actor,
+    RE::BGSKeyword* a_keyword,
+    std::string_view a_owner)
 {
     if (!a_actor || !a_keyword) return false;
 
     const auto npcKey = BuildNPCKey(a_actor);
     const auto keywordKey = BuildFormKey(a_keyword);
+    EnsureVirtualKeywordOwners(a_actor);
+    auto actorOwners = _virtualKeywordOwners.find(npcKey);
+    if (actorOwners != _virtualKeywordOwners.end()) {
+        auto keywordOwners = actorOwners->second.find(keywordKey);
+        if (keywordOwners != actorOwners->second.end()) {
+            keywordOwners->second.erase(std::string(a_owner));
+            if (!keywordOwners->second.empty()) {
+                return false;
+            }
+            actorOwners->second.erase(keywordOwners);
+        }
+    }
+
     auto npcIt = _sessionData.virtualKeywords.find(npcKey);
     if (npcIt == _sessionData.virtualKeywords.end()) return false;
 
-    return npcIt->second.erase(keywordKey) > 0;
+    const bool removed = npcIt->second.erase(keywordKey) > 0;
+    if (removed) {
+        logger::info("[TagDelta] Virtual keyword '{}' removida de '{}'",
+            a_keyword->GetFormEditorID(), a_actor->GetName());
+        ScheduleRuleEvaluation(
+            a_actor,
+            RuleEvaluationDelta::For(RuleDependency::kTag, a_keyword->GetFormID()));
+    }
+    return removed;
 }
 
-bool SaveStateManager::AddManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_faction, int a_rank)
+void SaveStateManager::EnsureManagedFactionOwners(RE::Actor* a_actor)
+{
+    if (!a_actor) {
+        return;
+    }
+
+    const auto npcKey = BuildNPCKey(a_actor);
+    if (npcKey.empty() || !_managedFactionOwnersReady.insert(npcKey).second) {
+        return;
+    }
+
+    auto& ownersByFaction = _managedFactionOwners[npcKey];
+    if (const auto npcRules = _sessionData.npcRuleVersions.find(npcKey);
+        npcRules != _sessionData.npcRuleVersions.end()) {
+        for (const auto& [ruleID, state] : npcRules->second) {
+            if (!state.isActive) {
+                continue;
+            }
+            const Rule* rule = RuleManager::GetSingleton()->GetRuleVersion(
+                ruleID, state.version);
+            if (!rule) {
+                const auto& currentRules = RuleManager::GetSingleton()->GetRules();
+                const auto current = std::ranges::find_if(
+                    currentRules,
+                    [&ruleID](const Rule& a_rule) { return a_rule.id == ruleID; });
+                if (current != currentRules.end()) {
+                    rule = std::addressof(*current);
+                }
+            }
+            if (!rule) {
+                continue;
+            }
+
+            for (const auto& rewardKey : state.activeRewardKeys) {
+                const RewardGroup* group = nullptr;
+                const Reward* reward = nullptr;
+                if (!ResolveRewardState(*rule, rewardKey, group, reward) ||
+                    !group || !reward || reward->typeReward != "Faction") {
+                    continue;
+                }
+                const auto [plugin, formID] = reward->ParseFormID();
+                auto faction = RE::TESForm::LookupByID<RE::TESFaction>(formID);
+                if (!faction) {
+                    continue;
+                }
+                ownersByFaction[BuildFormKey(faction)]
+                    [BuildRewardOwnerKey(ruleID, group->name, *reward)] =
+                    std::clamp(static_cast<int>(reward->amount), -128, 127);
+            }
+        }
+    }
+
+    if (const auto effective = _sessionData.addedFactions.find(npcKey);
+        effective != _sessionData.addedFactions.end()) {
+        for (const auto& [factionKey, rank] : effective->second) {
+            if (ownersByFaction[factionKey].empty()) {
+                ownersByFaction[factionKey]["legacy"] = rank;
+            }
+        }
+    }
+}
+
+bool SaveStateManager::AddManagedFaction(
+    RE::Actor* a_actor,
+    RE::TESFaction* a_faction,
+    int a_rank,
+    std::string_view a_owner)
 {
     if (!a_actor || !a_faction) return false;
 
@@ -692,7 +953,11 @@ bool SaveStateManager::AddManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_f
     const auto factionKey = BuildFormKey(a_faction);
     if (npcKey.empty() || factionKey.empty()) return false;
 
-    const auto rank = std::clamp(a_rank, -128, 127);
+    EnsureManagedFactionOwners(a_actor);
+    auto& owners = _managedFactionOwners[npcKey][factionKey];
+    owners[std::string(a_owner)] = std::clamp(a_rank, -128, 127);
+    const auto rank = std::ranges::max(
+        owners | std::views::values);
     auto& factions = _sessionData.addedFactions[npcKey];
     auto it = factions.find(factionKey);
     const bool changed = it == factions.end() || it->second != rank || !a_actor->IsInFaction(a_faction);
@@ -701,22 +966,53 @@ bool SaveStateManager::AddManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_f
         a_actor->AddToFaction(a_faction, static_cast<std::int8_t>(rank));
         factions[factionKey] = rank;
         logger::info("[TagDelta] Faction '{}' rank {} adicionada para '{}'", a_faction->GetFormEditorID(), rank, a_actor->GetName());
+        RuleEvaluationDelta delta;
+        delta.mask = ToMask(RuleDependency::kTag) |
+            ToMask(RuleDependency::kFactionRank);
+        delta.changedForms.insert(a_faction->GetFormID());
+        ScheduleRuleEvaluation(a_actor, std::move(delta));
     }
 
     return changed;
 }
 
-bool SaveStateManager::RemoveManagedFaction(RE::Actor* a_actor, RE::TESFaction* a_faction)
+bool SaveStateManager::RemoveManagedFaction(
+    RE::Actor* a_actor,
+    RE::TESFaction* a_faction,
+    std::string_view a_owner)
 {
     if (!a_actor || !a_faction) return false;
 
     const auto npcKey = BuildNPCKey(a_actor);
     const auto factionKey = BuildFormKey(a_faction);
+    EnsureManagedFactionOwners(a_actor);
+    if (auto actorOwners = _managedFactionOwners.find(npcKey);
+        actorOwners != _managedFactionOwners.end()) {
+        if (auto factionOwners = actorOwners->second.find(factionKey);
+            factionOwners != actorOwners->second.end()) {
+            factionOwners->second.erase(std::string(a_owner));
+            if (!factionOwners->second.empty()) {
+                const auto rank = std::ranges::max(
+                    factionOwners->second | std::views::values);
+                a_actor->AddToFaction(
+                    a_faction, static_cast<std::int8_t>(rank));
+                _sessionData.addedFactions[npcKey][factionKey] = rank;
+                return false;
+            }
+            actorOwners->second.erase(factionOwners);
+        }
+    }
+
     auto npcIt = _sessionData.addedFactions.find(npcKey);
     if (npcIt == _sessionData.addedFactions.end() || !npcIt->second.contains(factionKey)) return false;
 
     a_actor->RemoveFromFaction(a_faction);
     npcIt->second.erase(factionKey);
+    RuleEvaluationDelta delta;
+    delta.mask = ToMask(RuleDependency::kTag) |
+        ToMask(RuleDependency::kFactionRank);
+    delta.changedForms.insert(a_faction->GetFormID());
+    ScheduleRuleEvaluation(a_actor, std::move(delta));
     return true;
 }
 
@@ -1538,12 +1834,18 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
             }
             else if (reward.typeReward == "Keyword") {
                 if (auto keyword = rewardForm->As<RE::BGSKeyword>()) {
-                    SaveStateManager::GetSingleton()->RemoveVirtualKeyword(a_actor, keyword);
+                    SaveStateManager::GetSingleton()->RemoveVirtualKeyword(
+                        a_actor,
+                        keyword,
+                        BuildRewardOwnerKey(a_rule.id, group.name, reward));
                 }
             }
             else if (reward.typeReward == "Faction") {
                 if (auto faction = rewardForm->As<RE::TESFaction>()) {
-                    SaveStateManager::GetSingleton()->RemoveManagedFaction(a_actor, faction);
+                    SaveStateManager::GetSingleton()->RemoveManagedFaction(
+                        a_actor,
+                        faction,
+                        BuildRewardOwnerKey(a_rule.id, group.name, reward));
                 }
             }
             //else if (reward.typeReward == "Package") {
@@ -1592,40 +1894,78 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
                     RemoveManagedTemporaryItemOnInvalidation(a_actor, bound, reward.amount, a_rule.id, group.name);
                 }
             }
+
+            const auto dependencyMask =
+                GetRewardDependencyMask(reward.typeReward);
+            if (dependencyMask != ToMask(RuleDependency::kNone)) {
+                RuleEvaluationDelta delta;
+                delta.mask = dependencyMask;
+                delta.changedForms.insert(fID);
+                ScheduleRuleEvaluation(a_actor, std::move(delta));
+            }
         }
     }
     logger::debug("[LocationUpdate] Regra '{}' desaplicada de {}. Atributos nativos preservados.", a_rule.name, a_actor->GetName());
 }
 
-void ApplyRewardPhysical(RE::Actor* a_actor, const Reward& reward, bool isPlayer, std::vector<PendingEquip>& equipQueue) {
+void ApplyRewardPhysical(
+    RE::Actor* a_actor,
+    const Reward& reward,
+    bool isPlayer,
+    std::vector<PendingEquip>& equipQueue,
+    std::string_view a_ruleID,
+    const std::string& a_groupName) {
     auto [plugin, fID] = reward.ParseFormID();
     auto rewardForm = RE::TESForm::LookupByID(fID);
     if (!rewardForm) return;
 
     if (reward.typeReward == "Spell") {
         if (auto spell = rewardForm->As<RE::SpellItem>()) {
+            bool changed = false;
             if (reward.functionOnType == 0 || reward.functionOnType == 2) {
-                if (!a_actor->HasSpell(spell)) a_actor->AddSpell(spell);
+                if (!a_actor->HasSpell(spell)) {
+                    a_actor->AddSpell(spell);
+                    changed = true;
+                }
             }
             if (reward.functionOnType == 1 || reward.functionOnType == 2) {
                 auto caster = a_actor->GetMagicCaster(RE::MagicSystem::CastingSource::kInstant);
                 if (caster) caster->CastSpellImmediate(spell, false, a_actor, 1.0f, false, 0.0f, a_actor);
             }
+            if (changed) {
+                ScheduleRuleEvaluation(
+                    a_actor,
+                    RuleEvaluationDelta::For(
+                        RuleDependency::kAbility, spell->GetFormID()));
+            }
         }
     }
     else if (reward.typeReward == "Shout") {
         if (auto shout = rewardForm->As<RE::TESShout>()) {
-            if (!a_actor->HasShout(shout)) a_actor->AddShout(shout);
+            if (!a_actor->HasShout(shout)) {
+                a_actor->AddShout(shout);
+                ScheduleRuleEvaluation(
+                    a_actor,
+                    RuleEvaluationDelta::For(
+                        RuleDependency::kAbility, shout->GetFormID()));
+            }
         }
     }
     else if (reward.typeReward == "Keyword") {
         if (auto keyword = rewardForm->As<RE::BGSKeyword>()) {
-            SaveStateManager::GetSingleton()->AddVirtualKeyword(a_actor, keyword);
+            SaveStateManager::GetSingleton()->AddVirtualKeyword(
+                a_actor,
+                keyword,
+                BuildRewardOwnerKey(a_ruleID, a_groupName, reward));
         }
     }
     else if (reward.typeReward == "Faction") {
         if (auto faction = rewardForm->As<RE::TESFaction>()) {
-            SaveStateManager::GetSingleton()->AddManagedFaction(a_actor, faction, static_cast<int>(reward.amount));
+            SaveStateManager::GetSingleton()->AddManagedFaction(
+                a_actor,
+                faction,
+                static_cast<int>(reward.amount),
+                BuildRewardOwnerKey(a_ruleID, a_groupName, reward));
         }
     }
     else if (reward.typeReward == "Outfit") {
@@ -1634,6 +1974,10 @@ void ApplyRewardPhysical(RE::Actor* a_actor, const Reward& reward, bool isPlayer
             for (auto* form : outfit->outfitItems) {
                 if (auto* bound = form->As<RE::TESBoundObject>()) {
                     a_actor->AddObjectToContainer(bound, nullptr, 1, nullptr);
+                    ScheduleRuleEvaluation(
+                        a_actor,
+                        RuleEvaluationDelta::For(
+                            RuleDependency::kInventory, bound->GetFormID()));
                     // Só adicionamos à fila de equipagem imediata se o traje permitir
                     // uso padrão (Standard ou Both)
                     if (!isPlayer && (reward.functionOnType == 0 || reward.functionOnType == 2)) {
@@ -1644,12 +1988,24 @@ void ApplyRewardPhysical(RE::Actor* a_actor, const Reward& reward, bool isPlayer
         }
     }
     else if (reward.typeReward == "Perk") {
-        if (auto perk = rewardForm->As<RE::BGSPerk>()) { if (!a_actor->HasPerk(perk)) a_actor->AddPerk(perk, 1); }
+        if (auto perk = rewardForm->As<RE::BGSPerk>()) {
+            if (!a_actor->HasPerk(perk)) {
+                a_actor->AddPerk(perk, 1);
+                ScheduleRuleEvaluation(
+                    a_actor,
+                    RuleEvaluationDelta::For(
+                        RuleDependency::kAbility, perk->GetFormID()));
+            }
+        }
     }
     else {
         // Itens físicos (Weapon, Armor, etc)
         if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
             a_actor->AddObjectToContainer(bound, nullptr, reward.amount, nullptr);
+            ScheduleRuleEvaluation(
+                a_actor,
+                RuleEvaluationDelta::For(
+                    RuleDependency::kInventory, bound->GetFormID()));
             if (!isPlayer && (reward.typeReward == "Weapon" || reward.typeReward == "Armor" || reward.typeReward == "Ammo")) {
                 equipQueue.push_back({ bound, 1 });
             }
@@ -1768,7 +2124,8 @@ void RestorePersistentRewardIfNeeded(RE::Actor* a_actor, const Reward& reward, b
 void ApplyRewardPhysicalTracked(RE::Actor* a_actor, const Reward& reward, bool isPlayer, std::vector<PendingEquip>& equipQueue,
     const std::string& ruleID, const std::string& groupName)
 {
-    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
+    ApplyRewardPhysical(
+        a_actor, reward, isPlayer, equipQueue, ruleID, groupName);
     TrackPersistentRewardItems(a_actor, reward, ruleID, groupName);
 }
 
@@ -2121,7 +2478,10 @@ const char* RuleEvaluationPhaseName(RuleEvaluationPhase a_phase)
     }
 }
 
-void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
+static void ApplyRulesToInstancePass(
+    RE::Actor* a_actor,
+    const RuleEvaluationDelta& a_delta,
+    int a_forcedLevel) {
     if (!a_actor) return;
 
     // --- LOG DE INÍCIO ---
@@ -2166,6 +2526,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
         return;
     }
 
+    auto* ruleManager = RuleManager::GetSingleton();
     auto& session = SaveStateManager::GetSingleton()->GetSessionData();
     std::string fileNameStr = "Dynamic";
     if (auto file = GetSourceFileByFormID(baseNPC)) {
@@ -2180,19 +2541,30 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
     // --- LÓGICA DE REMOÇÃO DE REGRAS INVÁLIDAS ---
     if (session.npcRuleVersions.contains(npcKey)) {
         auto& appliedRulesMap = session.npcRuleVersions[npcKey];
-        auto& allRules = RuleManager::GetSingleton()->GetRules();
-
         for (auto it = appliedRulesMap.begin(); it != appliedRulesMap.end();) {
             const std::string& ruleID = it->first;
             auto& state = it->second;
-            auto ruleDefIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
+            const auto* ruleDef = ruleManager->FindRule(ruleID);
 
             bool shouldRemove = false;
-            if (ruleDefIt == allRules.end()) {
+            if (!ruleDef) {
                 shouldRemove = true;
             }
             else {
-                const Rule& rule = *ruleDefIt;
+                const Rule& rule = *ruleDef;
+                if (rule.isEnabled &&
+                    ruleManager->IsRuleInUnstableCycle(
+                        rule.id)) {
+                    ++it;
+                    continue;
+                }
+                const auto dependencyMask =
+                    ruleManager->GetRuleDependencyMask(rule.id);
+                if (!a_delta.IsFull() &&
+                    (dependencyMask & a_delta.mask) == 0) {
+                    ++it;
+                    continue;
+                }
                 if (!rule.isEnabled ||
                     !IsNPCMatchingTargets(baseNPC, rule, false, a_actor) ||
                     IsNPCMatchingTargets(baseNPC, rule, true, a_actor)) {
@@ -2202,9 +2574,9 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 
             if (shouldRemove) {
                 if (!state.activationStateKnown || state.isActive) {
-                    const Rule* appliedRule = RuleManager::GetSingleton()->GetRuleVersion(ruleID, state.version);
-                    if (!appliedRule && ruleDefIt != allRules.end()) {
-                        appliedRule = std::addressof(*ruleDefIt);
+                    const Rule* appliedRule = ruleManager->GetRuleVersion(ruleID, state.version);
+                    if (!appliedRule && ruleDef) {
+                        appliedRule = ruleDef;
                     }
 
                     if (appliedRule) {
@@ -2226,31 +2598,30 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
         }
     }
 
-    const auto& affectedDB = RuleManager::GetSingleton()->GetAffectedNPCsDatabase();
-
     // --- COLETA DE REGRAS ---
-    std::vector<std::string> rulesToProcess;
-    auto addRulesFromID = [&](RE::FormID a_id) {
-        if (affectedDB.contains(a_id)) {
-            for (const auto& id : affectedDB.at(a_id).ruleIDs) {
-                if (std::find(rulesToProcess.begin(), rulesToProcess.end(), id) == rulesToProcess.end()) {
-                    rulesToProcess.push_back(id);
-                }
+    auto rulesToProcess =
+        ruleManager->GetCandidateRuleIDs(a_actor, a_delta);
+    std::unordered_set<std::string> scheduledRuleIDs(
+        rulesToProcess.begin(), rulesToProcess.end());
+
+    // Regras já documentadas também precisam ser vistas quando uma de suas
+    // dependências muda, inclusive para executar a cascata de remoção.
+    if (session.npcRuleVersions.contains(npcKey)) {
+        for (const auto& [ruleID, state] : session.npcRuleVersions.at(npcKey)) {
+            if (!a_delta.IsFull() &&
+                (ruleManager->GetRuleDependencyMask(ruleID) &
+                    a_delta.mask) == 0) {
+                continue;
+            }
+            if (scheduledRuleIDs.insert(ruleID).second) {
+                rulesToProcess.push_back(ruleID);
             }
         }
-        };
-
-    addRulesFromID(actorID);
-    addRulesFromID(baseNPC->GetFormID());
-    auto templateBase = a_actor->GetTemplateBase();
-    if (templateBase) addRulesFromID(templateBase->GetFormID());
-
-    auto& allRulesForTags = RuleManager::GetSingleton()->GetRules();
-    for (const auto& rule : allRulesForTags) {
-        if (std::find(rulesToProcess.begin(), rulesToProcess.end(), rule.id) == rulesToProcess.end()) {
-            rulesToProcess.push_back(rule.id);
-        }
     }
+
+    logger::debug(
+        "[RuleScheduler] '{}' evaluating {} candidate rules (mask={:X}, changedForms={}).",
+        actorName, rulesToProcess.size(), a_delta.mask, a_delta.changedForms.size());
 
     if (rulesToProcess.empty()) {
         if (!isPlayer && !IsActorSleeping(a_actor)) {
@@ -2270,36 +2641,45 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
         RuleEvaluationPhase::kInventory
     };
 
-    for (const auto phase : rulePhases) {
+    std::array<std::vector<const Rule*>, rulePhases.size()> rulesByPhase;
+    for (const auto& ruleID : rulesToProcess) {
+        const auto* rule = ruleManager->FindRule(ruleID);
+        if (!rule || !rule->isEnabled ||
+            ruleManager->IsRuleInUnstableCycle(rule->id)) {
+            continue;
+        }
+        const auto phaseIndex =
+            static_cast<std::size_t>(GetRuleEvaluationPhase(*rule));
+        if (phaseIndex < rulesByPhase.size()) {
+            rulesByPhase[phaseIndex].push_back(rule);
+        }
+    }
+
+    for (std::size_t phaseIndex = 0;
+         phaseIndex < rulePhases.size();
+         ++phaseIndex) {
+        const auto phase = rulePhases[phaseIndex];
         logger::debug("[RulePhase] Processando fase '{}' para '{}'", RuleEvaluationPhaseName(phase), actorName);
 
-        std::vector<std::string> phaseRuleIDs;
-        for (const auto& ruleID : rulesToProcess) {
-            auto& allRules = RuleManager::GetSingleton()->GetRules();
-            auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
-            if (ruleIt == allRules.end()) continue;
-
-            const Rule& currentRule = *ruleIt;
-            if (!currentRule.isEnabled) continue;
-            if (GetRuleEvaluationPhase(currentRule) != phase) continue;
-            if (!IsNPCMatchingTargets(baseNPC, currentRule, false, a_actor) ||
-                IsNPCMatchingTargets(baseNPC, currentRule, true, a_actor)) {
+        std::vector<const Rule*> phaseRules;
+        phaseRules.reserve(rulesByPhase[phaseIndex].size());
+        for (const auto* currentRule : rulesByPhase[phaseIndex]) {
+            if (!currentRule ||
+                !IsNPCMatchingTargets(baseNPC, *currentRule, false, a_actor) ||
+                IsNPCMatchingTargets(baseNPC, *currentRule, true, a_actor)) {
                 continue;
             }
 
             int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
-            if (level < currentRule.level) continue;
+            if (level < currentRule->level) continue;
 
-            phaseRuleIDs.push_back(ruleID);
+            phaseRules.push_back(currentRule);
         }
 
-        for (const auto& ruleID : phaseRuleIDs) {
-            auto& allRules = RuleManager::GetSingleton()->GetRules();
-            auto ruleIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
-            if (ruleIt == allRules.end()) continue;
-
-            const Rule& currentRule = *ruleIt;
-            if (!currentRule.isEnabled) continue;
+        for (const auto* currentRulePtr : phaseRules) {
+            if (!currentRulePtr) continue;
+            const Rule& currentRule = *currentRulePtr;
+            const std::string& ruleID = currentRule.id;
 
             int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
             if (level < currentRule.level) continue;
@@ -2307,7 +2687,7 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
             int oldVersion = state.version;
 
             const Rule* previousRule = oldVersion > 0 ?
-                RuleManager::GetSingleton()->GetRuleVersion(ruleID, oldVersion) :
+                ruleManager->GetRuleVersion(ruleID, oldVersion) :
                 nullptr;
 
             if (!state.activationStateKnown && oldVersion > 0) {
@@ -2421,4 +2801,112 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
     if (!isPlayer && !IsActorSleeping(a_actor)) {
         EquipBestInventoryItems(a_actor);
     }
+}
+
+void ApplyRulesToInstance(
+    RE::Actor* a_actor,
+    const RuleEvaluationDelta& a_delta,
+    int a_forcedLevel)
+{
+    if (!a_actor) {
+        return;
+    }
+
+    const auto buildSignature = [a_actor]() {
+        std::size_t seed = 0;
+        const auto combine = [&seed](const auto& a_value) {
+            const auto valueHash = std::hash<std::decay_t<decltype(a_value)>>{}(a_value);
+            seed ^= valueHash + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+        };
+
+        const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+        const auto& session = SaveStateManager::GetSingleton()->GetSessionData();
+        if (const auto npcRules = session.npcRuleVersions.find(npcKey);
+            npcRules != session.npcRuleVersions.end()) {
+            for (const auto& [ruleID, state] : npcRules->second) {
+                combine(ruleID);
+                combine(state.version);
+                combine(state.isActive);
+                combine(state.canRerollOnNextActivation);
+                for (const auto& rewardKey : state.activeRewardKeys) {
+                    combine(rewardKey);
+                }
+            }
+        }
+        if (const auto keywords = session.virtualKeywords.find(npcKey);
+            keywords != session.virtualKeywords.end()) {
+            for (const auto& keyword : keywords->second) {
+                combine(keyword);
+            }
+        }
+        if (const auto factions = session.addedFactions.find(npcKey);
+            factions != session.addedFactions.end()) {
+            for (const auto& [faction, rank] : factions->second) {
+                combine(faction);
+                combine(rank);
+            }
+        }
+        if (auto cell = a_actor->GetParentCell()) {
+            combine(cell->GetFormID());
+        }
+        if (auto location = a_actor->GetCurrentLocation()) {
+            combine(location->GetFormID());
+        }
+        const auto inventory = a_actor->GetInventory();
+        for (const auto& [item, data] : inventory) {
+            if (!item || data.first <= 0) {
+                continue;
+            }
+            combine(item->GetFormID());
+            combine(data.first);
+            const bool worn = data.second && data.second->IsWorn();
+            combine(worn);
+        }
+        return seed;
+    };
+
+    RuleEvaluationDelta pending = a_delta;
+    pending.Merge(
+        RuleManager::GetSingleton()->DetectBaseNPCChanges(a_actor));
+    std::set<std::size_t> visitedStates;
+    visitedStates.insert(buildSignature());
+    constexpr std::size_t kMaxCascadePasses = 32;
+
+    for (std::size_t pass = 0; pass < kMaxCascadePasses; ++pass) {
+        RuleEvaluationDelta produced;
+        produced.mask = ToMask(RuleDependency::kNone);
+
+        const auto previousActor = g_activeEvaluationActor;
+        auto* previousCollector = g_activeProducedDelta;
+        g_activeEvaluationActor = a_actor->GetFormID();
+        g_activeProducedDelta = std::addressof(produced);
+        ApplyRulesToInstancePass(a_actor, pending, a_forcedLevel);
+        g_activeEvaluationActor = previousActor;
+        g_activeProducedDelta = previousCollector;
+
+        if (produced.mask == ToMask(RuleDependency::kNone)) {
+            return;
+        }
+
+        const auto signature = buildSignature();
+        if (!visitedStates.insert(signature).second) {
+            logger::error(
+                "[RuleCascade] Cycle detected for '{}' ({:08X}) after {} passes; "
+                "the repeated state was stopped before another pass.",
+                a_actor->GetName(), a_actor->GetFormID(), pass + 1);
+            return;
+        }
+
+        pending = std::move(produced);
+    }
+
+    logger::error(
+        "[RuleCascade] Safety limit of {} passes reached for '{}' ({:08X}); "
+        "remaining nested deltas were discarded.",
+        kMaxCascadePasses, a_actor->GetName(), a_actor->GetFormID());
+}
+
+void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel)
+{
+    ApplyRulesToInstance(a_actor, RuleEvaluationDelta::Full(), a_forcedLevel);
 }

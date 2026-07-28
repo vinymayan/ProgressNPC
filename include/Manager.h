@@ -5,6 +5,8 @@
 #include <map>
 #include <functional>
 #include <cstdint>
+#include <optional>
+#include <unordered_map>
 #include "ClibUtil/editorID.hpp"
 
 struct InternalFormInfo {
@@ -36,6 +38,9 @@ public:
     // Data Store: Map of "TypeName" -> List of InternalFormInfo
     // We use this to feed the UI
     const std::vector<InternalFormInfo>& GetList(const std::string& typeName);
+    std::optional<RE::FormID> FindFormIDByEditorID(
+        std::string_view typeName,
+        std::string_view editorID) const;
 
     // Register callback for when population is done
     void RegisterReadyCallback(std::function<void()> callback);
@@ -48,9 +53,12 @@ private:
     template <typename T>
     void PopulateList(const std::string& a_typeName, std::function<bool(T*)> a_filter = nullptr);
     void PopulateCellList();
+    void RebuildEditorIDIndex(std::string_view typeName);
+    static std::string NormalizeEditorID(std::string_view editorID);
 
     bool _isPopulated = false;
     std::uint64_t _listRevision = 0;
     std::map<std::string, std::vector<InternalFormInfo>> _dataStore;
+    std::map<std::string, std::unordered_map<std::string, RE::FormID>> _formsByEditorID;
     std::vector<std::function<void()>> _readyCallbacks;
 };

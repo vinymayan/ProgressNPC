@@ -5,6 +5,8 @@
 #include <set>
 #include <filesystem>
 #include <optional>
+#include <cstdint>
+#include <unordered_map>
 #include <rapidjson/document.h>
 #include "Manager.h"
 
@@ -75,6 +77,61 @@ struct RulePackage {
     std::filesystem::path path;
 };
 
+enum class RuleDependency : std::uint32_t {
+    kNone = 0,
+    kStatic = 1u << 0,
+    kTag = 1u << 1,
+    kFactionRank = 1u << 2,
+    kAbility = 1u << 3,
+    kInventory = 1u << 4,
+    kEnvironment = 1u << 5,
+    kLevel = 1u << 6,
+    kSleep = 1u << 7,
+    kAll = (1u << 8) - 1u
+};
+
+using RuleDependencyMask = std::uint32_t;
+
+constexpr RuleDependencyMask ToMask(RuleDependency a_dependency)
+{
+    return static_cast<RuleDependencyMask>(a_dependency);
+}
+
+struct RuleEvaluationDelta {
+    RuleDependencyMask mask = ToMask(RuleDependency::kAll);
+    std::set<RE::FormID> changedForms;
+
+    static RuleEvaluationDelta Full()
+    {
+        return {};
+    }
+
+    static RuleEvaluationDelta For(
+        RuleDependency a_dependency,
+        RE::FormID a_changedForm = 0)
+    {
+        RuleEvaluationDelta delta;
+        delta.mask = ToMask(a_dependency);
+        if (a_changedForm != 0) {
+            delta.changedForms.insert(a_changedForm);
+        }
+        return delta;
+    }
+
+    bool IsFull() const
+    {
+        return mask == ToMask(RuleDependency::kAll);
+    }
+
+    void Merge(const RuleEvaluationDelta& a_other)
+    {
+        mask |= a_other.mask;
+        changedForms.insert(a_other.changedForms.begin(), a_other.changedForms.end());
+    }
+};
+
+RuleDependencyMask GetFilterDependencyMask(std::string_view a_type);
+RuleDependencyMask GetRewardDependencyMask(std::string_view a_type);
 
 bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor = nullptr);
 
@@ -98,6 +155,8 @@ public:
     bool ExportRule(const Rule& rule);
     bool ExportRulesPackage(const std::string& packageName, const std::set<std::string>& ruleIDs);
     std::vector<Rule>& GetRules() { return _rules; }
+    Rule* FindRule(const std::string& ruleID);
+    const Rule* FindRule(const std::string& ruleID) const;
     const std::vector<RulePackage>& GetPackages() const;
     std::optional<std::string> CreatePackage(std::string_view displayName);
 
@@ -120,20 +179,40 @@ public:
     std::vector<Reward> GetRewardsForSpecificRule(RE::TESNPC* npc, const Rule& rule);
 
     void InitializeAffectedNPCsDatabase();
+    void RebuildDependencyIndex(bool invalidateActorSnapshots = true);
+    std::vector<std::string> GetCandidateRuleIDs(const RuleEvaluationDelta& a_delta) const;
+    std::vector<std::string> GetCandidateRuleIDs(
+        RE::Actor* a_actor,
+        const RuleEvaluationDelta& a_delta) const;
+    RuleDependencyMask GetRuleDependencyMask(std::string_view a_ruleID) const;
+    bool IsRuleInUnstableCycle(std::string_view a_ruleID) const;
+    RuleEvaluationDelta DetectBaseNPCChanges(RE::Actor* a_actor);
+    void ResetRuntimeCaches();
+    std::uint64_t GetDependencyRevision() const { return _dependencyRevision; }
     float GetRandomFloat(float a_min, float a_max) {
         static thread_local std::mt19937 gen{ std::random_device{}() };
         std::uniform_real_distribution<float> dis(a_min, a_max);
         return dis(gen);
     }
     // Getter para o banco de dados
-    const std::map<RE::FormID, AffectedNPC>& GetAffectedNPCsDatabase() { return _affectedNPCsDatabase; }
+    const std::map<RE::FormID, AffectedNPC>& GetAffectedNPCsDatabase();
 
     Rule* GetRuleVersion(const std::string& ruleID, int version);
 private:
     std::vector<Rule> _rules;
+    std::unordered_map<std::string, std::size_t> _ruleIndices;
     std::map<std::string, std::vector<Rule>> _ruleHistories;
     std::map<RE::FormID, AffectedNPC> _affectedNPCsDatabase;
+    bool _affectedNPCsDatabaseValid = false;
     std::map<std::string, std::string> _ruleOwners;
+    std::map<RuleDependencyMask, std::set<std::string>> _rulesByDependency;
+    std::map<RuleDependencyMask, std::map<RE::FormID, std::set<std::string>>> _rulesByExactDependency;
+    std::map<RuleDependencyMask, std::set<std::string>> _rulesWithUnresolvedDependency;
+    std::set<std::string> _broadFullEvaluationRules;
+    std::map<std::string, RuleDependencyMask> _ruleDependencyMasks;
+    std::set<std::string> _unstableCycleRules;
+    std::map<RE::FormID, std::pair<std::uint64_t, std::uint64_t>> _baseNPCFingerprints;
+    std::uint64_t _dependencyRevision = 0;
     bool _hasActorDependentRules = false;
     const std::string _modDir = "Data/Viny Mods/EDF";
     const std::string _exportDir = "Data/Viny Mods/EDF/Export/";
