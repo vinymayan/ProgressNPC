@@ -16,36 +16,57 @@ namespace {
     std::map<RE::FormID, std::uint64_t> g_scheduledEvaluations;
     std::atomic_uint64_t g_nextEvaluationToken{ 1 };
 
-    std::mutex g_contextualRuleStateMutex;
-    std::map<RE::FormID, std::map<std::string, bool>> g_contextualRuleState;
+    struct PendingSleepUpdate {
+        std::uint64_t token = 0;
+        bool isEntering = false;
+    };
 
-    bool IsContextualRule(const Rule& a_rule)
+    std::mutex g_sleepUpdatesMutex;
+    std::map<RE::FormID, PendingSleepUpdate> g_sleepUpdates;
+    std::atomic_uint64_t g_nextSleepToken{ 1 };
+    std::map<RE::FormID, std::vector<RE::FormID>> g_sleepEquippedItems;
+
+    constexpr char kRewardStateDelimiter = '\x1E';
+
+    std::string BuildRewardStateKey(const std::string& a_groupName, const Reward& a_reward)
     {
-        const auto hasContextFilter = [](const auto& a_filters) {
-            return std::ranges::any_of(a_filters, [](const BlacklistFilter& a_filter) {
-                return a_filter.type == "Cell" || a_filter.type == "Location";
-            });
+        std::string key;
+        const auto append = [&](std::string_view a_value) {
+            if (!key.empty()) {
+                key.push_back(kRewardStateDelimiter);
+            }
+            key.append(a_value);
         };
 
-        return hasContextFilter(a_rule.targetFilters) || hasContextFilter(a_rule.blacklistFilters);
+        append(a_groupName);
+        append(a_reward.typeReward);
+        append(a_reward.formIDStr);
+        append(a_reward.editorID);
+        append(std::to_string(a_reward.amount));
+        append(std::to_string(a_reward.functionOnType));
+        append(a_reward.isPersistent ? "1" : "0");
+        return key;
     }
 
-    std::optional<bool> GetContextualRuleActivity(RE::FormID a_actorID, const std::string& a_ruleID)
+    bool ResolveRewardState(
+        const Rule& a_rule,
+        const std::string& a_rewardKey,
+        const RewardGroup*& a_group,
+        const Reward*& a_reward)
     {
-        std::lock_guard lock(g_contextualRuleStateMutex);
-        const auto actorIt = g_contextualRuleState.find(a_actorID);
-        if (actorIt == g_contextualRuleState.end()) {
-            return std::nullopt;
+        for (const auto& group : a_rule.rewardGroups) {
+            for (const auto& reward : group.rewards) {
+                if (BuildRewardStateKey(group.name, reward) == a_rewardKey) {
+                    a_group = std::addressof(group);
+                    a_reward = std::addressof(reward);
+                    return true;
+                }
+            }
         }
 
-        const auto ruleIt = actorIt->second.find(a_ruleID);
-        return ruleIt != actorIt->second.end() ? std::optional{ ruleIt->second } : std::nullopt;
-    }
-
-    void SetContextualRuleActivity(RE::FormID a_actorID, const std::string& a_ruleID, bool a_isActive)
-    {
-        std::lock_guard lock(g_contextualRuleStateMutex);
-        g_contextualRuleState[a_actorID][a_ruleID] = a_isActive;
+        a_group = nullptr;
+        a_reward = nullptr;
+        return false;
     }
 
     const RE::TESFile* GetSourceFileByFormID(RE::TESForm* a_form)
@@ -252,6 +273,56 @@ void ScheduleRuleEvaluation(RE::Actor* a_actor)
     });
 }
 
+void ScheduleSleepOutfitUpdate(RE::Actor* a_actor, bool a_isEntering)
+{
+    if (!a_actor) {
+        return;
+    }
+
+    auto taskInterface = SKSE::GetTaskInterface();
+    if (!taskInterface) {
+        logger::error("[SleepScheduler] TaskInterface indisponível para {:08X}.", a_actor->GetFormID());
+        return;
+    }
+
+    const auto actorID = a_actor->GetFormID();
+    const auto actorHandle = a_actor->GetHandle();
+    if (!actorHandle) {
+        return;
+    }
+
+    const auto token = g_nextSleepToken.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard lock(g_sleepUpdatesMutex);
+        if (auto it = g_sleepUpdates.find(actorID); it != g_sleepUpdates.end()) {
+            it->second.isEntering = a_isEntering;
+            return;
+        }
+        g_sleepUpdates.emplace(actorID, PendingSleepUpdate{ token, a_isEntering });
+    }
+
+    taskInterface->AddTask([actorHandle, actorID, token]() {
+        bool isEntering = false;
+        {
+            std::lock_guard lock(g_sleepUpdatesMutex);
+            const auto it = g_sleepUpdates.find(actorID);
+            if (it == g_sleepUpdates.end() || it->second.token != token) {
+                return;
+            }
+            isEntering = it->second.isEntering;
+            g_sleepUpdates.erase(it);
+        }
+
+        auto actorPtr = actorHandle.get();
+        auto actor = actorPtr ? actorPtr.get() : nullptr;
+        if (!actor || actor->IsDead()) {
+            return;
+        }
+
+        ManageSleepOutfitState(actor, isEntering);
+    });
+}
+
 void ForgetRuleEvaluationRuntimeState(RE::FormID a_actorID)
 {
     {
@@ -259,8 +330,9 @@ void ForgetRuleEvaluationRuntimeState(RE::FormID a_actorID)
         g_scheduledEvaluations.erase(a_actorID);
     }
     {
-        std::lock_guard lock(g_contextualRuleStateMutex);
-        g_contextualRuleState.erase(a_actorID);
+        std::lock_guard lock(g_sleepUpdatesMutex);
+        g_sleepUpdates.erase(a_actorID);
+        g_sleepEquippedItems.erase(a_actorID);
     }
 }
 
@@ -271,8 +343,9 @@ void ResetRuleEvaluationRuntimeState()
         g_scheduledEvaluations.clear();
     }
     {
-        std::lock_guard lock(g_contextualRuleStateMutex);
-        g_contextualRuleState.clear();
+        std::lock_guard lock(g_sleepUpdatesMutex);
+        g_sleepUpdates.clear();
+        g_sleepEquippedItems.clear();
     }
 }
 
@@ -736,6 +809,7 @@ void SaveStateManager::LoadCharacterData(uint32_t characterID) {
         auto groups = ReadStringArray(FindMember(doc, "p_groups"));
         auto items = ReadStringArray(FindMember(doc, "p_items"));
         auto tags = ReadStringArray(FindMember(doc, "p_tags"));
+        auto rewardKeys = ReadStringArray(FindMember(doc, "p_rewards"));
         auto historyArray = FindMember(doc, "history");
         if (!historyArray || !historyArray->IsArray()) return;
 
@@ -775,6 +849,25 @@ void SaveStateManager::LoadCharacterData(uint32_t characterID) {
                         for (const auto& groupIndex : rData[1].GetArray()) {
                             int gIdx = groupIndex.IsInt() ? groupIndex.GetInt() : -1;
                             if (gIdx >= 0 && static_cast<size_t>(gIdx) < groups.size()) state.appliedGroups.push_back(groups[gIdx]);
+                        }
+                    }
+                    if (rData.Size() >= 7 && rData[2].IsBool() && rData[3].IsBool() &&
+                        rData[4].IsBool() && rData[5].IsArray() && rData[6].IsArray()) {
+                        state.activationStateKnown = rData[2].GetBool();
+                        state.isActive = rData[3].GetBool();
+                        state.canRerollOnNextActivation = rData[4].GetBool();
+
+                        for (const auto& rewardIndex : rData[5].GetArray()) {
+                            int rewardIdx = rewardIndex.IsInt() ? rewardIndex.GetInt() : -1;
+                            if (rewardIdx >= 0 && static_cast<size_t>(rewardIdx) < rewardKeys.size()) {
+                                state.activeRewardKeys.push_back(rewardKeys[rewardIdx]);
+                            }
+                        }
+                        for (const auto& rewardIndex : rData[6].GetArray()) {
+                            int rewardIdx = rewardIndex.IsInt() ? rewardIndex.GetInt() : -1;
+                            if (rewardIdx >= 0 && static_cast<size_t>(rewardIdx) < rewardKeys.size()) {
+                                state.persistentRewardKeys.insert(rewardKeys[rewardIdx]);
+                            }
                         }
                     }
                     entry.npcRuleVersions[npcKey][rules[rIdx]] = state;
@@ -854,7 +947,7 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
     logger::info("[SaveManager] Iniciando compressão para escrita (Save #{})", newEntry.saveNumber);
 
     // --- COMPRESSÃO ---
-    std::vector<std::string> p_plugins, p_rules, p_groups, p_items, p_tags;
+    std::vector<std::string> p_plugins, p_rules, p_groups, p_items, p_tags, p_rewards;
 
     try {
         rapidjson::Document doc;
@@ -885,6 +978,21 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
                         jGrp.PushBack(GetPoolIndex(p_groups, gName), alloc);
                     }
                     jState.PushBack(jGrp, alloc);
+                    jState.PushBack(state.activationStateKnown, alloc);
+                    jState.PushBack(state.isActive, alloc);
+                    jState.PushBack(state.canRerollOnNextActivation, alloc);
+
+                    rapidjson::Value jActiveRewards(rapidjson::kArrayType);
+                    for (const auto& rewardKey : state.activeRewardKeys) {
+                        jActiveRewards.PushBack(GetPoolIndex(p_rewards, rewardKey), alloc);
+                    }
+                    jState.PushBack(jActiveRewards, alloc);
+
+                    rapidjson::Value jPersistentRewards(rapidjson::kArrayType);
+                    for (const auto& rewardKey : state.persistentRewardKeys) {
+                        jPersistentRewards.PushBack(GetPoolIndex(p_rewards, rewardKey), alloc);
+                    }
+                    jState.PushBack(jPersistentRewards, alloc);
 
                     const auto ruleIndex = std::to_string(GetPoolIndex(p_rules, ruleID));
                     rapidjson::Value ruleKey;
@@ -944,6 +1052,7 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
         doc.AddMember("p_groups", WriteStringArray(p_groups, alloc), alloc);
         doc.AddMember("p_items", WriteStringArray(p_items, alloc), alloc);
         doc.AddMember("p_tags", WriteStringArray(p_tags, alloc), alloc);
+        doc.AddMember("p_rewards", WriteStringArray(p_rewards, alloc), alloc);
         doc.AddMember("history", jHistory, alloc);
 
         std::string path = GetCharacterPath(characterID);
@@ -963,61 +1072,6 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
         logger::error("[SaveManager] Exceção durante a compressão/escrita do JSON: {}", e.what());
     }
 }
-void EquipBestInventoryItems(RE::Actor* a_actor)
-{
-    if (!a_actor) return;
-
-    auto equipManager = RE::ActorEquipManager::GetSingleton();
-    if (!equipManager) return;
-
-    auto inventory = a_actor->GetInventory();
-
-    // Criamos uma lista de pares para armazenar e ordenar os itens
-    using InventoryPair = std::pair<RE::TESBoundObject*, RE::InventoryEntryData*>;
-    std::vector<InventoryPair> itemsToProcess;
-
-    for (auto& [item, invData] : inventory) {
-        auto& [count, entry] = invData;
-
-        if (count > 0 && item->IsArmor()) {
-            auto armor = item->As<RE::TESObjectARMO>();
-
-            // 1. FILTRO: Ignora se for um escudo
-            if (armor && armor->IsShield()) {
-                continue;
-            }
-
-            // Adiciona à nossa lista temporária
-            itemsToProcess.push_back({ item, entry.get() });
-        }
-    }
-
-    // 2. PRIORIZAÇÃO: Ordena por Armor Rating (maior primeiro)
-    // Isso garante que armaduras pesadas/leves venham antes de roupas (rating 0)
-    std::sort(itemsToProcess.begin(), itemsToProcess.end(), [](const InventoryPair& a, const InventoryPair& b) {
-        auto armorA = a.first->As<RE::TESObjectARMO>();
-        auto armorB = b.first->As<RE::TESObjectARMO>();
-        return armorA->GetArmorRating() > armorB->GetArmorRating();
-        });
-
-    // 3. EQUIPAGEM: O motor do Skyrim gerencia os slots automaticamente.
-    // Ao equipar o item com maior rating primeiro, ele ocupará o slot.
-    for (auto& [item, entry] : itemsToProcess) {
-        if (!entry->IsWorn()) {
-            auto extraData = (entry->extraLists && !entry->extraLists->empty()) ? entry->extraLists->front() : nullptr;
-
-            // Equipamos com o flag 'p_queueEquip' como true para evitar conflitos imediatos de animação
-            equipManager->EquipObject(a_actor, item, extraData, 1, nullptr, false, false, false, true);
-
-            logger::debug("  [Tentativa] Equipando item '{}' (Rating: {}).",
-                item->GetName(), item->As<RE::TESObjectARMO>()->GetArmorRating());
-        }
-    }
-
-    a_actor->Update3DModel();
-    logger::debug("[OutfitSync] Equipamento para {}. Verificação completa.", a_actor->GetName());
-}
-
 bool IsActorSleeping(RE::Actor* a_actor) {
     if (!a_actor) return false;
     auto actorState = a_actor->AsActorState();
@@ -1048,61 +1102,341 @@ RE::BGSOutfit* GetAppliedSleepOutfit(RE::Actor* a_actor) {
 
     if (!session.npcRuleVersions.contains(npcKey)) return nullptr;
 
-    // Percorre as regras aplicadas ao NPC
+    // Considera somente rewards realmente sorteados na ativação atual.
     for (auto const& [ruleID, state] : session.npcRuleVersions[npcKey]) {
+        if (!state.activationStateKnown || !state.isActive) continue;
+
         auto rule = RuleManager::GetSingleton()->GetRuleVersion(ruleID, state.version);
         if (!rule) continue;
 
-        // Verifica os grupos que o NPC ganhou no sorteio
-        for (const auto& groupName : state.appliedGroups) {
-            for (const auto& group : rule->rewardGroups) {
-                if (group.name == groupName) {
-                    for (const auto& reward : group.rewards) {
-                        // Verifica se é Outfit e se o modo inclui Special/Sleep (1 ou 2)
-                        if (reward.typeReward == "Outfit" && (reward.functionOnType == 1 || reward.functionOnType == 2)) {
-                            auto [plugin, fID] = reward.ParseFormID();
-                            if (auto outfit = RE::TESForm::LookupByID<RE::BGSOutfit>(fID)) return outfit;
-                        }
-                    }
-                }
+        for (const auto& rewardKey : state.activeRewardKeys) {
+            const RewardGroup* group = nullptr;
+            const Reward* reward = nullptr;
+            if (!ResolveRewardState(*rule, rewardKey, group, reward) || !reward) continue;
+            if (reward->typeReward != "Outfit" ||
+                (reward->functionOnType != 1 && reward->functionOnType != 2)) {
+                continue;
+            }
+
+            auto [plugin, fID] = reward->ParseFormID();
+            if (auto outfit = RE::TESForm::LookupByID<RE::BGSOutfit>(fID)) {
+                return outfit;
             }
         }
     }
     return nullptr;
 }
 
-// --- NOVA FUNÇÃO: Gerencia a troca física de itens ---
+namespace {
+    constexpr int kInventoryArmorPriority = 0;
+    constexpr int kRuleOutfitArmorPriority = 1;
+    constexpr int kRuleArmorPriority = 2;
+
+    struct ArmorEquipCandidate {
+        RE::TESObjectARMO* armor = nullptr;
+        RE::InventoryEntryData* entry = nullptr;
+        int priority = kInventoryArmorPriority;
+        std::uint32_t slotMask = 0;
+    };
+
+    struct ActiveRuleArmorSelection {
+        std::map<RE::FormID, int> priorities;
+        std::set<RE::FormID> sleepOnlyItems;
+    };
+
+    bool HasCompatibleArmorModel(RE::Actor* a_actor, RE::TESObjectARMO* a_armor)
+    {
+        if (!a_actor || !a_armor) return false;
+
+        auto race = a_actor->GetRace();
+        auto baseNPC = a_actor->GetActorBase();
+        if (!race || !baseNPC) return false;
+
+        const auto sex = baseNPC->GetSex();
+        if (sex != RE::SEXES::kMale && sex != RE::SEXES::kFemale) return false;
+
+        const auto armorMask = a_armor->GetSlotMask().underlying();
+        if (armorMask == 0) return false;
+
+        std::set<RE::FormID> visitedTemplates;
+        for (auto currentArmor = a_armor;
+             currentArmor && visitedTemplates.insert(currentArmor->GetFormID()).second;
+             currentArmor = currentArmor->templateArmor) {
+            for (auto* addon : currentArmor->armorAddons) {
+                if (!addon || !addon->IsValidRace(race) ||
+                    (addon->GetSlotMask().underlying() & armorMask) == 0) {
+                    continue;
+                }
+
+                const auto* model = addon->bipedModels[sex].GetModel();
+                if (model && model[0] != '\0') {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    void MarkPreferredArmor(
+        std::map<RE::FormID, int>& a_priorities,
+        RE::TESForm* a_form,
+        int a_priority)
+    {
+        auto armor = a_form ? a_form->As<RE::TESObjectARMO>() : nullptr;
+        if (!armor) return;
+
+        auto& currentPriority = a_priorities[armor->GetFormID()];
+        currentPriority = std::max(currentPriority, a_priority);
+    }
+
+    ActiveRuleArmorSelection GetActiveRuleArmorSelection(RE::Actor* a_actor)
+    {
+        ActiveRuleArmorSelection selection;
+        if (!a_actor) return selection;
+
+        const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+        auto& session = SaveStateManager::GetSingleton()->GetSessionData();
+        const auto npcIt = session.npcRuleVersions.find(npcKey);
+        if (npcIt == session.npcRuleVersions.end()) return selection;
+
+        for (const auto& [ruleID, state] : npcIt->second) {
+            if (!state.activationStateKnown) continue;
+
+            auto rule = RuleManager::GetSingleton()->GetRuleVersion(ruleID, state.version);
+            if (!rule) continue;
+
+            std::set<std::string> relevantRewardKeys{
+                state.persistentRewardKeys.begin(), state.persistentRewardKeys.end()
+            };
+            if (state.isActive) {
+                relevantRewardKeys.insert(
+                    state.activeRewardKeys.begin(), state.activeRewardKeys.end());
+            }
+
+            for (const auto& rewardKey : relevantRewardKeys) {
+                const RewardGroup* group = nullptr;
+                const Reward* reward = nullptr;
+                if (!ResolveRewardState(*rule, rewardKey, group, reward) || !reward) continue;
+
+                auto [plugin, formID] = reward->ParseFormID();
+                auto rewardForm = RE::TESForm::LookupByID(formID);
+                if (!rewardForm) continue;
+
+                if (reward->typeReward == "Armor") {
+                    MarkPreferredArmor(selection.priorities, rewardForm, kRuleArmorPriority);
+                }
+                else if (reward->typeReward == "Outfit") {
+                    if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
+                        for (auto* outfitItem : outfit->outfitItems) {
+                            auto armor = outfitItem ? outfitItem->As<RE::TESObjectARMO>() : nullptr;
+                            if (!armor) continue;
+
+                            if (reward->functionOnType == 0 || reward->functionOnType == 2) {
+                                MarkPreferredArmor(
+                                    selection.priorities, armor, kRuleOutfitArmorPriority);
+                            }
+                            else if (reward->functionOnType == 1) {
+                                selection.sleepOnlyItems.insert(armor->GetFormID());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (const auto& preferred : selection.priorities) {
+            selection.sleepOnlyItems.erase(preferred.first);
+        }
+        return selection;
+    }
+
+    std::vector<RE::TESObjectARMO*> SelectCompatibleArmorSet(
+        RE::Actor* a_actor,
+        std::vector<RE::TESObjectARMO*> a_armors)
+    {
+        std::erase_if(a_armors, [&](RE::TESObjectARMO* a_armor) {
+            return !a_armor || a_armor->IsShield() ||
+                a_actor->GetInventoryCount(a_armor) <= 0 ||
+                !HasCompatibleArmorModel(a_actor, a_armor);
+        });
+
+        std::ranges::sort(a_armors, [](RE::TESObjectARMO* a_lhs, RE::TESObjectARMO* a_rhs) {
+            if (a_lhs->GetArmorRating() != a_rhs->GetArmorRating()) {
+                return a_lhs->GetArmorRating() > a_rhs->GetArmorRating();
+            }
+            return a_lhs->GetFormID() < a_rhs->GetFormID();
+        });
+
+        std::vector<RE::TESObjectARMO*> selected;
+        std::set<RE::FormID> seen;
+        std::uint32_t occupiedSlots = 0;
+        for (auto* armor : a_armors) {
+            if (!seen.insert(armor->GetFormID()).second) continue;
+
+            const auto slotMask = armor->GetSlotMask().underlying();
+            if ((occupiedSlots & slotMask) != 0) continue;
+
+            selected.push_back(armor);
+            occupiedSlots |= slotMask;
+        }
+        return selected;
+    }
+}
+
+void EquipBestInventoryItems(RE::Actor* a_actor)
+{
+    if (!a_actor || a_actor->IsPlayer()) return;
+
+    auto equipManager = RE::ActorEquipManager::GetSingleton();
+    if (!equipManager) return;
+
+    auto inventory = a_actor->GetInventory();
+    const auto activeRuleSelection = GetActiveRuleArmorSelection(a_actor);
+
+    std::vector<ArmorEquipCandidate> candidates;
+    candidates.reserve(inventory.size());
+    for (auto& [item, inventoryData] : inventory) {
+        auto& [count, entry] = inventoryData;
+        auto armor = item ? item->As<RE::TESObjectARMO>() : nullptr;
+        if (count <= 0 || !armor || armor->IsShield()) continue;
+        if (activeRuleSelection.sleepOnlyItems.contains(armor->GetFormID())) continue;
+
+        const auto slotMask = armor->GetSlotMask().underlying();
+        if (slotMask == 0 || !HasCompatibleArmorModel(a_actor, armor)) {
+            logger::debug(
+                "[EquipBest] Ignorando '{}' para '{}': raça, sexo, modelo ou slots incompatíveis.",
+                armor->GetName(), a_actor->GetName());
+            continue;
+        }
+
+        const auto priorityIt = activeRuleSelection.priorities.find(armor->GetFormID());
+        const auto priority = priorityIt != activeRuleSelection.priorities.end() ?
+            priorityIt->second :
+            kInventoryArmorPriority;
+        candidates.push_back({ armor, entry.get(), priority, slotMask });
+    }
+
+    std::ranges::sort(candidates, [](const ArmorEquipCandidate& a_lhs, const ArmorEquipCandidate& a_rhs) {
+        if (a_lhs.priority != a_rhs.priority) {
+            return a_lhs.priority > a_rhs.priority;
+        }
+        if (a_lhs.armor->GetArmorRating() != a_rhs.armor->GetArmorRating()) {
+            return a_lhs.armor->GetArmorRating() > a_rhs.armor->GetArmorRating();
+        }
+        return a_lhs.armor->GetFormID() < a_rhs.armor->GetFormID();
+    });
+
+    std::vector<const ArmorEquipCandidate*> selected;
+    std::set<RE::FormID> selectedIDs;
+    std::uint32_t occupiedSlots = 0;
+    for (const auto& candidate : candidates) {
+        if ((occupiedSlots & candidate.slotMask) != 0) continue;
+
+        selected.push_back(std::addressof(candidate));
+        selectedIDs.insert(candidate.armor->GetFormID());
+        occupiedSlots |= candidate.slotMask;
+    }
+
+    for (auto& [item, inventoryData] : inventory) {
+        auto armor = item ? item->As<RE::TESObjectARMO>() : nullptr;
+        auto entry = inventoryData.second.get();
+        if (!armor || !entry || !entry->IsWorn() || selectedIDs.contains(armor->GetFormID())) {
+            continue;
+        }
+
+        if ((armor->GetSlotMask().underlying() & occupiedSlots) != 0) {
+            equipManager->UnequipObject(a_actor, armor);
+        }
+    }
+
+    for (const auto* candidate : selected) {
+        if (!candidate || !candidate->armor || !candidate->entry || candidate->entry->IsWorn()) {
+            continue;
+        }
+
+        auto extraData =
+            candidate->entry->extraLists && !candidate->entry->extraLists->empty() ?
+            candidate->entry->extraLists->front() :
+            nullptr;
+        equipManager->EquipObject(
+            a_actor, candidate->armor, extraData, 1, nullptr, false, false, false, true);
+
+        logger::debug(
+            "[EquipBest] Equipando '{}' em '{}' (prioridade {}, rating {}, slots {:08X}).",
+            candidate->armor->GetName(), a_actor->GetName(), candidate->priority,
+            candidate->armor->GetArmorRating(), candidate->slotMask);
+    }
+}
+
+// Gerencia apenas as peças controladas pelo ciclo de sono da EDF.
 void ManageSleepOutfitState(RE::Actor* a_actor, bool a_isEntering) {
     if (!a_actor) return;
     auto equipManager = RE::ActorEquipManager::GetSingleton();
-    auto sleepOutfit = GetAppliedSleepOutfit(a_actor);
-    if (!sleepOutfit || !equipManager) return;
+    if (!equipManager) return;
+
+    const auto actorID = a_actor->GetFormID();
 
     if (a_isEntering) {
+        auto sleepOutfit = GetAppliedSleepOutfit(a_actor);
+        if (!sleepOutfit) return;
+
         logger::info("[SleepSystem] Actor {} entrando na cama. Equipando traje de sono.", a_actor->GetName());
-        // 1. Desequipar itens de armadura atuais
         auto inventory = a_actor->GetInventory();
         for (auto& [item, invData] : inventory) {
             if (item->IsArmor() && invData.second->IsWorn()) {
                 equipManager->UnequipObject(a_actor, item);
             }
         }
-        // 2. Equipar itens do Sleep Outfit
+
+        std::vector<RE::TESObjectARMO*> sleepArmorCandidates;
+        std::vector<RE::TESBoundObject*> sleepNonArmorItems;
         for (auto* form : sleepOutfit->outfitItems) {
-            if (auto* bound = form->As<RE::TESBoundObject>()) {
-                equipManager->EquipObject(a_actor, bound, nullptr, 1, nullptr, false, false, false, true);
+            if (auto* bound = form ? form->As<RE::TESBoundObject>() : nullptr) {
+                if (a_actor->GetInventoryCount(bound) <= 0) continue;
+
+                if (auto* armor = bound->As<RE::TESObjectARMO>()) {
+                    sleepArmorCandidates.push_back(armor);
+                }
+                else {
+                    sleepNonArmorItems.push_back(bound);
+                }
             }
         }
+
+        std::vector<RE::FormID> equippedItems;
+        for (auto* armor : SelectCompatibleArmorSet(a_actor, std::move(sleepArmorCandidates))) {
+            equipManager->EquipObject(a_actor, armor, nullptr, 1, nullptr, false, false, false, true);
+            equippedItems.push_back(armor->GetFormID());
+        }
+        for (auto* item : sleepNonArmorItems) {
+            equipManager->EquipObject(a_actor, item, nullptr, 1, nullptr, false, false, false, true);
+            equippedItems.push_back(item->GetFormID());
+        }
+
+        std::lock_guard lock(g_sleepUpdatesMutex);
+        g_sleepEquippedItems[actorID] = std::move(equippedItems);
     }
     else {
-        logger::info("[SleepSystem] Actor {} saindo da cama. Restaurando equipamento.", a_actor->GetName());
-        // 1. Remover/Desequipar o traje de sono
-        for (auto* form : sleepOutfit->outfitItems) {
-            if (auto* bound = form->As<RE::TESBoundObject>()) {
+        logger::info("[SleepSystem] Actor {} saindo da cama. Liberando traje de sono.", a_actor->GetName());
+
+        std::vector<RE::FormID> equippedItems;
+        {
+            std::lock_guard lock(g_sleepUpdatesMutex);
+            if (auto it = g_sleepEquippedItems.find(actorID); it != g_sleepEquippedItems.end()) {
+                equippedItems = std::move(it->second);
+                g_sleepEquippedItems.erase(it);
+            }
+        }
+
+        for (const auto formID : equippedItems) {
+            if (auto* bound = RE::TESForm::LookupByID<RE::TESBoundObject>(formID)) {
                 equipManager->UnequipObject(a_actor, bound);
             }
         }
-        // 2. Equipar as melhores opções do inventário
+
+        // Recompõe os slots após retirar o traje de sono. Rewards Armor têm
+        // precedência sobre Outfits Normal/Both e sobre o restante do inventário.
         EquipBestInventoryItems(a_actor);
     }
 }
@@ -1240,21 +1574,12 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
             }
             else if (reward.typeReward == "Outfit") {
                 if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
-                    // 1: Sleep Outfit, 2: Both
-                    if (reward.functionOnType == 1 || reward.functionOnType == 2) {
-                        // Se o outfit de sono atual for o da regra, resetamos para null
-                        if (a_actor->GetActorBase()->sleepOutfit == outfit) {
-                            a_actor->SetSleepOutfit(nullptr, false);
-                        }
-                    }
-
-                    // 0: Normal (Inventory), 2: Both
-                    if (reward.functionOnType == 0 || reward.functionOnType == 2) {
-                        for (auto* form : outfit->outfitItems) {
-                            if (auto* bound = form->As<RE::TESBoundObject>()) {
-                                // Remove apenas 1 unidade (assumindo que foi o que a regra deu)
-                                RemoveManagedTemporaryItemOnInvalidation(a_actor, bound, 1, a_rule.id, group.name);
-                            }
+                    // Todos os modos adicionam os itens ao inventário. Na
+                    // invalidação, removemos apenas a quantidade ainda
+                    // atribuída a esta regra pelo ledger.
+                    for (auto* form : outfit->outfitItems) {
+                        if (auto* bound = form->As<RE::TESBoundObject>()) {
+                            RemoveManagedTemporaryItemOnInvalidation(a_actor, bound, 1, a_rule.id, group.name);
                         }
                     }
                 }
@@ -1447,41 +1772,291 @@ void ApplyRewardPhysicalTracked(RE::Actor* a_actor, const Reward& reward, bool i
     TrackPersistentRewardItems(a_actor, reward, ruleID, groupName);
 }
 
-bool IsTagReward(const Reward& reward)
+bool IsRewardRepresentedInCurrentState(
+    RE::Actor* a_actor,
+    const Reward& a_reward,
+    const std::string& a_ruleID,
+    const std::string& a_groupName)
 {
-    return reward.typeReward == "Keyword" || reward.typeReward == "Faction";
-}
+    if (!a_actor) return false;
 
-bool IsManagedPhysicalReward(const Reward& reward)
-{
-    return reward.typeReward != "Spell" &&
-        reward.typeReward != "Shout" &&
-        reward.typeReward != "Keyword" &&
-        reward.typeReward != "Faction" &&
-        reward.typeReward != "Perk";
-}
+    auto saveManager = SaveStateManager::GetSingleton();
+    const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+    auto& session = saveManager->GetSessionData();
 
-bool ApplyTagReward(RE::Actor* a_actor, const Reward& reward)
-{
-    if (!a_actor || !IsTagReward(reward)) return false;
-
-    auto [plugin, fID] = reward.ParseFormID();
+    auto [plugin, fID] = a_reward.ParseFormID();
     auto rewardForm = RE::TESForm::LookupByID(fID);
     if (!rewardForm) return false;
 
-    auto saveManager = SaveStateManager::GetSingleton();
-    if (reward.typeReward == "Keyword") {
-        if (auto keyword = rewardForm->As<RE::BGSKeyword>()) {
-            return saveManager->AddVirtualKeyword(a_actor, keyword);
-        }
+    const auto hasTrackedBoundObject = [&](RE::TESBoundObject* a_item) {
+        if (!a_item) return false;
+        const auto npcIt = session.persistentItems.find(npcKey);
+        if (npcIt == session.persistentItems.end()) return false;
+        const auto itemKey = SaveStateManager::BuildFormKey(a_item);
+        return FindManagedItemState(
+            npcIt->second, itemKey, a_ruleID, a_groupName, a_reward.isPersistent) != nullptr;
+    };
+
+    if (a_reward.typeReward == "Outfit") {
+        auto outfit = rewardForm->As<RE::BGSOutfit>();
+        if (!outfit) return false;
+        return std::ranges::any_of(outfit->outfitItems, [&](RE::TESForm* a_form) {
+            return hasTrackedBoundObject(a_form ? a_form->As<RE::TESBoundObject>() : nullptr);
+        });
     }
-    else if (reward.typeReward == "Faction") {
-        if (auto faction = rewardForm->As<RE::TESFaction>()) {
-            return saveManager->AddManagedFaction(a_actor, faction, static_cast<int>(reward.amount));
+    if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
+        return hasTrackedBoundObject(bound);
+    }
+    if (a_reward.typeReward == "Keyword") {
+        auto keyword = rewardForm->As<RE::BGSKeyword>();
+        return keyword && saveManager->HasVirtualKeyword(a_actor, keyword);
+    }
+    if (a_reward.typeReward == "Faction") {
+        auto faction = rewardForm->As<RE::TESFaction>();
+        const auto factionKey = SaveStateManager::BuildFormKey(faction);
+        const auto npcIt = session.addedFactions.find(npcKey);
+        return faction && npcIt != session.addedFactions.end() && npcIt->second.contains(factionKey);
+    }
+    if (a_reward.typeReward == "Spell") {
+        auto spell = rewardForm->As<RE::SpellItem>();
+        if (!spell) return false;
+        if ((a_reward.functionOnType == 0 || a_reward.functionOnType == 2) && a_actor->HasSpell(spell)) {
+            return true;
         }
+        if (a_reward.functionOnType == 1 || a_reward.functionOnType == 2) {
+            if (auto effects = a_actor->AsMagicTarget()->GetActiveEffectList()) {
+                return std::ranges::any_of(*effects, [&](const auto& a_effect) {
+                    return a_effect && a_effect->spell == spell;
+                });
+            }
+        }
+        return false;
+    }
+    if (a_reward.typeReward == "Shout") {
+        auto shout = rewardForm->As<RE::TESShout>();
+        return shout && a_actor->HasShout(shout);
+    }
+    if (a_reward.typeReward == "Perk") {
+        auto perk = rewardForm->As<RE::BGSPerk>();
+        return perk && a_actor->HasPerk(perk);
     }
 
     return false;
+}
+
+bool HasOutstandingNonPersistentReward(
+    RE::Actor* a_actor,
+    const Reward& a_reward,
+    const std::string& a_ruleID,
+    const std::string& a_groupName)
+{
+    if (!a_actor || a_reward.isPersistent) return false;
+
+    auto [plugin, fID] = a_reward.ParseFormID();
+    auto rewardForm = RE::TESForm::LookupByID(fID);
+    if (!rewardForm) return false;
+
+    const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+    auto& session = SaveStateManager::GetSingleton()->GetSessionData();
+    const auto npcIt = session.persistentItems.find(npcKey);
+
+    const auto hasMissingManagedCopies = [&](RE::TESBoundObject* a_item) {
+        if (!a_item || npcIt == session.persistentItems.end()) return false;
+        const auto itemKey = SaveStateManager::BuildFormKey(a_item);
+        const auto itemState = FindManagedItemState(
+            npcIt->second, itemKey, a_ruleID, a_groupName, false);
+        return itemState && itemState->missingCount > 0;
+    };
+
+    if (a_reward.typeReward == "Outfit") {
+        auto outfit = rewardForm->As<RE::BGSOutfit>();
+        return outfit && std::ranges::any_of(outfit->outfitItems, [&](RE::TESForm* a_form) {
+            return hasMissingManagedCopies(a_form ? a_form->As<RE::TESBoundObject>() : nullptr);
+        });
+    }
+    if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
+        return hasMissingManagedCopies(bound);
+    }
+
+    // Para rewards não físicos, permanecer no ator após a tentativa de
+    // remoção significa que o resultado anterior ainda está presente.
+    return IsRewardRepresentedInCurrentState(
+        a_actor, a_reward, a_ruleID, a_groupName);
+}
+
+void MigrateLegacyActivationState(
+    RE::Actor* a_actor,
+    const Rule& a_rule,
+    AppliedRuleState& a_state)
+{
+    a_state.activeRewardKeys.clear();
+    a_state.persistentRewardKeys.clear();
+
+    for (const auto& groupName : a_state.appliedGroups) {
+        const auto groupIt = std::ranges::find_if(a_rule.rewardGroups, [&](const RewardGroup& a_group) {
+            return a_group.name == groupName;
+        });
+        if (groupIt == a_rule.rewardGroups.end()) continue;
+
+        for (const auto& reward : groupIt->rewards) {
+            if (!IsRewardRepresentedInCurrentState(a_actor, reward, a_rule.id, groupIt->name)) continue;
+
+            const auto rewardKey = BuildRewardStateKey(groupIt->name, reward);
+            a_state.activeRewardKeys.push_back(rewardKey);
+            if (reward.isPersistent) {
+                a_state.persistentRewardKeys.insert(rewardKey);
+            }
+        }
+    }
+
+    a_state.activationStateKnown = true;
+    a_state.isActive = true;
+    a_state.canRerollOnNextActivation = true;
+    logger::info("[ActivationMigration] Regra '{}' migrada para '{}' com {} rewards identificados.",
+        a_rule.name, a_actor->GetName(), a_state.activeRewardKeys.size());
+}
+
+void RemoveAppliedActivationRewards(
+    RE::Actor* a_actor,
+    const Rule& a_rule,
+    AppliedRuleState& a_state)
+{
+    if (!a_actor) return;
+
+    bool hasOutstandingRewards = false;
+    if (!a_state.activationStateKnown) {
+        RemoveRuleRewards(a_actor, a_rule);
+    }
+    else if (!a_state.activeRewardKeys.empty()) {
+        Rule removalRule = a_rule;
+        removalRule.rewardGroups.clear();
+
+        for (const auto& rewardKey : a_state.activeRewardKeys) {
+            const RewardGroup* group = nullptr;
+            const Reward* reward = nullptr;
+            if (!ResolveRewardState(a_rule, rewardKey, group, reward) || !group || !reward || reward->isPersistent) {
+                continue;
+            }
+
+            auto targetGroup = std::ranges::find_if(removalRule.rewardGroups, [&](const RewardGroup& a_group) {
+                return a_group.name == group->name;
+            });
+            if (targetGroup == removalRule.rewardGroups.end()) {
+                RewardGroup selectedGroup = *group;
+                selectedGroup.rewards.clear();
+                removalRule.rewardGroups.push_back(std::move(selectedGroup));
+                targetGroup = std::prev(removalRule.rewardGroups.end());
+            }
+            targetGroup->rewards.push_back(*reward);
+        }
+
+        if (!removalRule.rewardGroups.empty()) {
+            RemoveRuleRewards(a_actor, removalRule);
+        }
+
+        for (const auto& rewardKey : a_state.activeRewardKeys) {
+            const RewardGroup* group = nullptr;
+            const Reward* reward = nullptr;
+            if (!ResolveRewardState(a_rule, rewardKey, group, reward) || !group || !reward) continue;
+            if (HasOutstandingNonPersistentReward(
+                    a_actor, *reward, a_rule.id, group->name)) {
+                hasOutstandingRewards = true;
+                break;
+            }
+        }
+    }
+
+    a_state.activationStateKnown = true;
+    a_state.isActive = false;
+    a_state.canRerollOnNextActivation = !hasOutstandingRewards;
+    if (!hasOutstandingRewards) {
+        a_state.activeRewardKeys.clear();
+        a_state.appliedGroups.clear();
+    }
+}
+
+void QueuePersistentOutfitForNormalUse(
+    RE::Actor* a_actor,
+    const Reward& a_reward,
+    bool a_isPlayer,
+    std::vector<PendingEquip>& a_equipQueue)
+{
+    if (!a_actor || a_isPlayer || a_reward.typeReward != "Outfit" ||
+        (a_reward.functionOnType != 0 && a_reward.functionOnType != 2)) {
+        return;
+    }
+
+    auto [plugin, fID] = a_reward.ParseFormID();
+    auto outfit = RE::TESForm::LookupByID<RE::BGSOutfit>(fID);
+    if (!outfit) return;
+
+    for (auto* form : outfit->outfitItems) {
+        auto bound = form ? form->As<RE::TESBoundObject>() : nullptr;
+        if (bound && a_actor->GetInventoryCount(bound) > 0) {
+            a_equipQueue.push_back({ bound, 0 });
+        }
+    }
+}
+
+void StartRuleActivation(
+    RE::Actor* a_actor,
+    RE::TESNPC* a_baseNPC,
+    const Rule& a_rule,
+    AppliedRuleState& a_state,
+    bool a_isPlayer,
+    std::vector<PendingEquip>& a_equipQueue)
+{
+    a_state.activationStateKnown = true;
+    a_state.isActive = true;
+    a_state.canRerollOnNextActivation = true;
+    a_state.version = a_rule.version;
+    a_state.appliedGroups.clear();
+    a_state.activeRewardKeys.clear();
+
+    const auto wonGroups = RuleManager::GetSingleton()->RollForGroups(a_baseNPC, a_rule);
+    for (const auto& group : wonGroups) {
+        a_state.appliedGroups.push_back(group.name);
+
+        std::vector<const Reward*> selectedRewards;
+        if (group.isExclusive) {
+            const auto roll = RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f);
+            float cumulative = 0.0f;
+            for (const auto& reward : group.rewards) {
+                cumulative += reward.chanceReward;
+                if (roll <= cumulative) {
+                    selectedRewards.push_back(std::addressof(reward));
+                    break;
+                }
+            }
+        }
+        else {
+            for (const auto& reward : group.rewards) {
+                if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
+                    selectedRewards.push_back(std::addressof(reward));
+                }
+            }
+        }
+
+        for (const auto* reward : selectedRewards) {
+            if (!reward) continue;
+
+            const auto rewardKey = BuildRewardStateKey(group.name, *reward);
+            a_state.activeRewardKeys.push_back(rewardKey);
+
+            if (reward->isPersistent && a_state.persistentRewardKeys.contains(rewardKey)) {
+                RestorePersistentRewardIfNeeded(
+                    a_actor, *reward, a_isPlayer, a_equipQueue, a_rule.id, group.name);
+                QueuePersistentOutfitForNormalUse(a_actor, *reward, a_isPlayer, a_equipQueue);
+                continue;
+            }
+
+            ApplyRewardPhysicalTracked(
+                a_actor, *reward, a_isPlayer, a_equipQueue, a_rule.id, group.name);
+            if (reward->isPersistent) {
+                a_state.persistentRewardKeys.insert(rewardKey);
+            }
+        }
+    }
 }
 
 enum class RuleEvaluationPhase
@@ -1546,19 +2121,6 @@ const char* RuleEvaluationPhaseName(RuleEvaluationPhase a_phase)
     }
 }
 
-void DebugLogInventory(RE::Actor* a_actor) {
-    if (!a_actor) return;
-    auto inventory = a_actor->GetInventory();
-    logger::debug("  [Inventory Audit] '{}' ({:08X}) tem {} itens no container:",
-        a_actor->GetName(), a_actor->GetFormID(), inventory.size());
-
-    for (auto& [item, invData] : inventory) {
-        auto count = invData.first;
-        if (count > 0) {
-            logger::debug("    - [{:08X}] {} (Qtd: {})", item->GetFormID(), item->GetName(), count);
-        }
-    }
-}
 void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
     if (!a_actor) return;
 
@@ -1622,11 +2184,8 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
 
         for (auto it = appliedRulesMap.begin(); it != appliedRulesMap.end();) {
             const std::string& ruleID = it->first;
+            auto& state = it->second;
             auto ruleDefIt = std::find_if(allRules.begin(), allRules.end(), [&](const Rule& r) { return r.id == ruleID; });
-            const bool isContextual = ruleDefIt != allRules.end() && IsContextualRule(*ruleDefIt);
-            const auto previousContextActivity = isContextual ?
-                GetContextualRuleActivity(actorID, ruleID) :
-                std::optional<bool>{};
 
             bool shouldRemove = false;
             if (ruleDefIt == allRules.end()) {
@@ -1642,16 +2201,23 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
             }
 
             if (shouldRemove) {
-                const bool shouldRemoveRewards =
-                    !isContextual || !previousContextActivity.has_value() || previousContextActivity.value();
-                if (ruleDefIt != allRules.end() && shouldRemoveRewards) {
-                    RemoveRuleRewards(a_actor, *ruleDefIt);
+                if (!state.activationStateKnown || state.isActive) {
+                    const Rule* appliedRule = RuleManager::GetSingleton()->GetRuleVersion(ruleID, state.version);
+                    if (!appliedRule && ruleDefIt != allRules.end()) {
+                        appliedRule = std::addressof(*ruleDefIt);
+                    }
+
+                    if (appliedRule) {
+                        RemoveAppliedActivationRewards(a_actor, *appliedRule, state);
+                    }
+                    else {
+                        state.activationStateKnown = true;
+                        state.isActive = false;
+                        state.canRerollOnNextActivation = true;
+                        state.activeRewardKeys.clear();
+                        state.appliedGroups.clear();
+                    }
                 }
-                if (isContextual) {
-                    SetContextualRuleActivity(actorID, ruleID, false);
-                }
-                // Preserva o histórico para que uma reentrada reutilize os
-                // grupos sorteados anteriormente.
                 ++it;
             }
             else {
@@ -1687,6 +2253,9 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
     }
 
     if (rulesToProcess.empty()) {
+        if (!isPlayer && !IsActorSleeping(a_actor)) {
+            EquipBestInventoryItems(a_actor);
+        }
         logger::debug("[ApplyRules] FINALIZADO: Nenhuma regra aplicável para {}", actorName);
         return;
     }
@@ -1736,229 +2305,64 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
             if (level < currentRule.level) continue;
             AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
             int oldVersion = state.version;
-            const bool isContextual = IsContextualRule(currentRule);
-            const auto previousContextActivity = isContextual ?
-                GetContextualRuleActivity(actorID, ruleID) :
-                std::optional<bool>{};
 
-            if (isContextual &&
-                previousContextActivity.value_or(false) &&
-                oldVersion == currentRule.version) {
-                logger::debug(
-                    "  [Contexto inalterado] Regra '{}' já está ativa para {}; evento duplicado ignorado.",
-                    currentRule.name, actorName);
-                continue;
+            const Rule* previousRule = oldVersion > 0 ?
+                RuleManager::GetSingleton()->GetRuleVersion(ruleID, oldVersion) :
+                nullptr;
+
+            if (!state.activationStateKnown && oldVersion > 0) {
+                MigrateLegacyActivationState(
+                    a_actor, previousRule ? *previousRule : currentRule, state);
             }
 
-        if (oldVersion == 0) {
-            logger::debug("  [Novo NPC] Aplicando regra '{}' pela primeira vez em {}.", currentRule.name, actorName);
-            // --- 1. APLICAÇÃO INICIAL (NPC Novo) ---
-            std::vector<RewardGroup> wonGroups;
-            if (state.appliedGroups.empty()) {
-                wonGroups = RuleManager::GetSingleton()->RollForGroups(baseNPC, currentRule);
-                for (const auto& group : wonGroups) {
-                    state.appliedGroups.push_back(group.name);
+            if (oldVersion > 0 && oldVersion != currentRule.version) {
+                if (state.isActive) {
+                    RemoveAppliedActivationRewards(
+                        a_actor, previousRule ? *previousRule : currentRule, state);
+                }
+                state.isActive = false;
+                state.canRerollOnNextActivation = true;
+                state.activeRewardKeys.clear();
+                state.appliedGroups.clear();
+            }
+
+            if (!state.isActive) {
+                if (state.canRerollOnNextActivation) {
+                    logger::debug("[Activation] Nova ativação da regra '{}' para '{}'.",
+                        currentRule.name, actorName);
+                    StartRuleActivation(
+                        a_actor, baseNPC, currentRule, state, isPlayer, equipQueue);
+                }
+                else {
+                    // Algum reward não persistente saiu do ator e continua
+                    // documentado pelo ledger. Reativamos sem novo sorteio
+                    // para impedir duplicação/farming.
+                    state.isActive = true;
+                    state.version = currentRule.version;
+                    logger::debug(
+                        "[Activation] Regra '{}' reativada para '{}' sem reroll; rewards anteriores continuam documentados.",
+                        currentRule.name, actorName);
                 }
             }
             else {
-                for (const auto& group : currentRule.rewardGroups) {
-                    if (std::find(state.appliedGroups.begin(), state.appliedGroups.end(), group.name) != state.appliedGroups.end()) {
-                        wonGroups.push_back(group);
+                // A regra continua na mesma ativação: não há reroll. Apenas
+                // rewards persistentes podem ser reconciliados pelo ledger.
+                for (const auto& rewardKey : state.activeRewardKeys) {
+                    const RewardGroup* group = nullptr;
+                    const Reward* reward = nullptr;
+                    if (!ResolveRewardState(currentRule, rewardKey, group, reward) ||
+                        !group || !reward || !reward->isPersistent) {
+                        continue;
                     }
+
+                    RestorePersistentRewardIfNeeded(
+                        a_actor, *reward, isPlayer, equipQueue, ruleID, group->name);
+                    QueuePersistentOutfitForNormalUse(
+                        a_actor, *reward, isPlayer, equipQueue);
                 }
+                state.version = currentRule.version;
             }
 
-            for (const auto& group : wonGroups) {
-                // Se o grupo for exclusivo, sorteia apenas UM item
-                if (group.isExclusive) {
-                    float roll = RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f);
-                    float cumulative = 0.0f;
-                    for (const auto& reward : group.rewards) {
-                        cumulative += reward.chanceReward;
-                        if (roll <= cumulative) {
-                            ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                            break;
-                        }
-                    }
-                }
-                else {
-                    // Grupo normal: sorteia cada item individualmente
-                    for (const auto& reward : group.rewards) {
-                        if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
-                            ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                        }
-                    }
-                }
-            }
-            state.version = currentRule.version;
-        }
-        else if (oldVersion < currentRule.version) {
-
-            // --- 2. ATUALIZAÇÃO INCREMENTAL (Versão subiu) ---
-            auto oldRule = RuleManager::GetSingleton()->GetRuleVersion(ruleID, oldVersion);
-            logger::debug("  [Update] Atualizando {} da versão {} para {}.", actorName, oldVersion, currentRule.version);
-            for (const auto& group : currentRule.rewardGroups) {
-                auto it = std::find(state.appliedGroups.begin(), state.appliedGroups.end(), group.name);
-                bool wasAlreadyApplied = (it != state.appliedGroups.end());
-
-                if (wasAlreadyApplied) {
-                    // LÓGICA UNIFICADA PARA GRUPO JÁ APLICADO
-                    if (group.isExclusive) {
-                        // Caso 1: Grupo Exclusivo - Nada novo entra, apenas mantém o estado visual
-                        for (const auto& reward : group.rewards) {
-                            if (!reward.isPersistent) {
-                                if (IsManagedPhysicalReward(reward)) {
-                                    RestorePersistentRewardIfNeeded(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                                }
-                                else {
-                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
-                                }
-                            }
-                        }
-                    }
-                    else {
-                        // Caso 2: Grupo NÃO Exclusivo - Permite novos itens da nova versão
-                        for (const auto& reward : group.rewards) {
-                            bool isNewReward = true;
-                            if (oldRule) {
-                                for (const auto& oldG : oldRule->rewardGroups) {
-                                    if (oldG.name == group.name) {
-                                        for (const auto& oldR : oldG.rewards) {
-                                            if (oldR.formIDStr == reward.formIDStr) { isNewReward = false; break; }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (isNewReward) {
-                                if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
-                                    ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                                }
-                            }
-                            else if (!reward.isPersistent) {
-                                if (IsManagedPhysicalReward(reward)) {
-                                    RestorePersistentRewardIfNeeded(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                                }
-                                else {
-                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
-                                }
-                            }
-                        }
-                    }
-                }
-                else if (!currentRule.isExclusive) {
-                    // Grupo NOVO em regra NÃO exclusiva: Sorteia o grupo inteiro
-                    if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= group.chanceGroup) {
-                        state.appliedGroups.push_back(group.name);
-                        // Aplica itens do grupo novo (respeitando exclusividade do grupo se houver)
-                        if (group.isExclusive) {
-                            float roll = RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f);
-                            float cumulative = 0.0f;
-                            for (const auto& reward : group.rewards) {
-                                cumulative += reward.chanceReward;
-                                if (roll <= cumulative) {
-                                    ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                                    break;
-                                }
-                            }
-                        }
-                        else {
-                            for (const auto& reward : group.rewards) {
-                                if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
-                                    ApplyRewardPhysicalTracked(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            state.version = currentRule.version;
-        }
-        else if (oldVersion == currentRule.version) {
-            // --- 3. RE-ENTRADA (Mesma Versão) ---
-            for (const auto& groupName : state.appliedGroups) {
-                for (const auto& group : currentRule.rewardGroups) {
-                    if (group.name == groupName) {
-                        for (const auto& reward : group.rewards) {
-                            if (!reward.isPersistent) {
-                                if (IsManagedPhysicalReward(reward)) {
-                                    RestorePersistentRewardIfNeeded(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                                }
-                                else {
-                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
-                                }
-                            }
-                            else {
-                                RestorePersistentRewardIfNeeded(a_actor, reward, isPlayer, equipQueue, ruleID, group.name);
-                                continue;
-
-                                auto [plugin, fID] = reward.ParseFormID();
-                                auto rewardForm = RE::TESForm::LookupByID(fID);
-                                if (!rewardForm) continue;
-
-                                bool needsRestoration = false;
-                                a_actor->InitInventoryIfRequired(); //
-
-                                if (reward.typeReward == "Outfit") {
-                                    auto outfit = rewardForm->As<RE::BGSOutfit>();
-                                    if (outfit) {
-                                        for (auto* item : outfit->outfitItems) {
-                                            if (auto* bound = item->As<RE::TESBoundObject>()) {
-                                                // LOG DE AUDITORIA: Mostra o que o motor do Skyrim está reportando
-                                                int currentCount = 0;
-                                                auto invChanges = a_actor->GetInventoryChanges(); // Busca as mudanças reais da instância
-
-                                                if (invChanges && invChanges->entryList) {
-                                                    for (auto* entry : *invChanges->entryList) {
-                                                        if (entry && entry->object == bound) {
-                                                            currentCount = entry->countDelta; // Quantos itens foram adicionados/removidos desta instância específica
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                else {
-                                                    // Se não há InventoryChanges, a instância está "limpa" (mesmo que a base diga que tem itens)
-                                                    currentCount = 0;
-                                                }
-
-                                                logger::debug("  [Audit Real] NPC: {} | Item: '{}' | Delta Real: {}", actorName, bound->GetName(), currentCount);
-
-                                                if (currentCount <= 0) {
-                                                    // Se o Delta for 0, o NPC da instância atual NÃO tem o item, independente do que a base diga
-                                                    needsRestoration = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                else {
-                                    auto boundObj = rewardForm->As<RE::TESBoundObject>();
-                                    if (boundObj) {
-                                        int currentCount = a_actor->GetInventoryCount(boundObj);
-                                        logger::debug("  [Audit] NPC: {} | Item: '{}' | GetInventoryCount: {}",
-                                            actorName, boundObj->GetName(), currentCount);
-
-                                        if (currentCount <= 0) {
-                                            logger::info("  [Re-entrada] NPC {} perdeu item persistente '{}'. Restaurando...",
-                                                actorName, boundObj->GetName());
-                                            needsRestoration = true;
-                                        }
-                                    }
-                                }
-
-                                if (needsRestoration) {
-                                    ApplyRewardPhysical(a_actor, reward, isPlayer, equipQueue);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (isContextual) {
-            SetContextualRuleActivity(actorID, ruleID, true);
-        }
 
         // Equipagem final
         if (!equipQueue.empty() && !isPlayer) {
@@ -1970,24 +2374,12 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                     return a.priority < b.priority;
                     });
 
-                auto inventory = a_actor->GetInventory();
-
                 for (auto& entry : equipQueue) {
                     if (entry.object->IsArmor()) {
-                        auto newArmor = entry.object->As<RE::TESObjectARMO>();
-                        auto newSlotMask = newArmor->GetSlotMask();
-
-                        for (auto& [item, invData] : inventory) {
-                            if (invData.second->IsWorn() && item->IsArmor()) {
-                                auto wornArmor = item->As<RE::TESObjectARMO>();
-                                if (wornArmor && (wornArmor->GetSlotMask() & newSlotMask)) {
-                                    if (item->GetFormID() != entry.object->GetFormID()) {
-                                        logger::debug("  [EquipManager] Desequipando '{}' para liberar slot para '{}'", item->GetName(), entry.object->GetName());
-                                        equipManager->UnequipObject(a_actor, item);
-                                    }
-                                }
-                            }
-                        }
+                        // Armaduras são selecionadas em conjunto por
+                        // EquipBestInventoryItems para respeitar slots,
+                        // precedência das rules e ArmorAddons compatíveis.
+                        continue;
                     }
 
                     logger::debug("  [EquipManager] Comandando motor: Equipar '{}' em {}", entry.object->GetName(), actorName);
@@ -1996,16 +2388,19 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
                 }
             }
         }
+        equipQueue.clear();
 
         if (IsActorSleeping(a_actor)) {
             auto sleepOutfit = GetAppliedSleepOutfit(a_actor);
             if (sleepOutfit) {
                 // Verifica se já está vestindo para evitar equipagem redundante
                 bool alreadyWearing = false;
-                if (!sleepOutfit->outfitItems.empty()) {
-                    if (auto item = sleepOutfit->outfitItems[0]->As<RE::TESBoundObject>()) {
-                        auto inv = a_actor->GetInventory();
-                        if (inv.contains(item) && inv[item].second->IsWorn()) alreadyWearing = true;
+                auto inventory = a_actor->GetInventory();
+                for (auto* form : sleepOutfit->outfitItems) {
+                    auto item = form ? form->As<RE::TESBoundObject>() : nullptr;
+                    if (item && inventory.contains(item) && inventory[item].second->IsWorn()) {
+                        alreadyWearing = true;
+                        break;
                     }
                 }
                 if (!alreadyWearing) {
@@ -2019,5 +2414,11 @@ void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel) {
         // --- LOG DE FINALIZAÇÃO ---
         logger::debug("[ApplyRules] FINALIZADO com sucesso para {} ({:08X})", actorName, actorID);
     }
+    }
+
+    // Também recompõe quando nenhuma regra da fase correspondeu (por
+    // exemplo, após sair de uma Cell/Location e remover o outfit anterior).
+    if (!isPlayer && !IsActorSleeping(a_actor)) {
+        EquipBestInventoryItems(a_actor);
     }
 }

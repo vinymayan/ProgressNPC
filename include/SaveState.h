@@ -17,6 +17,11 @@ struct SaveFileRoot {
 struct AppliedRuleState {
     int version = 0;
     std::vector<std::string> appliedGroups; // Nomes dos grupos que passaram no sorteio
+    bool activationStateKnown = false;
+    bool isActive = false;
+    bool canRerollOnNextActivation = true;
+    std::vector<std::string> activeRewardKeys;
+    std::set<std::string> persistentRewardKeys;
 };
 
 struct PersistentItemState {
@@ -97,6 +102,7 @@ enum class OutfitConversionMode : int {
 // Logica dos outfits de dormir
 RE::BGSOutfit* GetAppliedSleepOutfit(RE::Actor* a_actor);
 void ManageSleepOutfitState(RE::Actor* a_actor, bool a_isEntering);
+void ScheduleSleepOutfitUpdate(RE::Actor* a_actor, bool a_isEntering);
 void EquipBestInventoryItems(RE::Actor* a_actor);
 
 class NPCSettings {
@@ -194,7 +200,6 @@ private:
                 // USAR O NOVO HELPER: Ele verifica o NPC e o Template dele no banco de dados
                 if (!RuleManager::GetSingleton()->IsAffected(actor)) {
                     logger::debug("[OFF] Rules encontradas para {}, aplicando.", actor->GetName());
-                    //EquipBestInventoryItems(actor);
                     return _ShouldBackgroundClone(a_this);
                 }
 
@@ -258,6 +263,16 @@ public:
     RE::BSEventNotifyControl ProcessEvent(const RE::TESContainerChangedEvent* a_event,
         RE::BSTEventSource<RE::TESContainerChangedEvent>*) override {
         SaveStateManager::GetSingleton()->HandleContainerChanged(a_event);
+        if (a_event) {
+            if (auto oldOwner = RE::TESForm::LookupByID<RE::Actor>(a_event->oldContainer)) {
+                ScheduleRuleEvaluation(oldOwner);
+            }
+            if (a_event->newContainer != a_event->oldContainer) {
+                if (auto newOwner = RE::TESForm::LookupByID<RE::Actor>(a_event->newContainer)) {
+                    ScheduleRuleEvaluation(newOwner);
+                }
+            }
+        }
         return RE::BSEventNotifyControl::kContinue;
     }
 

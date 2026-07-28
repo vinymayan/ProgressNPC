@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include <functional>
+#include <cstdint>
 #include "ClibUtil/editorID.hpp"
 
 struct InternalFormInfo {
@@ -30,6 +31,7 @@ public:
 
     void PopulateAllLists(bool forceRefresh = false);
     void RefreshLists(std::string_view a_signatures);
+    std::uint64_t GetListRevision() const { return _listRevision; }
     static std::string ToUTF8(std::string_view a_str);
     // Data Store: Map of "TypeName" -> List of InternalFormInfo
     // We use this to feed the UI
@@ -48,6 +50,7 @@ private:
     void PopulateCellList();
 
     bool _isPopulated = false;
+    std::uint64_t _listRevision = 0;
     std::map<std::string, std::vector<InternalFormInfo>> _dataStore;
     std::vector<std::function<void()>> _readyCallbacks;
 };

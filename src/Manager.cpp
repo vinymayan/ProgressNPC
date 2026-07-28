@@ -126,6 +126,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     PopulateList<RE::TESPackage>("Package");
 
     _isPopulated = true;
+    ++_listRevision;
     for (auto cb : _readyCallbacks) {
         if (cb) cb();
     }
@@ -248,6 +249,8 @@ void Manager::RefreshLists(std::string_view a_signatures) {
             }
         }
     }
+
+    ++_listRevision;
 }
 
 const std::vector<InternalFormInfo>& Manager::GetList(const std::string& typeName) {

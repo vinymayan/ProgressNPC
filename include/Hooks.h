@@ -20,13 +20,13 @@ struct Hooks
 			auto actor = const_cast<RE::Actor*>(a_event->holder->As<RE::Actor>());
 			if (actor) {
 				if (tag == "SBF_EnterBed" || tag == "SBF_EnterBedroll") {
-					logger::debug("[Hooks] Detected sleep event: {} for actor {}", tag, actor->GetName());
-					ManageSleepOutfitState(actor, true);
+					logger::debug("[Hooks] Detected sleep event: {} for actor {:08X}", tag, actor->GetFormID());
+					ScheduleSleepOutfitUpdate(actor, true);
 
 				}
 				else if (tag == "SBF_ExitBed" || tag == "SBF_ExitBedroll") {
-					logger::debug("[Hooks] Detected wake event: {} for actor {}", tag, actor->GetName());
-					ManageSleepOutfitState(actor, false);
+					logger::debug("[Hooks] Detected wake event: {} for actor {:08X}", tag, actor->GetFormID());
+					ScheduleSleepOutfitUpdate(actor, false);
 
 				}
 			}

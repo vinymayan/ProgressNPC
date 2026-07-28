@@ -105,6 +105,129 @@ namespace SPIDUI {
         return 0; // Aceita o caractere
     };
 
+    std::string ToLowerASCII(std::string_view value)
+    {
+        std::string result(value);
+        std::ranges::transform(result, result.begin(), [](const unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        });
+        return result;
+    }
+
+    struct SearchableComboOption {
+        std::string value;
+        std::string label;
+    };
+
+    struct SearchableComboState {
+        char search[128]{};
+        std::string appliedSearch;
+        std::uint64_t optionsRevision = static_cast<std::uint64_t>(-1);
+        std::size_t optionsSize = 0;
+        std::vector<std::size_t> filteredIndices;
+    };
+
+    bool DrawSearchableCombo(
+        const char* label,
+        const char* preview,
+        std::string_view stateID,
+        const std::vector<SearchableComboOption>& options,
+        std::string& selectedValue,
+        std::uint64_t optionsRevision)
+    {
+        static std::unordered_map<std::string, SearchableComboState> states;
+        static auto clipper = ImGuiMCP::ImGuiListClipperManager::Create();
+
+        const std::string stateKey(stateID);
+        ImGuiMCP::PushID(stateKey.c_str());
+        const bool opened = ImGuiMCP::BeginCombo(label, preview);
+        if (!opened) {
+            ImGuiMCP::PopID();
+            return false;
+        }
+
+        auto& state = states[stateKey];
+        const bool appearing = ImGuiMCP::IsWindowAppearing();
+        if (appearing) {
+            state.search[0] = '\0';
+            state.appliedSearch.clear();
+            state.optionsRevision = static_cast<std::uint64_t>(-1);
+            ImGuiMCP::SetKeyboardFocusHere();
+        }
+
+        ImGuiMCP::SetNextItemWidth(-1.0f);
+        const bool searchChanged = ImGuiMCP::InputTextWithHint(
+            "##ComboSearch",
+            GetLoc("auto.search", "Search..."),
+            state.search,
+            sizeof(state.search));
+
+        const std::string normalizedSearch = ToLowerASCII(state.search);
+        if (searchChanged ||
+            state.appliedSearch != normalizedSearch ||
+            state.optionsRevision != optionsRevision ||
+            state.optionsSize != options.size()) {
+            state.filteredIndices.clear();
+            state.filteredIndices.reserve(options.size());
+            for (std::size_t index = 0; index < options.size(); ++index) {
+                if (normalizedSearch.empty() ||
+                    ToLowerASCII(options[index].label).contains(normalizedSearch)) {
+                    state.filteredIndices.push_back(index);
+                }
+            }
+            state.appliedSearch = normalizedSearch;
+            state.optionsRevision = optionsRevision;
+            state.optionsSize = options.size();
+        }
+
+        ImGuiMCP::Separator();
+        bool changed = false;
+        if (ImGuiMCP::BeginChild("##ComboResults", { 0.0f, 220.0f }, 0)) {
+            if (state.filteredIndices.empty()) {
+                ImGuiMCP::TextDisabled(
+                    GetLoc("auto.no_items_found_in_this_category", "No items found in this category."));
+            }
+            else {
+                ImGuiMCP::ImGuiListClipperManager::Begin(
+                    clipper, static_cast<int>(state.filteredIndices.size()), -1.0f);
+
+                if (appearing) {
+                    const auto selected = std::ranges::find_if(
+                        state.filteredIndices,
+                        [&](const std::size_t index) {
+                            return options[index].value == selectedValue;
+                        });
+                    if (selected != state.filteredIndices.end()) {
+                        ImGuiMCP::ImGuiListClipperManager::IncludeItemByIndex(
+                            clipper, static_cast<int>(std::distance(state.filteredIndices.begin(), selected)));
+                    }
+                }
+
+                while (ImGuiMCP::ImGuiListClipperManager::Step(clipper)) {
+                    for (int visibleIndex = clipper->DisplayStart;
+                         visibleIndex < clipper->DisplayEnd;
+                         ++visibleIndex) {
+                        const auto optionIndex =
+                            state.filteredIndices[static_cast<std::size_t>(visibleIndex)];
+                        const auto& option = options[optionIndex];
+                        const bool selected = option.value == selectedValue;
+
+                        ImGuiMCP::PushID(option.value.c_str());
+                        if (ImGuiMCP::Selectable(option.label.c_str(), selected)) {
+                            selectedValue = option.value;
+                            changed = true;
+                        }
+                        ImGuiMCP::PopID();
+                    }
+                }
+            }
+        }
+        ImGuiMCP::EndChild();
+        ImGuiMCP::EndCombo();
+        ImGuiMCP::PopID();
+        return changed;
+    }
+
     struct NPCMatchInfo {
         bool isAffected = false;
         std::string ruleNames; // Cache das strings das regras para exibição rápida
@@ -156,23 +279,27 @@ namespace SPIDUI {
             activePackageID = packages.front().id;
         }
 
-        ImGuiMCP::TextUnformatted(GetLoc("auto.package_workspace", "Package Workspace"));
+        if (!ImGuiMCP::CollapsingHeader(
+                GetLoc("auto.package_workspace", "Package Workspace"))) {
+            return;
+        }
+
+        std::vector<SearchableComboOption> packageOptions;
+        packageOptions.reserve(packages.size());
+        for (const auto& package : packages) {
+            packageOptions.push_back({ package.id, package.displayName });
+        }
+        const auto packageRevision = static_cast<std::uint64_t>(packages.size());
+
         const auto* active = FindPackage(activePackageID);
         ImGuiMCP::SetNextItemWidth(260.0f);
-        if (ImGuiMCP::BeginCombo(
+        DrawSearchableCombo(
                 GetLoc("auto.active_package", "Active Package"),
-                active ? active->displayName.c_str() : "Local Rules")) {
-            for (const auto& package : packages) {
-                const bool selected = package.id == activePackageID;
-                if (ImGuiMCP::Selectable(package.displayName.c_str(), selected)) {
-                    activePackageID = package.id;
-                }
-                if (selected) {
-                    ImGuiMCP::SetItemDefaultFocus();
-                }
-            }
-            ImGuiMCP::EndCombo();
-        }
+                active ? active->displayName.c_str() : "Local Rules",
+                "ActivePackageCombo",
+                packageOptions,
+                activePackageID,
+                packageRevision);
 
         ImGuiMCP::SameLine();
         ImGuiMCP::SetNextItemWidth(220.0f);
@@ -197,19 +324,17 @@ namespace SPIDUI {
             }
         }
         ImGuiMCP::SetNextItemWidth(260.0f);
-        if (ImGuiMCP::BeginCombo(GetLoc("auto.package_filter", "Package Filter"), filterLabel)) {
-            const bool allSelected = packageFilterID.empty();
-            if (ImGuiMCP::Selectable(GetLoc("auto.all_packages", "All Packages"), allSelected)) {
-                packageFilterID.clear();
-            }
-            for (const auto& package : packages) {
-                const bool selected = package.id == packageFilterID;
-                if (ImGuiMCP::Selectable(package.displayName.c_str(), selected)) {
-                    packageFilterID = package.id;
-                }
-            }
-            ImGuiMCP::EndCombo();
-        }
+        auto packageFilterOptions = packageOptions;
+        packageFilterOptions.insert(
+            packageFilterOptions.begin(),
+            { "", GetLoc("auto.all_packages", "All Packages") });
+        DrawSearchableCombo(
+            GetLoc("auto.package_filter", "Package Filter"),
+            filterLabel,
+            "PackageFilterCombo",
+            packageFilterOptions,
+            packageFilterID,
+            packageRevision);
         ImGuiMCP::Separator();
     }
 
@@ -433,15 +558,26 @@ namespace SPIDUI {
         static std::vector<InternalFormInfo> rewardAllCache;
         static std::vector<InternalFormInfo> filterAllCache;
 
-        static std::string lastSearch = "";
-        static std::string lastPluginFilter = "";
         static std::string lastListType = "";
         static void* lastTargetPtr = nullptr;
         static size_t lastTargetSize = 0;
         static bool needsRebuildFiltered = true;
+        static bool lastRewardMode = false;
+        static std::uint64_t lastManagerRevision = static_cast<std::uint64_t>(-1);
 
         std::vector<size_t>& currentCache = isRewardMode ? rewardFilteredIndices : blacklistFilteredIndices;
 
+        const auto managerRevision = Manager::GetSingleton()->GetListRevision();
+        if (lastManagerRevision != managerRevision) {
+            rewardAllCache.clear();
+            filterAllCache.clear();
+            needsRebuildFiltered = true;
+            lastManagerRevision = managerRevision;
+        }
+        if (lastRewardMode != isRewardMode) {
+            needsRebuildFiltered = true;
+            lastRewardMode = isRewardMode;
+        }
 
 
         ImGuiMCP::SetNextItemWidth(200.0f);
@@ -449,24 +585,33 @@ namespace SPIDUI {
 
         ImGuiMCP::SameLine();
         ImGuiMCP::SetNextItemWidth(200.0f);
-        if (ImGuiMCP::BeginCombo("##FilterType", listType.c_str())) {
-            std::vector<const char*> options = isRewardMode ?
-                std::vector<const char*>{ "All", "Selected", "Perk", "Spell", "Shout", "Keyword", "Faction", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key", "Outfit" } :
-                std::vector<const char*>{
+        const std::vector<const char*> typeNames = isRewardMode ?
+            std::vector<const char*>{
+                "All", "Selected", "Perk", "Spell", "Shout", "Keyword", "Faction",
+                "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo",
+                "Misc", "SoulGem", "Key", "Outfit"
+            } :
+            std::vector<const char*>{
                 "All", "Selected", "NPC", "Faction", "Faction Rank", "Keyword", "Race",
-                "Spell", "Perk", "Shout", "Package", "Combat Style", "Voice Type", "Class", "Location", "Cell", "Skin", "Inventory Item",
-                "Inventory Count", "Gold", "Equipped Item",
-                "Hair", "Facial Hair", "HeadPart Misc", "HeadPart Face",
-                "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows", "Leveled NPC"
+                "Spell", "Perk", "Shout", "Package", "Combat Style", "Voice Type",
+                "Class", "Location", "Cell", "Skin", "Inventory Item", "Inventory Count",
+                "Gold", "Equipped Item", "Hair", "Facial Hair", "HeadPart Misc",
+                "HeadPart Face", "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows",
+                "Leveled NPC"
             };
-
-            for (auto opt : options) {
-                if (ImGuiMCP::Selectable(opt, listType == opt)) {
-                    listType = opt;
-                    needsRebuildFiltered = true;
-                }
-            }
-            ImGuiMCP::EndCombo();
+        std::vector<SearchableComboOption> typeOptions;
+        typeOptions.reserve(typeNames.size());
+        for (const auto* typeName : typeNames) {
+            typeOptions.push_back({ typeName, typeName });
+        }
+        if (DrawSearchableCombo(
+                "##FilterType",
+                listType.c_str(),
+                isRewardMode ? "RewardTypeCombo" : "FilterTypeCombo",
+                typeOptions,
+                listType,
+                isRewardMode ? 1 : 2)) {
+            needsRebuildFiltered = true;
         }
 
         const std::vector<InternalFormInfo>* sourceList = nullptr;
@@ -545,22 +690,52 @@ namespace SPIDUI {
             return;
         }
 
-
-        static std::string pluginFilter = "All";
-
         ImGuiMCP::SameLine();
         ImGuiMCP::SetNextItemWidth(150.0f);
-        if (ImGuiMCP::BeginCombo("##Plugin", selectionPluginFilter.c_str())) {
-            if (ImGuiMCP::Selectable(GetLoc("auto.all_plugins", "All Plugins"), selectionPluginFilter == "All")) { selectionPluginFilter = "All"; needsRebuildFiltered = true; }
+        static std::vector<SearchableComboOption> pluginOptions;
+        static std::uint64_t pluginOptionsRevision = 0;
+        static std::uint64_t pluginManagerRevision = static_cast<std::uint64_t>(-1);
+        static std::string pluginListType;
+        static const InternalFormInfo* pluginSourceData = nullptr;
+        static std::size_t pluginSourceSize = 0;
+
+        if (pluginManagerRevision != managerRevision ||
+            pluginListType != listType ||
+            pluginSourceData != sourceList->data() ||
+            pluginSourceSize != sourceList->size() ||
+            changed) {
             std::set<std::string> plugins;
             for (const auto& item : *sourceList) if (!item.pluginName.empty()) plugins.insert(item.pluginName);
+            pluginOptions.clear();
+            pluginOptions.reserve(plugins.size() + 1);
+            pluginOptions.push_back({ "All", GetLoc("auto.all_plugins", "All Plugins") });
             for (const auto& p : plugins) {
-                if (ImGuiMCP::Selectable(p.c_str(), selectionPluginFilter == p)) {
-                    selectionPluginFilter = p;
-                    needsRebuildFiltered = true;
-                }
+                pluginOptions.push_back({ p, p });
             }
-            ImGuiMCP::EndCombo();
+            pluginManagerRevision = managerRevision;
+            pluginListType = listType;
+            pluginSourceData = sourceList->data();
+            pluginSourceSize = sourceList->size();
+            ++pluginOptionsRevision;
+
+            if (selectionPluginFilter != "All" &&
+                std::ranges::none_of(pluginOptions, [&](const SearchableComboOption& option) {
+                    return option.value == selectionPluginFilter;
+                })) {
+                selectionPluginFilter = "All";
+                needsRebuildFiltered = true;
+            }
+        }
+        if (DrawSearchableCombo(
+                "##Plugin",
+                selectionPluginFilter == "All" ?
+                    GetLoc("auto.all_plugins", "All Plugins") :
+                    selectionPluginFilter.c_str(),
+                isRewardMode ? "RewardPluginCombo" : "FilterPluginCombo",
+                pluginOptions,
+                selectionPluginFilter,
+                pluginOptionsRevision)) {
+            needsRebuildFiltered = true;
         }
         if (lastListType != listType) {
             changed = true;
@@ -958,26 +1133,92 @@ namespace SPIDUI {
         bool changed = false;
 
         if (ImGuiMCP::BeginCombo(label, currentIDStr.c_str())) {
-            static char searchBuf[64] = "";
-            ImGuiMCP::InputText(GetLoc("auto.search", "Search"), searchBuf, sizeof(searchBuf));
-            std::string search(searchBuf);
-            std::transform(search.begin(), search.end(), search.begin(), ::tolower);
+            struct FormPickerState {
+                char search[128]{};
+                std::string appliedSearch;
+                std::uint64_t managerRevision = static_cast<std::uint64_t>(-1);
+                std::size_t sourceSize = 0;
+                std::vector<std::size_t> filteredIndices;
+            };
+            static std::unordered_map<std::string, FormPickerState> states;
+            static auto clipper = ImGuiMCP::ImGuiListClipperManager::Create();
 
-            for (const auto& info : list) {
-                std::string displayName = info.editorID + " - " + info.name;
-                std::string lowerName = displayName;
-                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+            const std::string pickerID = std::string(label) + '\x1F' + typeName;
+            auto& state = states[pickerID];
+            const bool appearing = ImGuiMCP::IsWindowAppearing();
+            if (appearing) {
+                state.search[0] = '\0';
+                state.appliedSearch.clear();
+                state.managerRevision = static_cast<std::uint64_t>(-1);
+                ImGuiMCP::SetKeyboardFocusHere();
+            }
 
-                if (!search.empty() && lowerName.find(search) == std::string::npos) continue;
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            const bool searchChanged = ImGuiMCP::InputTextWithHint(
+                "##FormPickerSearch",
+                GetLoc("auto.search", "Search..."),
+                state.search,
+                sizeof(state.search));
 
-                // Formatamos como Plugin|FormID para salvar
-                std::string internalID = info.pluginName + "|" + std::to_string(info.formID);
+            const auto normalizedSearch = ToLowerASCII(state.search);
+            const auto managerRevision = Manager::GetSingleton()->GetListRevision();
+            if (searchChanged ||
+                state.appliedSearch != normalizedSearch ||
+                state.managerRevision != managerRevision ||
+                state.sourceSize != list.size()) {
+                state.filteredIndices.clear();
+                state.filteredIndices.reserve(list.size());
+                for (std::size_t index = 0; index < list.size(); ++index) {
+                    const auto& info = list[index];
+                    if (normalizedSearch.empty()) {
+                        state.filteredIndices.push_back(index);
+                        continue;
+                    }
 
-                if (ImGuiMCP::Selectable(displayName.c_str(), currentIDStr == internalID)) {
-                    currentIDStr = internalID;
-                    changed = true;
+                    const auto searchableText =
+                        ToLowerASCII(info.editorID + " " + info.name + " " + info.pluginName);
+                    if (searchableText.contains(normalizedSearch)) {
+                        state.filteredIndices.push_back(index);
+                    }
+                }
+                state.appliedSearch = normalizedSearch;
+                state.managerRevision = managerRevision;
+                state.sourceSize = list.size();
+            }
+
+            ImGuiMCP::Separator();
+            if (ImGuiMCP::BeginChild("##FormPickerResults", { 0.0f, 240.0f }, 0)) {
+                if (state.filteredIndices.empty()) {
+                    ImGuiMCP::TextDisabled(
+                        GetLoc("auto.no_items_found_in_this_category", "No items found in this category."));
+                }
+                else {
+                    ImGuiMCP::ImGuiListClipperManager::Begin(
+                        clipper, static_cast<int>(state.filteredIndices.size()), -1.0f);
+                    while (ImGuiMCP::ImGuiListClipperManager::Step(clipper)) {
+                        for (int visibleIndex = clipper->DisplayStart;
+                             visibleIndex < clipper->DisplayEnd;
+                             ++visibleIndex) {
+                            const auto sourceIndex =
+                                state.filteredIndices[static_cast<std::size_t>(visibleIndex)];
+                            const auto& info = list[sourceIndex];
+                            const std::string displayName =
+                                info.editorID + " - " + info.name + " [" + info.pluginName + "]";
+                            const std::string internalID =
+                                info.pluginName + "|" + std::to_string(info.formID);
+
+                            ImGuiMCP::PushID(static_cast<int>(info.formID));
+                            if (ImGuiMCP::Selectable(
+                                    displayName.c_str(), currentIDStr == internalID)) {
+                                currentIDStr = internalID;
+                                changed = true;
+                            }
+                            ImGuiMCP::PopID();
+                        }
+                    }
                 }
             }
+            ImGuiMCP::EndChild();
             ImGuiMCP::EndCombo();
         }
         return changed;
@@ -1157,8 +1398,14 @@ namespace SPIDUI {
         RenderTypeFilter();
         auto& rules = RuleManager::GetSingleton()->GetRules();
         std::string toDelete = "";
-        std::string lastRenderedPackage;
 
+        struct PackageRuleGroup {
+            std::string id;
+            std::string displayName;
+            std::vector<Rule*> rules;
+        };
+        std::vector<PackageRuleGroup> packageGroups;
+        std::unordered_map<std::string, std::size_t> packageGroupIndices;
         for (auto& rule : rules) {
             if (!packageFilterID.empty() && rule.packageID != packageFilterID) {
                 continue;
@@ -1173,45 +1420,73 @@ namespace SPIDUI {
 
             const auto* ownerPackage = FindPackage(rule.packageID);
             const auto packageName = ownerPackage ? ownerPackage->displayName : rule.packageID;
-            if (packageName != lastRenderedPackage) {
-                ImGuiMCP::SeparatorText(packageName.c_str());
-                lastRenderedPackage = packageName;
+            auto groupIt = packageGroupIndices.find(rule.packageID);
+            if (groupIt == packageGroupIndices.end()) {
+                const auto groupIndex = packageGroups.size();
+                packageGroupIndices.emplace(rule.packageID, groupIndex);
+                packageGroups.push_back({
+                    rule.packageID,
+                    packageName.empty() ? GetLoc("auto.unknown_package", "Unknown Package") : packageName,
+                    {}
+                });
+                groupIt = packageGroupIndices.find(rule.packageID);
+            }
+            packageGroups[groupIt->second].rules.push_back(std::addressof(rule));
+        }
+
+        for (auto& packageGroup : packageGroups) {
+            const auto packageHeader = std::format(
+                "{} ({})###PackageRules_{}",
+                packageGroup.displayName,
+                packageGroup.rules.size(),
+                packageGroup.id);
+            if (!ImGuiMCP::CollapsingHeader(packageHeader.c_str())) {
+                continue;
             }
 
-            bool modified = rule.IsModified();
-            std::string label = rule.name;
-            if (!rule.isEnabled) { label = "[OFF] " + label; }
-            else if (rule.isEnabled && modified) {
-                label += " (Need save)";
-            }
+            ImGuiMCP::Indent();
+            for (auto* rulePtr : packageGroup.rules) {
+                if (!rulePtr) continue;
+                auto& rule = *rulePtr;
+                const bool modified = rule.IsModified();
+                std::string label = rule.name;
+                if (!rule.isEnabled) {
+                    label = "[OFF] " + label;
+                }
+                else if (modified) {
+                    label += " (Need save)";
+                }
 
+                label += " [V:" + std::to_string(rule.version) + "]###" + rule.id;
 
-            label += " [" + packageName + "] [V:" + std::to_string(rule.version) + "]###" + rule.id;
+                bool stylePushed = false;
+                if (!rule.isEnabled) {
+                    ImGuiMCP::PushStyleColor(
+                        ImGuiMCP::ImGuiCol_Text, { 0.5f, 0.5f, 0.5f, 1.0f });
+                    ImGuiMCP::PushStyleColor(
+                        ImGuiMCP::ImGuiCol_Header, { 0.1f, 0.1f, 0.1f, 1.0f });
+                    stylePushed = true;
+                }
+                else if (modified) {
+                    ImGuiMCP::PushStyleColor(
+                        ImGuiMCP::ImGuiCol_Header, { 0.4f, 0.3f, 0.1f, 1.0f });
+                    stylePushed = true;
+                }
 
-            // --- Lógica de Cor do Header e Texto ---
-            bool stylePushed = false;
-            if (!rule.isEnabled) {
-                // Escurece o cabeçalho e o texto se estiver OFF
-                ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Text, { 0.5f, 0.5f, 0.5f, 1.0f }); // Cinza
-                ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Header, { 0.1f, 0.1f, 0.1f, 1.0f }); // Dark
-                stylePushed = true;
-            }
-            else if (modified) {
-                ImGuiMCP::PushStyleColor(ImGuiMCP::ImGuiCol_Header, { 0.4f, 0.3f, 0.1f, 1.0f }); // Laranja (Save)
-                stylePushed = true;
-            }
-
-            if (ImGuiMCP::CollapsingHeader(label.c_str())) {
-                if (stylePushed) ImGuiMCP::PopStyleColor(rule.isEnabled ? 1 : 2);
-                RenderRuleEditor(rule);
-                if (ImGuiMCP::Button((std::string(GetLoc("auto.delete_rule", "Delete Rule")) + "###btnDel" + rule.id).c_str())) {
-                    toDelete = rule.id;
+                if (ImGuiMCP::CollapsingHeader(label.c_str())) {
+                    if (stylePushed) ImGuiMCP::PopStyleColor(rule.isEnabled ? 1 : 2);
+                    RenderRuleEditor(rule);
+                    if (ImGuiMCP::Button(
+                            (std::string(GetLoc("auto.delete_rule", "Delete Rule")) +
+                                "###btnDel" + rule.id).c_str())) {
+                        toDelete = rule.id;
+                    }
+                }
+                else if (stylePushed) {
+                    ImGuiMCP::PopStyleColor(rule.isEnabled ? 1 : 2);
                 }
             }
-            else {
-                if (stylePushed) ImGuiMCP::PopStyleColor(rule.isEnabled ? 1 : 2);
-            }
-
+            ImGuiMCP::Unindent();
         }
 
         if (!toDelete.empty()) {
