@@ -1,6 +1,107 @@
 ﻿#include "Events.h"
 #include "Manager.h"
 #include "Rule.h"
+#include "SaveState.h"
+
+#include <charconv>
+
+namespace
+{
+    std::optional<RE::FormID> ParseNPCVisualFormID(
+        std::string_view a_formID)
+    {
+        if (a_formID.starts_with("0x") ||
+            a_formID.starts_with("0X")) {
+            a_formID.remove_prefix(2);
+        }
+        if (a_formID.empty() || a_formID.size() > 8) {
+            return std::nullopt;
+        }
+
+        RE::FormID parsed = 0;
+        const auto [end, error] = std::from_chars(
+            a_formID.data(),
+            a_formID.data() + a_formID.size(),
+            parsed,
+            16);
+        if (error != std::errc{} ||
+            end != a_formID.data() + a_formID.size() ||
+            parsed == 0) {
+            return std::nullopt;
+        }
+        return parsed;
+    }
+
+    void HandleNPCVisualUpdate(const SKSE::ModCallbackEvent& a_event)
+    {
+        const auto eventFormID =
+            ParseNPCVisualFormID(a_event.strArg.c_str());
+        auto* senderNPC = a_event.sender ?
+            a_event.sender->As<RE::TESNPC>() :
+            nullptr;
+
+        if (senderNPC && eventFormID &&
+            senderNPC->GetFormID() != *eventFormID) {
+            logger::warn(
+                "[NPCVisualUpdate] sender {:08X} does not match strArg '{}'; "
+                "the TESNPC sender remains authoritative.",
+                senderNPC->GetFormID(),
+                a_event.strArg.c_str());
+        }
+
+        auto* npc = senderNPC;
+        if (!npc && eventFormID) {
+            npc = RE::TESForm::LookupByID<RE::TESNPC>(*eventFormID);
+        }
+        if (!npc) {
+            logger::warn(
+                "[NPCVisualUpdate] Could not resolve TESNPC from sender or "
+                "hexadecimal strArg '{}'; numArg={} is not used because a "
+                "float cannot represent every FormID exactly.",
+                a_event.strArg.c_str(),
+                a_event.numArg);
+            return;
+        }
+
+        const auto npcFormID = npc->GetFormID();
+        auto* ruleManager = RuleManager::GetSingleton();
+        ruleManager->InvalidateBaseNPCState(npcFormID);
+
+        RuleEvaluationDelta delta;
+        delta.mask =
+            ToMask(RuleDependency::kStatic) |
+            ToMask(RuleDependency::kTag);
+
+        std::set<RE::FormID> scheduledActors;
+        const auto scheduleMatchingActor =
+            [&](RE::Actor* a_actor) {
+                if (!a_actor || a_actor->IsDead()) {
+                    return;
+                }
+                auto* actorBase = a_actor->GetActorBase();
+                if (!actorBase ||
+                    actorBase->GetFormID() != npcFormID ||
+                    !scheduledActors.insert(a_actor->GetFormID()).second) {
+                    return;
+                }
+                ScheduleRuleEvaluation(a_actor, delta);
+            };
+
+        scheduleMatchingActor(RE::PlayerCharacter::GetSingleton());
+        if (auto* processLists = RE::ProcessLists::GetSingleton()) {
+            for (auto& actorHandle : processLists->highActorHandles) {
+                auto actorPtr = actorHandle.get();
+                scheduleMatchingActor(actorPtr ? actorPtr.get() : nullptr);
+            }
+        }
+
+        logger::info(
+            "[NPCVisualUpdate] NPC {:08X} updated; invalidated static/tag "
+            "state and scheduled {} loaded actor(s).",
+            npcFormID,
+            scheduledActors.size());
+    }
+}
 
 RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE::ModCallbackEvent* a_event, RE::BSTEventSource<SKSE::ModCallbackEvent>*)
 {
@@ -22,6 +123,38 @@ RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE:
         return RE::BSEventNotifyControl::kContinue;
     }
 
+    if (eventName == "NPCVisualUpdate") {
+        HandleNPCVisualUpdate(*a_event);
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    return RE::BSEventNotifyControl::kContinue;
+}
+
+void FollowerDialogueEventHandler::Register()
+{
+    auto* ui = RE::UI::GetSingleton();
+    if (!ui) {
+        logger::warn(
+            "[FollowerState] UI unavailable; Dialogue Menu listener "
+            "was not registered.");
+        return;
+    }
+    ui->AddEventSink(GetSingleton());
+    logger::info(
+        "[FollowerState] Dialogue Menu listener registered.");
+}
+
+RE::BSEventNotifyControl
+FollowerDialogueEventHandler::ProcessEvent(
+    const RE::MenuOpenCloseEvent* a_event,
+    RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
+{
+    if (a_event &&
+        !a_event->opening &&
+        a_event->menuName == RE::DialogueMenu::MENU_NAME) {
+        QueueFollowerStateRefreshAfterDialogue();
+    }
     return RE::BSEventNotifyControl::kContinue;
 }
 

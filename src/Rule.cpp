@@ -117,11 +117,56 @@ namespace
     bool HasActorDependentFilters(const Rule& rule)
     {
         return rule.combatState != RuleCombatState::kAny ||
+            rule.followerState != RuleFollowerState::kAny ||
             std::ranges::any_of(rule.targetFilters, [](const auto& filter) {
             return IsActorDependentFilterType(filter.type);
         }) || std::ranges::any_of(rule.blacklistFilters, [](const auto& filter) {
             return IsActorDependentFilterType(filter.type);
         });
+    }
+
+    RE::TESFaction* GetCurrentFollowerFaction()
+    {
+        static auto* faction = []() -> RE::TESFaction* {
+            auto* dataHandler = RE::TESDataHandler::GetSingleton();
+            return dataHandler ?
+                dataHandler->LookupForm<RE::TESFaction>(
+                    0x0001CA7D, "Skyrim.esm") :
+                nullptr;
+        }();
+        return faction;
+    }
+
+    RE::TESFaction* GetPotentialFollowerFaction()
+    {
+        static auto* faction = []() -> RE::TESFaction* {
+            auto* dataHandler = RE::TESDataHandler::GetSingleton();
+            return dataHandler ?
+                dataHandler->LookupForm<RE::TESFaction>(
+                    0x0005C84D, "Skyrim.esm") :
+                nullptr;
+        }();
+        return faction;
+    }
+
+    RE::BGSKeyword* GetActorTypeNPCKeyword()
+    {
+        static auto* keyword = []() -> RE::BGSKeyword* {
+            auto* dataHandler = RE::TESDataHandler::GetSingleton();
+            return dataHandler ?
+                dataHandler->LookupForm<RE::BGSKeyword>(
+                    0x00013794, "Skyrim.esm") :
+                nullptr;
+        }();
+        return keyword;
+    }
+
+    bool IsFollowerIdentityFaction(const RE::FormID a_formID)
+    {
+        const auto* current = GetCurrentFollowerFaction();
+        const auto* potential = GetPotentialFollowerFaction();
+        return (current && current->GetFormID() == a_formID) ||
+            (potential && potential->GetFormID() == a_formID);
     }
 }
 
@@ -223,6 +268,41 @@ bool IsActorValueFilterValid(const BlacklistFilter& a_filter)
             IsMaximumActorValueSupported(actorValue));
 }
 
+bool IsActivePlayerFollower(RE::Actor* actor)
+{
+    if (!actor || actor->IsPlayerRef() || actor->IsDisabled() ||
+        actor->IsSummoned()) {
+        return false;
+    }
+
+    const auto lifeState = actor->GetLifeState();
+    if (lifeState == RE::ACTOR_LIFE_STATE::kDying ||
+        lifeState == RE::ACTOR_LIFE_STATE::kDead) {
+        return false;
+    }
+
+    if (auto* currentFollowerFaction = GetCurrentFollowerFaction();
+        currentFollowerFaction &&
+        actor->IsInFaction(currentFollowerFaction)) {
+        return true;
+    }
+
+    if (!actor->IsPlayerTeammate()) {
+        return false;
+    }
+
+    if (auto* potentialFollowerFaction =
+            GetPotentialFollowerFaction();
+        potentialFollowerFaction &&
+        actor->IsInFaction(potentialFollowerFaction)) {
+        return true;
+    }
+
+    auto* race = actor->GetRace();
+    auto* actorTypeNPC = GetActorTypeNPCKeyword();
+    return race && actorTypeNPC && race->HasKeyword(actorTypeNPC);
+}
+
 RuleDependencyMask GetFilterDependencyMask(std::string_view a_type)
 {
     if (a_type == "Actor Value") {
@@ -254,7 +334,8 @@ RuleDependencyMask GetRewardDependencyMask(std::string_view a_type)
     }
     if (a_type == "Faction") {
         return ToMask(RuleDependency::kTag) |
-            ToMask(RuleDependency::kFactionRank);
+            ToMask(RuleDependency::kFactionRank) |
+            ToMask(RuleDependency::kFollower);
     }
     if (a_type == "Perk" || a_type == "Spell" || a_type == "Shout") {
         return ToMask(RuleDependency::kAbility);
@@ -516,6 +597,7 @@ namespace {
         AddInt(obj, alloc, "h", p.targetHumanoid);
         AddInt(obj, alloc, "c", p.targetChild);
         AddInt(obj, alloc, "cb", static_cast<int>(p.combatState));
+        AddInt(obj, alloc, "fs", static_cast<int>(p.followerState));
         AddBool(obj, alloc, "ra", p.targetRequiresAll);
         AddBool(obj, alloc, "ex", p.isExclusive);
         obj.AddMember("tf", WriteFilterArray(p.targetFilters, alloc), alloc);
@@ -537,6 +619,7 @@ namespace {
         AddInt(obj, alloc, "t_humanoid", p.targetHumanoid);
         AddInt(obj, alloc, "t_child", p.targetChild);
         AddInt(obj, alloc, "combat_state", static_cast<int>(p.combatState));
+        AddInt(obj, alloc, "follower_state", static_cast<int>(p.followerState));
         AddBool(obj, alloc, "t_reqAll", p.targetRequiresAll);
         obj.AddMember("t_filters", WriteFilterArray(p.targetFilters, alloc), alloc);
         obj.AddMember("groups", WriteRewardGroupArray(p.rewardGroups, alloc), alloc);
@@ -586,6 +669,13 @@ Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId
             j,
             "cb",
             GetInt(j, "combatState", GetInt(j, "combat_state", 0))),
+        0,
+        2));
+    p.followerState = static_cast<RuleFollowerState>(std::clamp(
+        GetInt(
+            j,
+            "fs",
+            GetInt(j, "followerState", GetInt(j, "follower_state", 0))),
         0,
         2));
     p.targetRequiresAll = GetBool(j, "ra", GetBool(j, "targetRequiresAll", false));
@@ -848,6 +938,21 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         const bool inCombat = IsActorInCombatContext(actor);
         if ((rule.combatState == RuleCombatState::kInCombat && !inCombat) ||
             (rule.combatState == RuleCombatState::kOutOfCombat && inCombat)) {
+            return false;
+        }
+    }
+
+    if (!isBlacklist &&
+        rule.followerState != RuleFollowerState::kAny) {
+        if (!actor) {
+            return false;
+        }
+        const bool isActiveFollower =
+            IsActivePlayerFollower(actor);
+        if ((rule.followerState == RuleFollowerState::kActiveOnly &&
+                !isActiveFollower) ||
+            (rule.followerState == RuleFollowerState::kExcludeActive &&
+                isActiveFollower)) {
             return false;
         }
     }
@@ -1303,6 +1408,7 @@ void RuleManager::DeleteRule(const std::string& id) {
 #endif
 
 void RuleManager::LoadRules() {
+    _packagesToDelete.clear();
     if (!RulePackageStore::GetSingleton()->Load(_rules, _ruleHistories, _ruleOwners)) {
         logger::error("Rules were only partially loaded because one or more packages failed.");
     }
@@ -1331,6 +1437,9 @@ bool RuleManager::SaveRules() {
     bool ok = true;
     int updatedTotal = 0;
     for (auto& currentRule : _rules) {
+        if (_packagesToDelete.contains(currentRule.packageID)) {
+            continue;
+        }
         if (!currentRule.IsModified()) {
             continue;
         }
@@ -1344,7 +1453,41 @@ bool RuleManager::SaveRules() {
             logger::error("Rule '{}' could not be saved.", currentRule.name);
         }
     }
-    if (updatedTotal > 0) {
+    if (!ok) {
+        return false;
+    }
+
+    bool deletedPackage = false;
+    const auto pendingPackages = _packagesToDelete;
+    for (const auto& packageID : pendingPackages) {
+        if (!RulePackageStore::GetSingleton()->DeletePackage(packageID)) {
+            ok = false;
+            continue;
+        }
+
+        std::vector<std::string> deletedRuleIDs;
+        for (const auto& rule : _rules) {
+            if (rule.packageID == packageID) {
+                deletedRuleIDs.push_back(rule.id);
+            }
+        }
+        for (const auto& ruleID : deletedRuleIDs) {
+            _ruleHistories.erase(ruleID);
+            _ruleOwners.erase(ruleID);
+        }
+        std::erase_if(
+            _rules,
+            [&packageID](const Rule& rule) {
+                return rule.packageID == packageID;
+            });
+        _packagesToDelete.erase(packageID);
+        deletedPackage = true;
+    }
+
+    if (deletedPackage) {
+        RebuildDependencyIndex();
+    }
+    if (updatedTotal > 0 || deletedPackage) {
         InitializeAffectedNPCsDatabase();
     }
     return ok;
@@ -1374,6 +1517,39 @@ std::optional<std::string> RuleManager::CreatePackage(const std::string_view dis
     return RulePackageStore::GetSingleton()->CreatePackage(displayName);
 }
 
+bool RuleManager::MarkPackageForDeletion(const std::string_view packageID)
+{
+    if (packageID.empty() ||
+        packageID == RulePackageStore::LOCAL_PACKAGE_ID ||
+        IsPackagePendingDeletion(packageID)) {
+        return false;
+    }
+    const auto& packages = GetPackages();
+    if (std::ranges::none_of(
+            packages,
+            [packageID](const RulePackage& package) {
+                return package.id == packageID;
+            })) {
+        return false;
+    }
+    _packagesToDelete.emplace(packageID);
+    logger::info(
+        "Package '{}' marked for deletion; files remain until Save.",
+        packageID);
+    return true;
+}
+
+bool RuleManager::CancelPackageDeletion(const std::string_view packageID)
+{
+    return _packagesToDelete.erase(std::string(packageID)) > 0;
+}
+
+bool RuleManager::IsPackagePendingDeletion(
+    const std::string_view packageID) const
+{
+    return _packagesToDelete.contains(std::string(packageID));
+}
+
 Rule& RuleManager::CreateRule(const std::string_view packageID) {
     Rule rule;
     do {
@@ -1383,7 +1559,8 @@ Rule& RuleManager::CreateRule(const std::string_view packageID) {
     const auto packageExists = std::ranges::any_of(packages, [packageID](const RulePackage& package) {
         return package.id == packageID;
     });
-    rule.packageID = packageExists
+    rule.packageID = packageExists &&
+            !IsPackagePendingDeletion(packageID)
         ? std::string(packageID)
         : std::string(RulePackageStore::LOCAL_PACKAGE_ID);
     rule.level = 1;
@@ -1695,6 +1872,7 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
     _broadFullEvaluationRules.clear();
     _unstableCycleRules.clear();
     _watchedActorValues.clear();
+    _hasFollowerDependentRules = false;
 
     constexpr std::array dependencyBits{
         RuleDependency::kStatic,
@@ -1706,7 +1884,8 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
         RuleDependency::kLevel,
         RuleDependency::kSleep,
         RuleDependency::kCombat,
-        RuleDependency::kActorValue
+        RuleDependency::kActorValue,
+        RuleDependency::kFollower
     };
 
     _ruleIndices.reserve(_rules.size());
@@ -1767,6 +1946,12 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
         if (rule.combatState != RuleCombatState::kAny) {
             mask |= ToMask(RuleDependency::kCombat);
             addDependency(rule, ToMask(RuleDependency::kCombat));
+        }
+        if (rule.followerState != RuleFollowerState::kAny) {
+            mask |= ToMask(RuleDependency::kFollower);
+            addDependency(rule, ToMask(RuleDependency::kFollower));
+            _hasFollowerDependentRules =
+                _hasFollowerDependentRules || rule.isEnabled;
         }
         if (rule.targetFilters.empty()) {
             _broadFullEvaluationRules.insert(rule.id);
@@ -1841,6 +2026,30 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
                 for (const auto dependency : dependencyBits) {
                     const auto bit = ToMask(dependency);
                     if ((producedMask & bit) == 0) {
+                        continue;
+                    }
+                    if (dependency == RuleDependency::kFollower) {
+                        if (reward.typeReward != "Faction" ||
+                            !IsFollowerIdentityFaction(formID)) {
+                            continue;
+                        }
+                        const auto consumers =
+                            _rulesByDependency.find(bit);
+                        if (consumers == _rulesByDependency.end()) {
+                            continue;
+                        }
+                        dependencyGraph[producer.id].insert(
+                            consumers->second.begin(),
+                            consumers->second.end());
+                        for (const auto& consumerID : consumers->second) {
+                            const auto* consumer = FindRule(consumerID);
+                            if (consumer &&
+                                consumer->followerState ==
+                                    RuleFollowerState::kExcludeActive) {
+                                negativeEdges.emplace(
+                                    producer.id, consumerID);
+                            }
+                        }
                         continue;
                     }
                     const auto byDependency =
@@ -2007,7 +2216,8 @@ std::vector<std::string> RuleManager::GetCandidateRuleIDs(
         RuleDependency::kLevel,
         RuleDependency::kSleep,
         RuleDependency::kCombat,
-        RuleDependency::kActorValue
+        RuleDependency::kActorValue,
+        RuleDependency::kFollower
     };
 
     for (const auto dependency : dependencyBits) {
@@ -2034,6 +2244,17 @@ std::vector<std::string> RuleManager::GetCandidateRuleIDs(
                             found->second.begin(), found->second.end());
                     }
                 }
+            }
+            continue;
+        }
+
+        if (dependency == RuleDependency::kFollower) {
+            if (const auto found =
+                    _rulesByDependency.find(bit);
+                found != _rulesByDependency.end()) {
+                candidates.insert(
+                    found->second.begin(),
+                    found->second.end());
             }
             continue;
         }
@@ -2370,15 +2591,74 @@ RuleEvaluationDelta RuleManager::DetectActorValueChanges(RE::Actor* a_actor)
     return delta;
 }
 
+RuleEvaluationDelta RuleManager::DetectFollowerStateChanges(
+    RE::Actor* a_actor)
+{
+    RuleEvaluationDelta delta;
+    delta.mask = ToMask(RuleDependency::kNone);
+    if (!a_actor || !_hasFollowerDependentRules) {
+        return delta;
+    }
+
+    const auto actorID = a_actor->GetFormID();
+    const auto isFollower = IsActivePlayerFollower(a_actor);
+    const auto current =
+        std::pair{ _dependencyRevision, isFollower };
+    const auto found = _followerStateSnapshots.find(actorID);
+    if (found != _followerStateSnapshots.end() &&
+        found->second == current) {
+        return delta;
+    }
+
+    const auto hadPreviousState =
+        found != _followerStateSnapshots.end() &&
+        found->second.first == _dependencyRevision;
+    const auto previousState =
+        hadPreviousState ? found->second.second : false;
+    _followerStateSnapshots[actorID] = current;
+    delta.mask = ToMask(RuleDependency::kFollower);
+    if (hadPreviousState) {
+        logger::info(
+            "[FollowerState] Actor '{}' ({:08X}) follower state {} -> {}.",
+            a_actor->GetName(),
+            actorID,
+            previousState,
+            isFollower);
+    }
+    else {
+        logger::debug(
+            "[FollowerState] Actor '{}' ({:08X}) initial follower state: {}.",
+            a_actor->GetName(),
+            actorID,
+            isFollower);
+    }
+    return delta;
+}
+
 void RuleManager::ResetRuntimeCaches()
 {
     _baseNPCFingerprints.clear();
     _actorValueSnapshots.clear();
+    _followerStateSnapshots.clear();
+}
+
+void RuleManager::InvalidateBaseNPCState(const RE::FormID a_npcFormID)
+{
+    if (a_npcFormID == 0) {
+        return;
+    }
+
+    _baseNPCFingerprints.erase(a_npcFormID);
+    _affectedNPCsDatabaseValid = false;
+    logger::debug(
+        "[RuleSnapshot] Invalidated Base NPC {:08X} and affected-NPC preview.",
+        a_npcFormID);
 }
 
 void RuleManager::ForgetActorRuntimeState(const RE::FormID a_actorID)
 {
     _actorValueSnapshots.erase(a_actorID);
+    _followerStateSnapshots.erase(a_actorID);
 }
 
 const std::map<RE::FormID, AffectedNPC>&

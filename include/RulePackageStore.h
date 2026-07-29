@@ -28,6 +28,7 @@ public:
 
     bool SaveRule(Rule& rule, std::vector<Rule>& history);
     bool DeleteRule(std::string_view ruleID, std::string_view packageID);
+    bool DeletePackage(std::string_view packageID);
 
     std::optional<std::string> CreatePackage(std::string_view displayName);
     const std::vector<RulePackage>& GetPackages() const { return _packages; }

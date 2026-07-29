@@ -19,6 +19,24 @@ public:
 
     RE::BSEventNotifyControl ProcessEvent(const SKSE::ModCallbackEvent* a_event, RE::BSTEventSource<SKSE::ModCallbackEvent>*) override;
 };
+
+class FollowerDialogueEventHandler :
+    public RE::BSTEventSink<RE::MenuOpenCloseEvent>
+{
+public:
+    static FollowerDialogueEventHandler* GetSingleton()
+    {
+        static FollowerDialogueEventHandler singleton;
+        return &singleton;
+    }
+
+    static void Register();
+
+    RE::BSEventNotifyControl ProcessEvent(
+        const RE::MenuOpenCloseEvent* a_event,
+        RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
+};
+
 class EventSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent> {
 public:
     // O Singleton para acessar o handler

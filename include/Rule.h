@@ -18,6 +18,12 @@ enum class RuleCombatState : std::uint8_t {
     kOutOfCombat = 2
 };
 
+enum class RuleFollowerState : std::uint8_t {
+    kAny = 0,
+    kActiveOnly = 1,
+    kExcludeActive = 2
+};
+
 enum class ActorValueMode : std::uint8_t {
     kCurrent = 0,
     kPermanent = 1,
@@ -101,6 +107,7 @@ struct Rule {
     int targetHumanoid = 0;  // 0: Both, 1: Only humanoids, 2: Only non-humanoids
     int targetChild = 0;     // 0: Both, 1: Only children, 2: Only non-children
     RuleCombatState combatState = RuleCombatState::kAny;
+    RuleFollowerState followerState = RuleFollowerState::kAny;
     bool targetRequiresAll = false;
     bool isExclusive = false;
     std::vector<BlacklistFilter> targetFilters; // Usando a mesma struct de filtro
@@ -140,7 +147,8 @@ enum class RuleDependency : std::uint32_t {
     kSleep = 1u << 7,
     kCombat = 1u << 8,
     kActorValue = 1u << 9,
-    kAll = (1u << 10) - 1u
+    kFollower = 1u << 10,
+    kAll = (1u << 11) - 1u
 };
 
 using RuleDependencyMask = std::uint32_t;
@@ -191,6 +199,7 @@ RuleDependencyMask GetFilterDependencyMask(std::string_view a_type);
 RuleDependencyMask GetRewardDependencyMask(std::string_view a_type);
 
 bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor = nullptr);
+bool IsActivePlayerFollower(RE::Actor* actor);
 
 struct AffectedNPC {
     RE::FormID npcFormID;
@@ -216,6 +225,12 @@ public:
     const Rule* FindRule(const std::string& ruleID) const;
     const std::vector<RulePackage>& GetPackages() const;
     std::optional<std::string> CreatePackage(std::string_view displayName);
+    bool MarkPackageForDeletion(std::string_view packageID);
+    bool CancelPackageDeletion(std::string_view packageID);
+    bool IsPackagePendingDeletion(std::string_view packageID) const;
+    const std::set<std::string>& GetPackagesPendingDeletion() const {
+        return _packagesToDelete;
+    }
 
     // Create specific rule
     Rule& CreateRule(std::string_view packageID = "edf.local-rules");
@@ -245,6 +260,8 @@ public:
     bool IsRuleInUnstableCycle(std::string_view a_ruleID) const;
     RuleEvaluationDelta DetectBaseNPCChanges(RE::Actor* a_actor);
     RuleEvaluationDelta DetectActorValueChanges(RE::Actor* a_actor);
+    RuleEvaluationDelta DetectFollowerStateChanges(RE::Actor* a_actor);
+    void InvalidateBaseNPCState(RE::FormID a_npcFormID);
     void ForgetActorRuntimeState(RE::FormID a_actorID);
     void ResetRuntimeCaches();
     std::uint64_t GetDependencyRevision() const { return _dependencyRevision; }
@@ -264,6 +281,7 @@ private:
     std::map<RE::FormID, AffectedNPC> _affectedNPCsDatabase;
     bool _affectedNPCsDatabaseValid = false;
     std::map<std::string, std::string> _ruleOwners;
+    std::set<std::string> _packagesToDelete;
     std::map<RuleDependencyMask, std::set<std::string>> _rulesByDependency;
     std::map<RuleDependencyMask, std::map<RE::FormID, std::set<std::string>>> _rulesByExactDependency;
     std::map<RE::ActorValue, std::set<std::string>> _rulesByActorValue;
@@ -279,8 +297,11 @@ private:
             std::uint64_t,
             std::map<std::pair<RE::ActorValue, ActorValueMode>, float>>>
         _actorValueSnapshots;
+    std::map<RE::FormID, std::pair<std::uint64_t, bool>>
+        _followerStateSnapshots;
     std::uint64_t _dependencyRevision = 0;
     bool _hasActorDependentRules = false;
+    bool _hasFollowerDependentRules = false;
     const std::string _modDir = "Data/Viny Mods/EDF";
     const std::string _exportDir = "Data/Viny Mods/EDF/Export/";
 };

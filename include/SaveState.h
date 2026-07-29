@@ -22,6 +22,9 @@ struct AppliedRuleState {
     bool canRerollOnNextActivation = true;
     std::vector<std::string> activeRewardKeys;
     std::set<std::string> persistentRewardKeys;
+    // Runtime-only identity used to cancel deferred work from an older
+    // activation. It is deliberately not serialized into character saves.
+    std::uint64_t runtimeActivationToken = 0;
 };
 
 struct PersistentItemState {
@@ -133,14 +136,45 @@ public:
     // Valor padrão inicial
     OutfitConversionMode outfitMode = OutfitConversionMode::kFullConversion;
     void Load() {
-        if (!std::filesystem::exists(settingsPath)) {
-            Save(); // Cria o padrão se não existir
+        std::string loadPath = settingsPath;
+        if (!std::filesystem::exists(settingsPath) &&
+            std::filesystem::exists(legacySettingsPath)) {
+            std::error_code ec;
+            std::filesystem::create_directories(
+                std::filesystem::path(settingsPath).parent_path(), ec);
+            if (!ec) {
+                std::filesystem::copy_file(
+                    legacySettingsPath,
+                    settingsPath,
+                    std::filesystem::copy_options::none,
+                    ec);
+            }
+
+            if (ec) {
+                SKSE::log::warn(
+                    "[Settings] Failed to migrate '{}' to '{}': {}. "
+                    "Using the legacy file for this session.",
+                    legacySettingsPath,
+                    settingsPath,
+                    ec.message());
+                loadPath = legacySettingsPath;
+            }
+            else {
+                SKSE::log::info(
+                    "[Settings] Migrated legacy settings from '{}' to '{}'.",
+                    legacySettingsPath,
+                    settingsPath);
+            }
+        }
+
+        if (!std::filesystem::exists(loadPath)) {
+            Save();
             return;
         }
 
         try {
             FILE* fp = nullptr;
-            fopen_s(&fp, settingsPath.c_str(), "rb");
+            fopen_s(&fp, loadPath.c_str(), "rb");
             if (!fp) return;
 
             char readBuffer[4096];
@@ -184,7 +218,10 @@ public:
         }
     }
 private:
-    const std::string settingsPath = "Data/SKSE/Plugins/ProgressNPC/Settings.json";
+    inline static const std::string settingsPath =
+        "Data/Viny Mods/EDF/Settings.json";
+    inline static const std::string legacySettingsPath =
+        "Data/SKSE/Plugins/ProgressNPC/Settings.json";
 };
 
 
@@ -197,6 +234,9 @@ void ApplyRulesToInstance(
 void ScheduleRuleEvaluation(
     RE::Actor* a_actor,
     RuleEvaluationDelta a_delta = RuleEvaluationDelta::Full());
+void QueueFollowerStateRefreshAfterDialogue();
+void SuspendRuleEvaluationForLoad();
+void ResumeRuleEvaluationAfterLoad();
 void ForgetRuleEvaluationRuntimeState(RE::FormID a_actorID);
 void ResetRuleEvaluationRuntimeState();
 bool IsActorInCombatContext(RE::Actor* actor);

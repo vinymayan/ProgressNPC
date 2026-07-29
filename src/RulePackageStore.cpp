@@ -18,7 +18,7 @@ namespace
 {
     namespace fs = std::filesystem;
 
-    constexpr int SCHEMA_VERSION = 3;
+    constexpr int SCHEMA_VERSION = 1;
     constexpr std::size_t MAX_HISTORY = 100;
     constexpr std::string_view LEGACY_RULES_DIR = "Data/Viny Mods/EDF/Rules";
     constexpr std::string_view LEGACY_SKSE_RULES_DIR = "Data/SKSE/Plugins/EDF/Rules";
@@ -221,7 +221,6 @@ namespace
             return false;
         }
         const auto existingVersion = sqlite3_column_int(schemaVersion.handle, 0);
-        auto currentVersion = existingVersion;
         if (existingVersion > SCHEMA_VERSION) {
             logger::error(
                 "[RulePackageStore] Package '{}' uses unsupported schema version {}.",
@@ -231,68 +230,6 @@ namespace
         }
         sqlite3_finalize(schemaVersion.handle);
         schemaVersion.handle = nullptr;
-        if (currentVersion == 1) {
-            if (!Exec(db, "BEGIN IMMEDIATE;", context) ||
-                !Exec(db,
-                    "ALTER TABLE rule_versions ADD COLUMN "
-                    "combat_state INTEGER NOT NULL DEFAULT 0 CHECK(combat_state IN(0,1,2));",
-                    context) ||
-                !Exec(db,
-                    "ALTER TABLE rewards ADD COLUMN "
-                    "equip_contexts INTEGER NOT NULL DEFAULT 1 CHECK(equip_contexts BETWEEN 1 AND 7);",
-                    context) ||
-                !Exec(db,
-                    "UPDATE rewards SET equip_contexts=CASE "
-                    "WHEN type_reward='Outfit' AND function_on_type=1 THEN 2 "
-                    "WHEN type_reward='Outfit' AND function_on_type=2 THEN 3 "
-                    "ELSE 1 END;",
-                    context) ||
-                !Exec(db,
-                    "INSERT INTO metadata(key,value) VALUES('schema_version','2') "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
-                    context) ||
-                !Exec(db, "PRAGMA user_version=2;", context) ||
-                !Exec(db, "COMMIT;", context)) {
-                Exec(db, "ROLLBACK;", context);
-                return false;
-            }
-            currentVersion = 2;
-        }
-        if (currentVersion == 2) {
-            if (!Exec(db, "BEGIN IMMEDIATE;", context) ||
-                !Exec(db,
-                    "ALTER TABLE rule_filters ADD COLUMN "
-                    "actor_value_name TEXT NOT NULL DEFAULT '';",
-                    context) ||
-                !Exec(db,
-                    "ALTER TABLE rule_filters ADD COLUMN "
-                    "actor_value_mode INTEGER NOT NULL DEFAULT 0 "
-                    "CHECK(actor_value_mode IN(0,1,2));",
-                    context) ||
-                !Exec(db,
-                    "ALTER TABLE rule_filters ADD COLUMN "
-                    "numeric_comparison INTEGER NOT NULL DEFAULT 0 "
-                    "CHECK(numeric_comparison IN(0,1,2,3));",
-                    context) ||
-                !Exec(db,
-                    "ALTER TABLE rule_filters ADD COLUMN "
-                    "minimum_value REAL NOT NULL DEFAULT 0;",
-                    context) ||
-                !Exec(db,
-                    "ALTER TABLE rule_filters ADD COLUMN "
-                    "maximum_value REAL NOT NULL DEFAULT 0;",
-                    context) ||
-                !Exec(db,
-                    "INSERT INTO metadata(key,value) VALUES('schema_version','3') "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
-                    context) ||
-                !Exec(db, "PRAGMA user_version=3;", context) ||
-                !Exec(db, "COMMIT;", context)) {
-                Exec(db, "ROLLBACK;", context);
-                return false;
-            }
-            currentVersion = 3;
-        }
         if (!Exec(db, "PRAGMA foreign_keys=ON;", context) ||
             !Exec(db, "PRAGMA journal_mode=WAL;", context) ||
             !Exec(db, "PRAGMA synchronous=NORMAL;", context) ||
@@ -323,6 +260,7 @@ namespace
                 "target_humanoid INTEGER NOT NULL,"
                 "target_child INTEGER NOT NULL,"
                 "combat_state INTEGER NOT NULL CHECK(combat_state IN(0,1,2)),"
+                "follower_state INTEGER NOT NULL CHECK(follower_state IN(0,1,2)),"
                 "target_requires_all INTEGER NOT NULL CHECK(target_requires_all IN(0,1)),"
                 "rule_exclusive INTEGER NOT NULL CHECK(rule_exclusive IN(0,1)),"
                 "blacklisted_gender INTEGER NOT NULL,"
@@ -395,7 +333,7 @@ namespace
                 ");",
                 context) ||
             !Exec(db, "CREATE INDEX IF NOT EXISTS idx_rule_versions_current ON rule_versions(rule_id,version DESC);", context) ||
-            !Exec(db, "PRAGMA user_version=3;", context)) {
+            !Exec(db, "PRAGMA user_version=1;", context)) {
             return false;
         }
 
@@ -413,7 +351,7 @@ namespace
         }
         if (!Exec(
                 db,
-                "UPDATE metadata SET value='3' WHERE key='schema_version';",
+                "UPDATE metadata SET value='1' WHERE key='schema_version';",
                 context)) {
             return false;
         }
@@ -489,9 +427,9 @@ namespace
         if (!Prepare(db,
                 "INSERT INTO rule_versions("
                 "rule_id,version,name,enabled,level,target_gender,target_humanoid,target_child,"
-                "combat_state,target_requires_all,rule_exclusive,blacklisted_gender,blacklisted_humanoid,"
+                "combat_state,follower_state,target_requires_all,rule_exclusive,blacklisted_gender,blacklisted_humanoid,"
                 "blacklisted_child,blacklist_requires_all,content_hash"
-                ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16);",
+                ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17);",
                 versionStatement,
                 context)) {
             return false;
@@ -505,13 +443,14 @@ namespace
         sqlite3_bind_int(versionStatement.handle, 7, rule.targetHumanoid);
         sqlite3_bind_int(versionStatement.handle, 8, rule.targetChild);
         sqlite3_bind_int(versionStatement.handle, 9, static_cast<int>(rule.combatState));
-        sqlite3_bind_int(versionStatement.handle, 10, rule.targetRequiresAll ? 1 : 0);
-        sqlite3_bind_int(versionStatement.handle, 11, rule.isExclusive ? 1 : 0);
-        sqlite3_bind_int(versionStatement.handle, 12, rule.blacklistedGender);
-        sqlite3_bind_int(versionStatement.handle, 13, rule.blacklistedHumanoid);
-        sqlite3_bind_int(versionStatement.handle, 14, rule.blacklistedChild);
-        sqlite3_bind_int(versionStatement.handle, 15, rule.blacklistRequiresAll ? 1 : 0);
-        BindText(versionStatement.handle, 16, rule.CalculateHash());
+        sqlite3_bind_int(versionStatement.handle, 10, static_cast<int>(rule.followerState));
+        sqlite3_bind_int(versionStatement.handle, 11, rule.targetRequiresAll ? 1 : 0);
+        sqlite3_bind_int(versionStatement.handle, 12, rule.isExclusive ? 1 : 0);
+        sqlite3_bind_int(versionStatement.handle, 13, rule.blacklistedGender);
+        sqlite3_bind_int(versionStatement.handle, 14, rule.blacklistedHumanoid);
+        sqlite3_bind_int(versionStatement.handle, 15, rule.blacklistedChild);
+        sqlite3_bind_int(versionStatement.handle, 16, rule.blacklistRequiresAll ? 1 : 0);
+        BindText(versionStatement.handle, 17, rule.CalculateHash());
         if (sqlite3_step(versionStatement.handle) != SQLITE_DONE) {
             logger::error("[RulePackageStore] Could not insert rule version '{}:{}': {}", rule.id, rule.version, sqlite3_errmsg(db));
             return false;
@@ -670,7 +609,7 @@ namespace
         SqliteStatement statement;
         if (!Prepare(db,
                 "SELECT name,enabled,level,target_gender,target_humanoid,target_child,target_requires_all,"
-                "combat_state,rule_exclusive,blacklisted_gender,blacklisted_humanoid,blacklisted_child,blacklist_requires_all "
+                "combat_state,follower_state,rule_exclusive,blacklisted_gender,blacklisted_humanoid,blacklisted_child,blacklist_requires_all "
                 "FROM rule_versions WHERE rule_id=?1 AND version=?2;",
                 statement,
                 packageID)) {
@@ -694,11 +633,13 @@ namespace
         rule.targetRequiresAll = sqlite3_column_int(statement.handle, 6) != 0;
         rule.combatState = static_cast<RuleCombatState>(
             std::clamp(sqlite3_column_int(statement.handle, 7), 0, 2));
-        rule.isExclusive = sqlite3_column_int(statement.handle, 8) != 0;
-        rule.blacklistedGender = sqlite3_column_int(statement.handle, 9);
-        rule.blacklistedHumanoid = sqlite3_column_int(statement.handle, 10);
-        rule.blacklistedChild = sqlite3_column_int(statement.handle, 11);
-        rule.blacklistRequiresAll = sqlite3_column_int(statement.handle, 12) != 0;
+        rule.followerState = static_cast<RuleFollowerState>(
+            std::clamp(sqlite3_column_int(statement.handle, 8), 0, 2));
+        rule.isExclusive = sqlite3_column_int(statement.handle, 9) != 0;
+        rule.blacklistedGender = sqlite3_column_int(statement.handle, 10);
+        rule.blacklistedHumanoid = sqlite3_column_int(statement.handle, 11);
+        rule.blacklistedChild = sqlite3_column_int(statement.handle, 12);
+        rule.blacklistRequiresAll = sqlite3_column_int(statement.handle, 13) != 0;
 
         SqliteStatement filters;
         if (!Prepare(db,
@@ -1289,6 +1230,73 @@ bool RulePackageStore::DeleteRule(const std::string_view ruleID, const std::stri
         Rollback(db.handle, packageID);
         return false;
     }
+    return true;
+}
+
+bool RulePackageStore::DeletePackage(const std::string_view packageID)
+{
+    if (packageID.empty() || packageID == LOCAL_PACKAGE_ID) {
+        logger::error(
+            "[RulePackageStore] The Local Rules package cannot be deleted.");
+        return false;
+    }
+
+    const auto found = std::ranges::find_if(
+        _packages,
+        [packageID](const RulePackage& package) {
+            return package.id == packageID;
+        });
+    if (found == _packages.end()) {
+        logger::error(
+            "[RulePackageStore] Package '{}' was not found for deletion.",
+            packageID);
+        return false;
+    }
+
+    std::error_code ec;
+    const auto packagesRoot =
+        fs::absolute(fs::path(PACKAGES_DIR), ec).lexically_normal();
+    if (ec) {
+        logger::error(
+            "[RulePackageStore] Could not resolve packages root: {}.",
+            ec.message());
+        return false;
+    }
+    const auto packagePath =
+        fs::absolute(found->path, ec).lexically_normal();
+    if (ec) {
+        logger::error(
+            "[RulePackageStore] Could not resolve package path '{}': {}.",
+            found->path.string(),
+            ec.message());
+        return false;
+    }
+    const auto relative = packagePath.lexically_relative(packagesRoot);
+    if (relative.empty() || relative == "." ||
+        *relative.begin() == "..") {
+        logger::error(
+            "[RulePackageStore] Refusing to delete package '{}' outside '{}'.",
+            packagePath.string(),
+            packagesRoot.string());
+        return false;
+    }
+
+    if (fs::exists(packagePath, ec)) {
+        fs::remove_all(packagePath, ec);
+        if (ec) {
+            logger::error(
+                "[RulePackageStore] Could not delete package directory '{}': {}.",
+                packagePath.string(),
+                ec.message());
+            return false;
+        }
+    }
+
+    logger::info(
+        "[RulePackageStore] Package '{}' deleted from '{}'.",
+        found->displayName,
+        packagePath.string());
+    _packages.erase(found);
     return true;
 }
 

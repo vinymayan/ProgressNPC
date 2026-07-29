@@ -31,7 +31,8 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         LoadEventHandler::Register();
         PersistentItemTransferHandler::Register();
         PlayerLevel::Register();
-		CombatEventHandler::Register();
+        CombatEventHandler::Register();
+        FollowerDialogueEventHandler::Register();
         //auto ui = RE::UI::GetSingleton();
         //if (ui) {
         //    ui->AddEventSink(EventSink::GetSingleton());
@@ -54,6 +55,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         SPIDUI::Register();
     }
     if (message->type == SKSE::MessagingInterface::kPreLoadGame) {
+        SuspendRuleEvaluationForLoad();
         const char* saveName = static_cast<const char*>(message->data);
         if (!saveName) {
             logger::warn("PreLoadGame: Nome do save é nulo.");
@@ -105,7 +107,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         }
     }
     if (message->type == SKSE::MessagingInterface::kPostLoadGame) {
-
+        ResumeRuleEvaluationAfterLoad();
     }
     if (message->type == SKSE::MessagingInterface::kSaveGame) {
         // O data do kSaveGame contém o nome do arquivo de save
@@ -119,9 +121,10 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
 
 
     if (message->type == SKSE::MessagingInterface::kNewGame) {
-        logger::info("[Plugin] New Game detectado. Inicializando contexto padrão.");
+        logger::info("[Plugin] New Game detectado. Inicializando contexto padrão");
         // CharID 0 e Save 0 representam uma sessão nova sem persistência de disco ainda.
         SaveStateManager::GetSingleton()->SetCurrentContext(0, 0);
+        ResumeRuleEvaluationAfterLoad();
 
     }
 }

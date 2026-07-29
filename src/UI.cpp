@@ -1,4 +1,5 @@
 ﻿#include "UI.h"
+#include "RulePackageStore.h"
 #include <algorithm>
 #include <cctype>
 #include <miniz.h>
@@ -13,15 +14,58 @@
 #include <unordered_set>
 #include <windows.h>
 namespace SPIDUI {
-    const std::string LANG_PATH = "Data/Viny Mods/ProgressNPC/Language.json";
+    const std::filesystem::path LANG_PATH =
+        "Data/Viny Mods/EDF/Language.json";
+    const std::filesystem::path LEGACY_LANG_PATH =
+        "Data/Viny Mods/ProgressNPC/Language.json";
     inline std::unordered_map<std::string, std::string> locMap;
+
+    std::filesystem::path ResolveLanguagePath()
+    {
+        if (std::filesystem::exists(LANG_PATH)) {
+            return LANG_PATH;
+        }
+        if (!std::filesystem::exists(LEGACY_LANG_PATH)) {
+            return LANG_PATH;
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(
+            LANG_PATH.parent_path(), ec);
+        if (!ec) {
+            std::filesystem::copy_file(
+                LEGACY_LANG_PATH,
+                LANG_PATH,
+                std::filesystem::copy_options::none,
+                ec);
+        }
+
+        if (ec) {
+            logger::warn(
+                "[EDF] Could not migrate Language.json from '{}' to '{}': {}. "
+                "Using the legacy file for this session.",
+                LEGACY_LANG_PATH.string(),
+                LANG_PATH.string(),
+                ec.message());
+            return LEGACY_LANG_PATH;
+        }
+
+        logger::info(
+            "[EDF] Migrated Language.json from '{}' to '{}'.",
+            LEGACY_LANG_PATH.string(),
+            LANG_PATH.string());
+        return LANG_PATH;
+    }
 
     void LoadLanguage() {
         locMap.clear();
 
-        std::ifstream file(LANG_PATH, std::ios::binary);
+        const auto languagePath = ResolveLanguagePath();
+        std::ifstream file(languagePath, std::ios::binary);
         if (!file.is_open()) {
-            logger::warn("[ProgressNPC] Language.json not found. Using default texts.");
+            logger::warn(
+                "[EDF] Language.json not found at '{}'. Using default texts.",
+                languagePath.string());
             return;
         }
 
@@ -31,7 +75,9 @@ namespace SPIDUI {
         rapidjson::Document doc;
         doc.Parse(buffer.str().c_str());
         if (doc.HasParseError() || !doc.IsObject()) {
-            logger::warn("[ProgressNPC] Invalid Language.json. Using default texts.");
+            logger::warn(
+                "[EDF] Invalid Language.json at '{}'. Using default texts.",
+                languagePath.string());
             return;
         }
 
@@ -350,21 +396,40 @@ namespace SPIDUI {
         if (packages.empty()) {
             return;
         }
-        if (!FindPackage(activePackageID)) {
-            activePackageID = packages.front().id;
+        const auto firstAvailablePackage = std::ranges::find_if(
+            packages,
+            [manager](const RulePackage& package) {
+                return !manager->IsPackagePendingDeletion(package.id);
+            });
+        if (!FindPackage(activePackageID) ||
+            manager->IsPackagePendingDeletion(activePackageID)) {
+            activePackageID =
+                firstAvailablePackage != packages.end() ?
+                firstAvailablePackage->id :
+                std::string(RulePackageStore::LOCAL_PACKAGE_ID);
+        }
+        if (!packageFilterID.empty() &&
+            manager->IsPackagePendingDeletion(packageFilterID)) {
+            packageFilterID.clear();
         }
 
         if (!ImGuiMCP::CollapsingHeader(
-                GetLoc("auto.package_workspace", "Package Workspace"))) {
+                GetLoc("auto.package_workspace", "Package Workspace"),
+                ImGuiMCP::ImGuiTreeNodeFlags_DefaultOpen)) {
             return;
         }
 
         std::vector<SearchableComboOption> packageOptions;
         packageOptions.reserve(packages.size());
         for (const auto& package : packages) {
+            if (manager->IsPackagePendingDeletion(package.id)) {
+                continue;
+            }
             packageOptions.push_back({ package.id, package.displayName });
         }
-        const auto packageRevision = static_cast<std::uint64_t>(packages.size());
+        const auto packageRevision =
+            (static_cast<std::uint64_t>(packages.size()) << 32) |
+            manager->GetPackagesPendingDeletion().size();
 
         const auto* active = FindPackage(activePackageID);
         ImGuiMCP::SetNextItemWidth(260.0f);
@@ -375,8 +440,28 @@ namespace SPIDUI {
                 packageOptions,
                 activePackageID,
                 packageRevision);
+        if (active &&
+            active->id != RulePackageStore::LOCAL_PACKAGE_ID) {
+            ImGuiMCP::SameLine();
+            if (ImGuiMCP::Button(GetLoc(
+                    "auto.delete_active_package",
+                    "Delete Active Package"))) {
+                const auto packageID = active->id;
+                if (manager->MarkPackageForDeletion(packageID)) {
+                    if (packageFilterID == packageID) {
+                        packageFilterID.clear();
+                    }
+                    activePackageID =
+                        std::string(RulePackageStore::LOCAL_PACKAGE_ID);
+                }
+            }
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(GetLoc(
+                    "auto.package_delete_save_hint",
+                    "The package and its rules will only be deleted when Save is pressed."));
+            }
+        }
 
-        ImGuiMCP::SameLine();
         ImGuiMCP::SetNextItemWidth(220.0f);
         ImGuiMCP::InputText(
             GetLoc("auto.new_package", "New Package"),
@@ -410,6 +495,31 @@ namespace SPIDUI {
             packageFilterOptions,
             packageFilterID,
             packageRevision);
+
+        const auto pendingPackages =
+            manager->GetPackagesPendingDeletion();
+        if (!pendingPackages.empty()) {
+            ImGuiMCP::TextUnformatted(GetLoc(
+                "auto.pending_package_deletions",
+                "Pending Package Deletions"));
+            ImGuiMCP::SameLine();
+            ImGuiMCP::TextDisabled("%s", GetLoc(
+                "auto.package_delete_save_hint",
+                "The package and its rules will only be deleted when Save is pressed."));
+            for (const auto& packageID : pendingPackages) {
+                const auto* package = FindPackage(packageID);
+                ImGuiMCP::PushID(packageID.c_str());
+                ImGuiMCP::TextUnformatted(
+                    package ?
+                    package->displayName.c_str() :
+                    packageID.c_str());
+                ImGuiMCP::SameLine();
+                if (ImGuiMCP::Button(GetLoc("auto.undo", "Undo"))) {
+                    manager->CancelPackageDeletion(packageID);
+                }
+                ImGuiMCP::PopID();
+            }
+        }
         ImGuiMCP::Separator();
     }
 
@@ -733,7 +843,13 @@ namespace SPIDUI {
         ImGuiMCP::SameLine();
         ImGuiMCP::Text("%s", isBlacklist ? GetLoc("auto.excluded_body", "Excluded Body:") : GetLoc("auto.target_body", "Target Body:"));
         ImGuiMCP::SameLine();
-        const char* humanoidOptions[] = { GetLoc("auto.both", "Both"), GetLoc("auto.only_humanoids", "Only Humanoids"), GetLoc("auto.only_non_humanoids", "Only Non-Humanoids") };
+        const char* humanoidOptions[] = {
+            isBlacklist ?
+                GetLoc("auto.none", "None") :
+                GetLoc("auto.both", "Both"),
+            GetLoc("auto.only_humanoids", "Only Humanoids"),
+            GetLoc("auto.only_non_humanoids", "Only Non-Humanoids")
+        };
         ImGuiMCP::SetNextItemWidth(180.0f);
         if (ImGuiMCP::BeginCombo(isBlacklist ? "##blacklistHumanoid" : "##targetHumanoid", humanoidOptions[humanoid])) {
             for (int i = 0; i < 3; i++) {
@@ -744,7 +860,13 @@ namespace SPIDUI {
         ImGuiMCP::SameLine();
         ImGuiMCP::Text("%s", isBlacklist ? GetLoc("auto.excluded_age", "Excluded Age:") : GetLoc("auto.target_age", "Target Age:"));
         ImGuiMCP::SameLine();
-        const char* childOptions[] = { GetLoc("auto.both", "Both"), GetLoc("auto.only_children", "Only Children"), GetLoc("auto.only_non_children", "Only Non-Children") };
+        const char* childOptions[] = {
+            isBlacklist ?
+                GetLoc("auto.none", "None") :
+                GetLoc("auto.both", "Both"),
+            GetLoc("auto.only_children", "Only Children"),
+            GetLoc("auto.only_non_children", "Only Non-Children")
+        };
         ImGuiMCP::SetNextItemWidth(180.0f);
         if (ImGuiMCP::BeginCombo(isBlacklist ? "##blacklistChild" : "##targetChild", childOptions[child])) {
             for (int i = 0; i < 3; i++) {
@@ -788,6 +910,45 @@ namespace SPIDUI {
                     "auto.combat_state_help",
                     "Controls whether the rule is valid in combat, out of combat, or both."));
             }
+
+            const char* followerOptions[] = {
+                GetLoc("auto.any_actor", "Any Actor"),
+                GetLoc(
+                    "auto.active_followers_only",
+                    "Active Followers Only"),
+                GetLoc(
+                    "auto.exclude_active_followers",
+                    "Exclude Active Followers")
+            };
+            int followerState = std::clamp(
+                static_cast<int>(rule.followerState), 0, 2);
+            ImGuiMCP::SameLine();
+            ImGuiMCP::Text(
+                "%s",
+                GetLoc(
+                    "auto.follower_state",
+                    "Follower Status:"));
+            ImGuiMCP::SameLine();
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##targetFollowerState",
+                    followerOptions[followerState])) {
+                for (int index = 0; index < 3; ++index) {
+                    if (ImGuiMCP::Selectable(
+                            followerOptions[index],
+                            followerState == index)) {
+                        rule.followerState =
+                            static_cast<RuleFollowerState>(
+                                index);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(GetLoc(
+                    "auto.follower_state_help",
+                    "Active followers use CurrentFollowerFaction or compatible PlayerTeammate signals. The Player and summons do not count."));
+            }
         }
 
         ImGuiMCP::Separator();
@@ -803,7 +964,6 @@ namespace SPIDUI {
             ImGuiMCP::TableSetupColumn(GetLoc("auto.identifier", "Identifier"), ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             ImGuiMCP::TableSetupColumn(GetLoc("auto.action", "Action"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
             ImGuiMCP::TableHeadersRow();
-            auto dataHandler = RE::TESDataHandler::GetSingleton();
             for (int i = 0; i < filters.size(); i++) {
                 auto& f = filters[i];
                 if (f.type == "Actor Value") {
@@ -814,27 +974,22 @@ namespace SPIDUI {
                 ImGuiMCP::TableSetColumnIndex(1);
                 std::string resolvedName = "Not Found";
 
-                // Puxamos apenas o necessário: Split da string e busca direta no Form
-                auto tokens = split(f.formIDStr, '|'); // Função auxiliar definida em Rule.h
-                if (tokens.size() == 2 && dataHandler) {
-                    try {
-                        uint32_t localID = std::stoul(tokens[1], nullptr, 16);
-                        if (auto actualFormID = dataHandler->LookupFormID(localID, tokens[0])) {
-                            if (auto form = RE::TESForm::LookupByID(actualFormID)) {
-                                // 1. Tenta nome completo (NPC, Faction, Race)
-                                if (auto fullName = form->As<RE::TESFullName>()) {
-                                    resolvedName = Manager::ToUTF8(fullName->GetFullName());
-                                }
-                                // 2. Fallback para EditorID (Keywords ou nomes vazios)
-                                if (resolvedName.empty() || resolvedName == "Not Found") {
-                                    resolvedName = Manager::ToUTF8(clib_util::editorID::get_editorID(form));
-                                }
-                                // 3. Se nada funcionar, exibe o ID local
-                                if (resolvedName.empty()) resolvedName = tokens[1];
-                            }
-                        }
+                if (auto form = ResolveEDFForm(
+                        f.type, f.editorID, f.formIDStr)) {
+                    if (auto fullName = form->As<RE::TESFullName>()) {
+                        resolvedName =
+                            Manager::ToUTF8(fullName->GetFullName());
                     }
-                    catch (...) { resolvedName = "Invalid ID"; }
+                    if (resolvedName.empty() ||
+                        resolvedName == "Not Found") {
+                        resolvedName = Manager::ToUTF8(
+                            clib_util::editorID::get_editorID(form));
+                    }
+                    if (resolvedName.empty()) {
+                        resolvedName = !f.editorID.empty() ?
+                            f.editorID :
+                            f.formIDStr;
+                    }
                 }
                 ImGuiMCP::TextUnformatted(resolvedName.c_str());
                 ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text(f.formIDStr.c_str());
@@ -1672,43 +1827,50 @@ namespace SPIDUI {
 
         ImGuiMCP::SameLine();
         if (ImGuiMCP::Button(GetLoc("auto.save", "Save"))) {
-            RuleManager::GetSingleton()->SaveRules();
-            RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
-            needsNPCListUpdate = true;
-            auto saveMgr = SaveStateManager::GetSingleton();
-            auto player = RE::PlayerCharacter::GetSingleton();
+            auto ruleManager = RuleManager::GetSingleton();
+            if (!ruleManager->SaveRules()) {
+                logger::error(
+                    "[UI] Rules/packages could not be fully saved. "
+                    "Pending package deletions were kept for retry.");
+            }
+            else {
+                ruleManager->InitializeAffectedNPCsDatabase();
+                needsNPCListUpdate = true;
+                auto saveMgr = SaveStateManager::GetSingleton();
+                auto player = RE::PlayerCharacter::GetSingleton();
 
-            // VERIFICAÇÃO: Contexto válido + Player existe + Player está em uma célula carregada
-            // Se player->GetParentCell() for null, o jogador não está no mundo (Main Menu)
-            if (saveMgr->GetCurrentContext().isValid && player && player->GetParentCell()) {
-                logger::info("[UI] Mundo ativo detectado. Aplicando regras em tempo real...");
+                // VERIFICAÇÃO: Contexto válido + Player existe + Player está em uma célula carregada
+                // Se player->GetParentCell() for null, o jogador não está no mundo (Main Menu)
+                if (saveMgr->GetCurrentContext().isValid && player && player->GetParentCell()) {
+                    logger::info("[UI] Mundo ativo detectado. Aplicando regras em tempo real...");
 
-                // Aplica ao Player
-                ApplyRulesToInstance(player);
+                    // Aplica ao Player
+                    ApplyRulesToInstance(player);
 
-                // Aplica aos NPCs próximos
-                auto processLists = RE::ProcessLists::GetSingleton();
-                if (processLists) {
-                    for (auto& handle : processLists->highActorHandles) {
-                        auto actorPtr = handle.get();
-                        if (actorPtr) {
-                            RE::Actor* npc = actorPtr.get();
+                    // Aplica aos NPCs próximos
+                    auto processLists = RE::ProcessLists::GetSingleton();
+                    if (processLists) {
+                        for (auto& handle : processLists->highActorHandles) {
+                            auto actorPtr = handle.get();
+                            if (actorPtr) {
+                                RE::Actor* npc = actorPtr.get();
 
-                            // Filtros: Existe, não é o player, não está morto
-                            if (npc && npc != player && !npc->IsDead()) {
-                                // Verifica se a regra editada afeta este NPC específico
-                                if (RuleManager::GetSingleton()->IsAffected(npc)) {
-                                    logger::debug("[UI-LiveUpdate] Atualizando NPC: {}", npc->GetName());
-                                    ApplyRulesToInstance(npc);
+                                // Filtros: Existe, não é o player, não está morto
+                                if (npc && npc != player && !npc->IsDead()) {
+                                    // Verifica se a regra editada afeta este NPC específico
+                                    if (ruleManager->IsAffected(npc)) {
+                                        logger::debug("[UI-LiveUpdate] Atualizando NPC: {}", npc->GetName());
+                                        ApplyRulesToInstance(npc);
+                                    }
                                 }
                             }
                         }
                     }
+                    logger::info("[UI] Atualização concluída com sucesso.");
                 }
-                logger::info("[UI] Atualização concluída com sucesso.");
-            }
-            else {
-                logger::info("[UI] Regras salvas. Nenhuma aplicação imediata (fora do jogo ou no Menu Principal).");
+                else {
+                    logger::info("[UI] Regras salvas. Nenhuma aplicação imediata (fora do jogo ou no Menu Principal).");
+                }
             }
         }
 
@@ -1726,6 +1888,10 @@ namespace SPIDUI {
         std::vector<PackageRuleGroup> packageGroups;
         std::unordered_map<std::string, std::size_t> packageGroupIndices;
         for (auto& rule : rules) {
+            if (RuleManager::GetSingleton()->IsPackagePendingDeletion(
+                    rule.packageID)) {
+                continue;
+            }
             if (!packageFilterID.empty() && rule.packageID != packageFilterID) {
                 continue;
             }
@@ -3287,8 +3453,10 @@ namespace SPIDUI {
         std::erase_if(selectedRules, [&](const std::string& ruleID) {
             return std::ranges::none_of(
                 rules,
-                [&ruleID](const Rule& rule) {
-                    return rule.id == ruleID;
+                [&](const Rule& rule) {
+                    return rule.id == ruleID &&
+                        !manager->IsPackagePendingDeletion(
+                            rule.packageID);
                 });
         });
 
@@ -3326,6 +3494,9 @@ namespace SPIDUI {
 
         std::size_t selectedPackageCount = 0;
         for (const auto& package : packages) {
+            if (manager->IsPackagePendingDeletion(package.id)) {
+                continue;
+            }
             std::vector<const Rule*> packageRules;
             for (const auto& rule : rules) {
                 if (rule.packageID == package.id) {
