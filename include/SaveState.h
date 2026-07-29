@@ -118,11 +118,10 @@ enum class OutfitConversionMode : int {
     kFullConversion = 2 // Ligado (Converte para inventário e equipa)
 };
 
-// Logica dos outfits de dormir
-RE::BGSOutfit* GetAppliedSleepOutfit(RE::Actor* a_actor);
 void ManageSleepOutfitState(RE::Actor* a_actor, bool a_isEntering);
 void ScheduleSleepOutfitUpdate(RE::Actor* a_actor, bool a_isEntering);
 void EquipBestInventoryItems(RE::Actor* a_actor);
+void ReconcileEquipmentContext(RE::Actor* a_actor);
 
 class NPCSettings {
 public:
@@ -200,6 +199,10 @@ void ScheduleRuleEvaluation(
     RuleEvaluationDelta a_delta = RuleEvaluationDelta::Full());
 void ForgetRuleEvaluationRuntimeState(RE::FormID a_actorID);
 void ResetRuleEvaluationRuntimeState();
+bool IsActorInCombatContext(RE::Actor* actor);
+void UpdateActorCombatContext(
+    RE::Actor* actor,
+    RE::ACTOR_COMBAT_STATE state);
 
 
 
@@ -383,23 +386,19 @@ public:
     }
 
     // Flag para controlar se o player deve receber itens após o combate
-    bool pendingPlayerUpdate = false;
-
     RE::BSEventNotifyControl ProcessEvent(const RE::TESCombatEvent* a_event, RE::BSTEventSource<RE::TESCombatEvent>*) override {
-        if (!a_event || !a_event->actor || !a_event->actor->IsPlayer()) {
+        if (!a_event || !a_event->actor) {
             return RE::BSEventNotifyControl::kContinue;
         }
-
-        switch (a_event->newState.get()) {
-        case RE::ACTOR_COMBAT_STATE::kNone:
-            auto player = RE::PlayerCharacter::GetSingleton();
-            if (player) {
-                //logger::info("saiu de combate");
-                ApplyRulesToInstance(player);
-            }
+        auto* actorRef = a_event->actor.get();
+        auto* actor = actorRef ? actorRef->As<RE::Actor>() : nullptr;
+        if (!actor) {
+            return RE::BSEventNotifyControl::kContinue;
         }
-
-
+        UpdateActorCombatContext(actor, a_event->newState.get());
+        ScheduleRuleEvaluation(
+            actor,
+            RuleEvaluationDelta::For(RuleDependency::kCombat));
         return RE::BSEventNotifyControl::kContinue;
     }
 

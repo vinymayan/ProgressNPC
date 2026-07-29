@@ -110,12 +110,14 @@ namespace
             type == "Gold" ||
             type == "Equipped Item" ||
             type == "Location" ||
-            type == "Cell";
+            type == "Cell" ||
+            type == "Actor Value";
     }
 
     bool HasActorDependentFilters(const Rule& rule)
     {
-        return std::ranges::any_of(rule.targetFilters, [](const auto& filter) {
+        return rule.combatState != RuleCombatState::kAny ||
+            std::ranges::any_of(rule.targetFilters, [](const auto& filter) {
             return IsActorDependentFilterType(filter.type);
         }) || std::ranges::any_of(rule.blacklistFilters, [](const auto& filter) {
             return IsActorDependentFilterType(filter.type);
@@ -170,8 +172,62 @@ RE::FormID ResolveEDFFormID(const std::string& a_type, const std::string& a_edit
     return 0;
 }
 
+bool IsEquipmentRewardType(const std::string_view type)
+{
+    return type == "Outfit" || type == "Armor" ||
+        type == "Weapon" || type == "Ammo";
+}
+
+RE::ActorValue ResolveActorValue(const std::string_view a_name)
+{
+    if (a_name.empty()) {
+        return RE::ActorValue::kNone;
+    }
+
+    const std::string name(a_name);
+    if (const auto resolved =
+            RE::ActorValueList::LookupActorValueByName(name.c_str());
+        resolved != RE::ActorValue::kNone) {
+        return resolved;
+    }
+
+    for (auto index = 0;
+         index < std::to_underlying(RE::ActorValue::kTotal);
+         ++index) {
+        const auto actorValue = static_cast<RE::ActorValue>(index);
+        const auto actorValueName =
+            RE::ActorValueList::GetActorValueName(actorValue);
+        if (actorValueName && IEquals(name, actorValueName)) {
+            return actorValue;
+        }
+    }
+    return RE::ActorValue::kNone;
+}
+
+bool IsMaximumActorValueSupported(const RE::ActorValue a_actorValue)
+{
+    return a_actorValue == RE::ActorValue::kHealth ||
+        a_actorValue == RE::ActorValue::kMagicka ||
+        a_actorValue == RE::ActorValue::kStamina;
+}
+
+bool IsActorValueFilterValid(const BlacklistFilter& a_filter)
+{
+    if (a_filter.type != "Actor Value") {
+        return true;
+    }
+    const auto actorValue =
+        ResolveActorValue(a_filter.actorValueName);
+    return actorValue != RE::ActorValue::kNone &&
+        (a_filter.actorValueMode != ActorValueMode::kMaximum ||
+            IsMaximumActorValueSupported(actorValue));
+}
+
 RuleDependencyMask GetFilterDependencyMask(std::string_view a_type)
 {
+    if (a_type == "Actor Value") {
+        return ToMask(RuleDependency::kActorValue);
+    }
     if (a_type == "Keyword" || a_type == "Faction") {
         return ToMask(RuleDependency::kTag);
     }
@@ -310,6 +366,11 @@ namespace {
         AddString(obj, alloc, "type", p.type);
         AddString(obj, alloc, "formID", p.formIDStr);
         AddString(obj, alloc, "editorID", p.editorID);
+        AddString(obj, alloc, "actorValueName", p.actorValueName);
+        AddInt(obj, alloc, "actorValueMode", static_cast<int>(p.actorValueMode));
+        AddInt(obj, alloc, "comparison", static_cast<int>(p.comparison));
+        AddFloat(obj, alloc, "minimumValue", p.minimumValue);
+        AddFloat(obj, alloc, "maximumValue", p.maximumValue);
         return obj;
     }
 
@@ -318,6 +379,13 @@ namespace {
         p.type = GetString(value, "type");
         p.formIDStr = GetString(value, "formID");
         p.editorID = GetString(value, "editorID");
+        p.actorValueName = GetString(value, "actorValueName");
+        p.actorValueMode = static_cast<ActorValueMode>(std::clamp(
+            GetInt(value, "actorValueMode", 0), 0, 2));
+        p.comparison = static_cast<NumericComparison>(std::clamp(
+            GetInt(value, "comparison", 0), 0, 3));
+        p.minimumValue = GetFloat(value, "minimumValue", 0.0f);
+        p.maximumValue = GetFloat(value, "maximumValue", 0.0f);
         return p;
     }
 
@@ -347,6 +415,7 @@ namespace {
         AddUint(obj, alloc, "Amount", p.amount);
         AddFloat(obj, alloc, "Chance", p.chanceReward);
         AddInt(obj, alloc, "functionOnType", p.functionOnType);
+        AddInt(obj, alloc, "equipContexts", p.equipContexts);
         AddBool(obj, alloc, "isPersistent", p.isPersistent);
         return obj;
     }
@@ -359,6 +428,22 @@ namespace {
         p.amount = GetUint(value, "Amount", 1);
         p.chanceReward = GetFloat(value, "Chance", 100.0f);
         p.functionOnType = GetInt(value, "functionOnType", GetInt(value, "isSleepOutfit", 0));
+        if (const auto contexts = FindMember(value, "equipContexts");
+            contexts && contexts->IsInt()) {
+            p.equipContexts = static_cast<EquipmentContextMask>(
+                std::clamp(
+                    contexts->GetInt(), 1,
+                    static_cast<int>(kAllEquipmentContexts)));
+        }
+        else if (p.typeReward == "Outfit") {
+            p.equipContexts =
+                p.functionOnType == 1 ?
+                    ToMask(EquipmentContext::kSleep) :
+                p.functionOnType == 2 ?
+                    ToMask(EquipmentContext::kNormal) |
+                        ToMask(EquipmentContext::kSleep) :
+                    ToMask(EquipmentContext::kNormal);
+        }
         p.isPersistent = GetBool(value, "isPersistent", false);
         return p;
     }
@@ -430,6 +515,7 @@ namespace {
         AddInt(obj, alloc, "g", p.targetGender);
         AddInt(obj, alloc, "h", p.targetHumanoid);
         AddInt(obj, alloc, "c", p.targetChild);
+        AddInt(obj, alloc, "cb", static_cast<int>(p.combatState));
         AddBool(obj, alloc, "ra", p.targetRequiresAll);
         AddBool(obj, alloc, "ex", p.isExclusive);
         obj.AddMember("tf", WriteFilterArray(p.targetFilters, alloc), alloc);
@@ -450,6 +536,7 @@ namespace {
         AddInt(obj, alloc, "t_gender", p.targetGender);
         AddInt(obj, alloc, "t_humanoid", p.targetHumanoid);
         AddInt(obj, alloc, "t_child", p.targetChild);
+        AddInt(obj, alloc, "combat_state", static_cast<int>(p.combatState));
         AddBool(obj, alloc, "t_reqAll", p.targetRequiresAll);
         obj.AddMember("t_filters", WriteFilterArray(p.targetFilters, alloc), alloc);
         obj.AddMember("groups", WriteRewardGroupArray(p.rewardGroups, alloc), alloc);
@@ -494,6 +581,13 @@ Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId
     p.targetGender = GetInt(j, "g", GetInt(j, "targetGender", 0));
     p.targetHumanoid = GetInt(j, "h", GetInt(j, "t_humanoid", GetInt(j, "targetHumanoid", 0)));
     p.targetChild = GetInt(j, "c", GetInt(j, "t_child", GetInt(j, "targetChild", 0)));
+    p.combatState = static_cast<RuleCombatState>(std::clamp(
+        GetInt(
+            j,
+            "cb",
+            GetInt(j, "combatState", GetInt(j, "combat_state", 0))),
+        0,
+        2));
     p.targetRequiresAll = GetBool(j, "ra", GetBool(j, "targetRequiresAll", false));
     p.isExclusive = GetBool(j, "ex", GetBool(j, "ruleExclusive", false));
 
@@ -642,6 +736,68 @@ int GetFilterValue(const std::vector<std::string>& tokens, int fallback)
     }
 }
 
+std::optional<float> ReadActorValue(
+    RE::Actor* a_actor,
+    const RE::ActorValue a_actorValue,
+    const ActorValueMode a_mode)
+{
+    if (!a_actor || a_actorValue == RE::ActorValue::kNone) {
+        return std::nullopt;
+    }
+    auto owner = a_actor->AsActorValueOwner();
+    if (!owner) {
+        return std::nullopt;
+    }
+
+    switch (a_mode) {
+    case ActorValueMode::kCurrent:
+        return owner->GetActorValue(a_actorValue);
+    case ActorValueMode::kPermanent:
+        return owner->GetPermanentActorValue(a_actorValue);
+    case ActorValueMode::kMaximum:
+        if (IsMaximumActorValueSupported(a_actorValue)) {
+            return a_actor->GetActorValueMax(a_actorValue);
+        }
+        return std::nullopt;
+    default:
+        return std::nullopt;
+    }
+}
+
+bool MatchesActorValueFilter(
+    RE::Actor* a_actor,
+    const BlacklistFilter& a_filter)
+{
+    const auto actorValue =
+        ResolveActorValue(a_filter.actorValueName);
+    const auto value =
+        ReadActorValue(a_actor, actorValue, a_filter.actorValueMode);
+    if (!value || !std::isfinite(*value)) {
+        return false;
+    }
+
+    const auto epsilon = std::max(
+        0.001f,
+        std::abs(a_filter.minimumValue) * 0.00001f);
+    switch (a_filter.comparison) {
+    case NumericComparison::kGreaterOrEqual:
+        return *value + epsilon >= a_filter.minimumValue;
+    case NumericComparison::kLessOrEqual:
+        return *value - epsilon <= a_filter.minimumValue;
+    case NumericComparison::kEqual:
+        return std::abs(*value - a_filter.minimumValue) <= epsilon;
+    case NumericComparison::kBetween: {
+        const auto [minimum, maximum] = std::minmax(
+            a_filter.minimumValue,
+            a_filter.maximumValue);
+        return *value + epsilon >= minimum &&
+            *value - epsilon <= maximum;
+    }
+    default:
+        return false;
+    }
+}
+
 bool IsActorEquippedItem(RE::Actor* actor, RE::TESBoundObject* item)
 {
     if (!actor || !item) return false;
@@ -685,6 +841,17 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         if (!isBlacklist && !childMatch) return false;
     }
 
+    if (!isBlacklist && rule.combatState != RuleCombatState::kAny) {
+        if (!actor) {
+            return false;
+        }
+        const bool inCombat = IsActorInCombatContext(actor);
+        if ((rule.combatState == RuleCombatState::kInCombat && !inCombat) ||
+            (rule.combatState == RuleCombatState::kOutOfCombat && inCombat)) {
+            return false;
+        }
+    }
+
     if (filters.empty()) {
         // Na Blacklist, vazio significa "não bloqueia ninguém". No Target, significa "afeta todos".
         return !isBlacklist;
@@ -693,6 +860,17 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
     int matches = 0;
     for (const auto& filter : filters) {
         bool match = false;
+        if (filter.type == "Actor Value") {
+            match = MatchesActorValueFilter(actor, filter);
+            if (match) {
+                ++matches;
+                if (!requiresAll) {
+                    return true;
+                }
+            }
+            continue;
+        }
+
         auto tokens = split(filter.formIDStr, '|');
         if (tokens.size() < 2) continue;
 
@@ -1266,13 +1444,13 @@ bool RuleManager::ExportRulesPackage(const std::string& packageName, const std::
         return false;
     }
 
-    std::vector<Rule> selected;
+    std::map<std::string, std::vector<Rule>> selectedByPackage;
     for (const auto& rule : _rules) {
         if (ruleIDs.contains(rule.id)) {
-            selected.push_back(rule);
+            selectedByPackage[rule.packageID].push_back(rule);
         }
     }
-    if (selected.empty()) {
+    if (selectedByPackage.empty()) {
         logger::warn("Export: selected rule IDs were not found.");
         return false;
     }
@@ -1287,10 +1465,43 @@ bool RuleManager::ExportRulesPackage(const std::string& packageName, const std::
     const auto zipPath = fs::path(_exportDir) / (safeName + ".zip");
     const auto stagingRoot = fs::temp_directory_path() /
         std::format("edf_export_{}", std::chrono::steady_clock::now().time_since_epoch().count());
-    RulePackage package;
-    if (!CreateRulesPackageSnapshot(safeName, selected, stagingRoot, package)) {
-        fs::remove_all(stagingRoot, ec);
-        return false;
+
+    std::vector<RulePackage> snapshots;
+    snapshots.reserve(selectedByPackage.size());
+    const auto& packages = GetPackages();
+    for (const auto& [packageID, selected] : selectedByPackage) {
+        const auto source = std::ranges::find_if(
+            packages,
+            [&packageID](const RulePackage& package) {
+                return package.id == packageID;
+            });
+        if (source == packages.end()) {
+            logger::error(
+                "Export: source package '{}' was not found.",
+                packageID);
+            fs::remove_all(stagingRoot, ec);
+            return false;
+        }
+
+        std::map<std::string, std::vector<Rule>> histories;
+        for (const auto& rule : selected) {
+            if (const auto found = _ruleHistories.find(rule.id);
+                found != _ruleHistories.end()) {
+                histories.emplace(rule.id, found->second);
+            }
+        }
+
+        RulePackage snapshot;
+        if (!RulePackageStore::GetSingleton()->CreateSnapshot(
+                *source,
+                selected,
+                histories,
+                stagingRoot,
+                snapshot)) {
+            fs::remove_all(stagingRoot, ec);
+            return false;
+        }
+        snapshots.push_back(std::move(snapshot));
     }
 
     mz_zip_archive zip{};
@@ -1298,20 +1509,41 @@ bool RuleManager::ExportRulesPackage(const std::string& packageName, const std::
         fs::remove_all(stagingRoot, ec);
         return false;
     }
-    const auto folder = package.path.filename().generic_string();
-    const auto manifestInternal = std::format("Viny Mods/EDF/Packages/{}/manifest.json", folder);
-    const auto databaseInternal = std::format("Viny Mods/EDF/Packages/{}/package.db", folder);
-    const bool ok =
-        mz_zip_writer_add_file(&zip, manifestInternal.c_str(), (package.path / "manifest.json").string().c_str(), nullptr, 0, MZ_BEST_COMPRESSION) &&
-        mz_zip_writer_add_file(&zip, databaseInternal.c_str(), (package.path / "package.db").string().c_str(), nullptr, 0, MZ_BEST_COMPRESSION) &&
-        mz_zip_writer_finalize_archive(&zip);
+    bool ok = true;
+    for (const auto& package : snapshots) {
+        const auto folder = package.path.filename().generic_string();
+        const auto manifestInternal = std::format(
+            "Viny Mods/EDF/Packages/{}/manifest.json", folder);
+        const auto databaseInternal = std::format(
+            "Viny Mods/EDF/Packages/{}/package.db", folder);
+        ok =
+            mz_zip_writer_add_file(
+                &zip,
+                manifestInternal.c_str(),
+                (package.path / "manifest.json").string().c_str(),
+                nullptr,
+                0,
+                MZ_BEST_COMPRESSION) &&
+            mz_zip_writer_add_file(
+                &zip,
+                databaseInternal.c_str(),
+                (package.path / "package.db").string().c_str(),
+                nullptr,
+                0,
+                MZ_BEST_COMPRESSION) &&
+            ok;
+    }
+    ok = ok && mz_zip_writer_finalize_archive(&zip);
     mz_zip_writer_end(&zip);
     fs::remove_all(stagingRoot, ec);
     if (!ok) {
         logger::error("Export: failed to create package ZIP '{}'.", zipPath.string());
         return false;
     }
-    logger::info("Rules package exported to '{}'.", zipPath.string());
+    logger::info(
+        "{} source package(s) exported to '{}'.",
+        snapshots.size(),
+        zipPath.string());
     return true;
 }
 
@@ -1457,10 +1689,12 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
     _ruleIndices.clear();
     _rulesByDependency.clear();
     _rulesByExactDependency.clear();
+    _rulesByActorValue.clear();
     _rulesWithUnresolvedDependency.clear();
     _ruleDependencyMasks.clear();
     _broadFullEvaluationRules.clear();
     _unstableCycleRules.clear();
+    _watchedActorValues.clear();
 
     constexpr std::array dependencyBits{
         RuleDependency::kStatic,
@@ -1470,7 +1704,9 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
         RuleDependency::kInventory,
         RuleDependency::kEnvironment,
         RuleDependency::kLevel,
-        RuleDependency::kSleep
+        RuleDependency::kSleep,
+        RuleDependency::kCombat,
+        RuleDependency::kActorValue
     };
 
     _ruleIndices.reserve(_rules.size());
@@ -1496,6 +1732,26 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
     const auto addFilter = [&](const Rule& a_rule, const BlacklistFilter& a_filter) {
         const auto dependency = GetFilterDependencyMask(a_filter.type);
         addDependency(a_rule, dependency);
+        if (a_filter.type == "Actor Value") {
+            const auto actorValue =
+                ResolveActorValue(a_filter.actorValueName);
+            if (actorValue != RE::ActorValue::kNone &&
+                (a_filter.actorValueMode != ActorValueMode::kMaximum ||
+                    IsMaximumActorValueSupported(actorValue))) {
+                _rulesByActorValue[actorValue].insert(a_rule.id);
+                _watchedActorValues.emplace(
+                    actorValue, a_filter.actorValueMode);
+            }
+            else {
+                _rulesWithUnresolvedDependency[dependency].insert(
+                    a_rule.id);
+                logger::warn(
+                    "[RuleIndex] Rule '{}' has invalid Actor Value filter '{}'.",
+                    a_rule.name,
+                    a_filter.actorValueName);
+            }
+            return dependency;
+        }
         const auto formID = ResolveEDFFormID(
             a_filter.type, a_filter.editorID, a_filter.formIDStr);
         if (formID != 0) {
@@ -1508,6 +1764,10 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
 
     for (const auto& rule : _rules) {
         RuleDependencyMask mask = ToMask(RuleDependency::kLevel);
+        if (rule.combatState != RuleCombatState::kAny) {
+            mask |= ToMask(RuleDependency::kCombat);
+            addDependency(rule, ToMask(RuleDependency::kCombat));
+        }
         if (rule.targetFilters.empty()) {
             _broadFullEvaluationRules.insert(rule.id);
         }
@@ -1524,8 +1784,8 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
         for (const auto& filter : rule.targetFilters) {
             mask |= addFilter(rule, filter);
             if (filter.type == "Gold" || filter.type == "Leveled NPC" ||
-                ResolveEDFFormID(
-                    filter.type, filter.editorID, filter.formIDStr) == 0) {
+                (filter.type != "Actor Value" && ResolveEDFFormID(
+                    filter.type, filter.editorID, filter.formIDStr) == 0)) {
                 _broadFullEvaluationRules.insert(rule.id);
             }
         }
@@ -1534,12 +1794,30 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
         }
         for (const auto& group : rule.rewardGroups) {
             for (const auto& reward : group.rewards) {
-                if ((reward.typeReward == "Outfit" ||
-                    reward.typeReward == "Spell") &&
+                if (reward.typeReward == "Spell" &&
                     (reward.functionOnType == 1 ||
                     reward.functionOnType == 2)) {
                     mask |= ToMask(RuleDependency::kSleep);
                     addDependency(rule, ToMask(RuleDependency::kSleep));
+                }
+                if (IsEquipmentRewardType(reward.typeReward)) {
+                    const bool normal =
+                        (reward.equipContexts &
+                            ToMask(EquipmentContext::kNormal)) != 0;
+                    const bool sleep =
+                        (reward.equipContexts &
+                            ToMask(EquipmentContext::kSleep)) != 0;
+                    const bool combat =
+                        (reward.equipContexts &
+                            ToMask(EquipmentContext::kCombat)) != 0;
+                    if (sleep != normal) {
+                        mask |= ToMask(RuleDependency::kSleep);
+                        addDependency(rule, ToMask(RuleDependency::kSleep));
+                    }
+                    if (combat != normal) {
+                        mask |= ToMask(RuleDependency::kCombat);
+                        addDependency(rule, ToMask(RuleDependency::kCombat));
+                    }
                 }
             }
         }
@@ -1727,12 +2005,36 @@ std::vector<std::string> RuleManager::GetCandidateRuleIDs(
         RuleDependency::kInventory,
         RuleDependency::kEnvironment,
         RuleDependency::kLevel,
-        RuleDependency::kSleep
+        RuleDependency::kSleep,
+        RuleDependency::kCombat,
+        RuleDependency::kActorValue
     };
 
     for (const auto dependency : dependencyBits) {
         const auto bit = ToMask(dependency);
         if ((a_delta.mask & bit) == 0) {
+            continue;
+        }
+
+        if (dependency == RuleDependency::kActorValue) {
+            if (a_delta.changedActorValues.empty()) {
+                if (const auto found = _rulesByDependency.find(bit);
+                    found != _rulesByDependency.end()) {
+                    candidates.insert(
+                        found->second.begin(), found->second.end());
+                }
+            }
+            else {
+                for (const auto actorValue :
+                     a_delta.changedActorValues) {
+                    if (const auto found =
+                            _rulesByActorValue.find(actorValue);
+                        found != _rulesByActorValue.end()) {
+                        candidates.insert(
+                            found->second.begin(), found->second.end());
+                    }
+                }
+            }
             continue;
         }
 
@@ -1840,6 +2142,11 @@ std::vector<std::string> RuleManager::GetCandidateRuleIDs(
 
     appendExactForms(RuleDependency::kStatic, baseForms);
     appendExactForms(RuleDependency::kInventory, inventoryForms);
+    if (const auto actorValueRules = _rulesByDependency.find(
+            ToMask(RuleDependency::kActorValue));
+        actorValueRules != _rulesByDependency.end()) {
+        append(actorValueRules->second);
+    }
 
     const auto appendMatchingExact = [&](RuleDependency a_dependency,
         const auto& a_matches) {
@@ -2005,9 +2312,73 @@ RuleEvaluationDelta RuleManager::DetectBaseNPCChanges(RE::Actor* a_actor)
     return delta;
 }
 
+RuleEvaluationDelta RuleManager::DetectActorValueChanges(RE::Actor* a_actor)
+{
+    RuleEvaluationDelta delta;
+    delta.mask = ToMask(RuleDependency::kNone);
+    if (!a_actor || _watchedActorValues.empty()) {
+        return delta;
+    }
+
+    std::map<std::pair<RE::ActorValue, ActorValueMode>, float> current;
+    for (const auto& [actorValue, mode] : _watchedActorValues) {
+        if (const auto value =
+                ReadActorValue(a_actor, actorValue, mode);
+            value && std::isfinite(*value)) {
+            current.emplace(
+                std::pair{ actorValue, mode }, *value);
+        }
+    }
+
+    const auto actorID = a_actor->GetFormID();
+    const auto found = _actorValueSnapshots.find(actorID);
+    if (found == _actorValueSnapshots.end() ||
+        found->second.first != _dependencyRevision) {
+        for (const auto& [key, value] : current) {
+            delta.changedActorValues.insert(key.first);
+        }
+        _actorValueSnapshots[actorID] = {
+            _dependencyRevision, std::move(current)
+        };
+    }
+    else {
+        auto& previous = found->second.second;
+        for (const auto& [key, value] : current) {
+            const auto old = previous.find(key);
+            if (old == previous.end() ||
+                std::abs(old->second - value) >
+                    std::max(0.001f, std::abs(value) * 0.00001f)) {
+                delta.changedActorValues.insert(key.first);
+            }
+        }
+        for (const auto& [key, value] : previous) {
+            if (!current.contains(key)) {
+                delta.changedActorValues.insert(key.first);
+            }
+        }
+        previous = std::move(current);
+    }
+
+    if (!delta.changedActorValues.empty()) {
+        delta.mask = ToMask(RuleDependency::kActorValue);
+        logger::debug(
+            "[RuleSnapshot] Actor '{}' ({:08X}) changed {} watched Actor Value(s).",
+            a_actor->GetName(),
+            actorID,
+            delta.changedActorValues.size());
+    }
+    return delta;
+}
+
 void RuleManager::ResetRuntimeCaches()
 {
     _baseNPCFingerprints.clear();
+    _actorValueSnapshots.clear();
+}
+
+void RuleManager::ForgetActorRuntimeState(const RE::FormID a_actorID)
+{
+    _actorValueSnapshots.erase(a_actorID);
 }
 
 const std::map<RE::FormID, AffectedNPC>&

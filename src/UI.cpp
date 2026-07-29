@@ -59,6 +59,65 @@ namespace SPIDUI {
         return it != locMap.end() ? it->second.c_str() : fallback;
     }
 
+    std::string EquipmentContextSummary(EquipmentContextMask a_contexts)
+    {
+        std::vector<std::string_view> labels;
+        if ((a_contexts & ToMask(EquipmentContext::kNormal)) != 0) {
+            labels.emplace_back(GetLoc("auto.normal", "Normal"));
+        }
+        if ((a_contexts & ToMask(EquipmentContext::kSleep)) != 0) {
+            labels.emplace_back(GetLoc("auto.sleep", "Sleep"));
+        }
+        if ((a_contexts & ToMask(EquipmentContext::kCombat)) != 0) {
+            labels.emplace_back(GetLoc("auto.combat", "Combat"));
+        }
+        return labels.empty() ?
+            GetLoc("auto.normal", "Normal") :
+            fmt::format("{}", fmt::join(labels, " + "));
+    }
+
+    bool DrawEquipmentContextCombo(
+        const char* a_label,
+        Reward& a_reward)
+    {
+        bool changed = false;
+        const auto summary =
+            EquipmentContextSummary(a_reward.equipContexts);
+        if (!ImGuiMCP::BeginCombo(a_label, summary.c_str())) {
+            return false;
+        }
+
+        const std::array options{
+            std::pair{
+                EquipmentContext::kNormal,
+                GetLoc("auto.normal", "Normal") },
+            std::pair{
+                EquipmentContext::kSleep,
+                GetLoc("auto.sleep", "Sleep") },
+            std::pair{
+                EquipmentContext::kCombat,
+                GetLoc("auto.combat", "Combat") }
+        };
+        for (const auto& [context, label] : options) {
+            const auto bit = ToMask(context);
+            bool selected =
+                (a_reward.equipContexts & bit) != 0;
+            if (ImGuiMCP::Checkbox(label, &selected)) {
+                const auto updated = selected ?
+                    static_cast<EquipmentContextMask>(
+                        a_reward.equipContexts | bit) :
+                    static_cast<EquipmentContextMask>(
+                        a_reward.equipContexts & ~bit);
+                if (updated != 0) {
+                    a_reward.equipContexts = updated;
+                    changed = true;
+                }
+            }
+        }
+        ImGuiMCP::EndCombo();
+        return changed;
+    }
+
     static std::set<std::string> activeTypeFilters;
     static std::string activePackageID = "edf.local-rules";
     static std::string packageFilterID;
@@ -228,6 +287,26 @@ namespace SPIDUI {
         return changed;
     }
 
+    const std::vector<SearchableComboOption>& GetActorValueOptions()
+    {
+        static std::vector<SearchableComboOption> options;
+        if (!options.empty()) {
+            return options;
+        }
+        for (auto index = 0;
+             index < std::to_underlying(RE::ActorValue::kTotal);
+             ++index) {
+            const auto actorValue =
+                static_cast<RE::ActorValue>(index);
+            const auto name =
+                RE::ActorValueList::GetActorValueName(actorValue);
+            if (name && name[0] != '\0') {
+                options.push_back({ name, name });
+            }
+        }
+        return options;
+    }
+
     struct NPCMatchInfo {
         bool isAffected = false;
         std::string ruleNames; // Cache das strings das regras para exibição rápida
@@ -383,6 +462,204 @@ namespace SPIDUI {
         filter.formIDStr = baseID + "|" + std::to_string(value);
     }
 
+    void RenderActorValueFilters(
+        std::vector<BlacklistFilter>& a_filters,
+        const bool a_isBlacklist)
+    {
+        ImGuiMCP::SameLine();
+        if (ImGuiMCP::Button(GetLoc(
+                "auto.add_actor_value_filter",
+                "+ Actor Value"))) {
+            BlacklistFilter filter;
+            filter.type = "Actor Value";
+            filter.actorValueName = "Health";
+            filter.actorValueMode = ActorValueMode::kMaximum;
+            filter.comparison = NumericComparison::kGreaterOrEqual;
+            filter.minimumValue = 100.0f;
+            filter.maximumValue = 100.0f;
+            a_filters.push_back(std::move(filter));
+        }
+
+        const auto hasActorValues = std::ranges::any_of(
+            a_filters,
+            [](const BlacklistFilter& a_filter) {
+                return a_filter.type == "Actor Value";
+            });
+        if (!hasActorValues) {
+            return;
+        }
+
+        const auto tableID = a_isBlacklist ?
+            "BlacklistActorValues" :
+            "TargetActorValues";
+        const auto tableFlags =
+            ImGuiMCP::ImGuiTableFlags_Borders |
+            ImGuiMCP::ImGuiTableFlags_RowBg |
+            ImGuiMCP::ImGuiTableFlags_Resizable;
+        if (!ImGuiMCP::BeginTable(tableID, 8, tableFlags)) {
+            return;
+        }
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.actor_value", "Actor Value"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 330.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.known_values", "Known Values"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 165.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.value_mode", "Value Mode"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 135.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.operator", "Operator"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 100.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.minimum", "Value"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 120.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.maximum", "Maximum"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 120.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.status", "Status"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 130.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.action", "Action"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 75.0f);
+        ImGuiMCP::TableHeadersRow();
+
+        const char* modeLabels[] = {
+            GetLoc("auto.current", "Current"),
+            GetLoc("auto.permanent", "Permanent"),
+            GetLoc("auto.maximum", "Maximum")
+        };
+        const char* comparisonLabels[] = {
+            ">=", "<=", "=", GetLoc("auto.between", "Between")
+        };
+        const auto& actorValueOptions = GetActorValueOptions();
+
+        for (std::size_t index = 0; index < a_filters.size(); ++index) {
+            auto& filter = a_filters[index];
+            if (filter.type != "Actor Value") {
+                continue;
+            }
+
+            ImGuiMCP::PushID(static_cast<int>(index));
+            ImGuiMCP::TableNextRow();
+            ImGuiMCP::TableSetColumnIndex(0);
+            char nameBuffer[128]{};
+            strncpy_s(
+                nameBuffer,
+                filter.actorValueName.c_str(),
+                _TRUNCATE);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            if (ImGuiMCP::InputText(
+                    "##ActorValueName",
+                    nameBuffer,
+                    sizeof(nameBuffer))) {
+                filter.actorValueName = nameBuffer;
+            }
+
+            ImGuiMCP::TableSetColumnIndex(1);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            DrawSearchableCombo(
+                "##KnownActorValue",
+                GetLoc("auto.select", "Select..."),
+                std::format(
+                    "{}-actor-value-{}",
+                    a_isBlacklist ? "blacklist" : "target",
+                    index),
+                actorValueOptions,
+                filter.actorValueName,
+                1);
+
+            ImGuiMCP::TableSetColumnIndex(2);
+            auto mode = std::clamp(
+                static_cast<int>(filter.actorValueMode), 0, 2);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##ActorValueMode",
+                    modeLabels[mode])) {
+                const auto actorValue =
+                    ResolveActorValue(filter.actorValueName);
+                for (int option = 0; option < 3; ++option) {
+                    if (option == static_cast<int>(
+                            ActorValueMode::kMaximum) &&
+                        !IsMaximumActorValueSupported(actorValue)) {
+                        continue;
+                    }
+                    if (ImGuiMCP::Selectable(
+                            modeLabels[option], mode == option)) {
+                        filter.actorValueMode =
+                            static_cast<ActorValueMode>(option);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+
+            ImGuiMCP::TableSetColumnIndex(3);
+            auto comparison = std::clamp(
+                static_cast<int>(filter.comparison), 0, 3);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##ActorValueComparison",
+                    comparisonLabels[comparison])) {
+                for (int option = 0; option < 4; ++option) {
+                    if (ImGuiMCP::Selectable(
+                            comparisonLabels[option],
+                            comparison == option)) {
+                        filter.comparison =
+                            static_cast<NumericComparison>(option);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+
+            ImGuiMCP::TableSetColumnIndex(4);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            ImGuiMCP::InputFloat(
+                "##ActorValueMinimum",
+                &filter.minimumValue,
+                0.0f,
+                0.0f,
+                "%.2f");
+
+            ImGuiMCP::TableSetColumnIndex(5);
+            if (filter.comparison == NumericComparison::kBetween) {
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                ImGuiMCP::InputFloat(
+                    "##ActorValueMaximum",
+                    &filter.maximumValue,
+                    0.0f,
+                    0.0f,
+                    "%.2f");
+            }
+            else {
+                ImGuiMCP::TextDisabled("-");
+            }
+
+            ImGuiMCP::TableSetColumnIndex(6);
+            if (IsActorValueFilterValid(filter)) {
+                ImGuiMCP::TextColored(
+                    { 0.3f, 0.9f, 0.4f, 1.0f },
+                    "%s",
+                    GetLoc("auto.valid", "VALID"));
+            }
+            else {
+                ImGuiMCP::TextColored(
+                    { 1.0f, 0.25f, 0.25f, 1.0f },
+                    "%s",
+                    GetLoc("auto.invalid", "INVALID"));
+            }
+
+            ImGuiMCP::TableSetColumnIndex(7);
+            if (ImGuiMCP::Button("X##ActorValue")) {
+                a_filters.erase(a_filters.begin() + index);
+                ImGuiMCP::PopID();
+                break;
+            }
+            ImGuiMCP::PopID();
+        }
+        ImGuiMCP::EndTable();
+    }
+
     void RenderTypeFilter() {
         const std::vector<std::string> options = {
         "NPC", "Faction", "Faction Rank", "Keyword", "Race", "Package",
@@ -480,12 +757,45 @@ namespace SPIDUI {
         if (ImGuiMCP::IsItemHovered()) {
             ImGuiMCP::SetTooltip(tooltip);
         }
+        if (!isBlacklist) {
+            const char* combatOptions[] = {
+                GetLoc("auto.both", "Both"),
+                GetLoc("auto.in_combat", "In Combat"),
+                GetLoc("auto.out_of_combat", "Out of Combat")
+            };
+            int combatState = std::clamp(
+                static_cast<int>(rule.combatState), 0, 2);
+            ImGuiMCP::Text(
+                "%s",
+                GetLoc("auto.combat_state", "Combat State:"));
+            ImGuiMCP::SameLine();
+            ImGuiMCP::SetNextItemWidth(180.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##targetCombatState",
+                    combatOptions[combatState])) {
+                for (int index = 0; index < 3; ++index) {
+                    if (ImGuiMCP::Selectable(
+                            combatOptions[index],
+                            combatState == index)) {
+                        rule.combatState =
+                            static_cast<RuleCombatState>(index);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(GetLoc(
+                    "auto.combat_state_help",
+                    "Controls whether the rule is valid in combat, out of combat, or both."));
+            }
+        }
 
         ImGuiMCP::Separator();
         if (ImGuiMCP::Button(buttonLabel)) {
             ResetSelectionState();
             isPickingBlacklist = true;
         }
+        RenderActorValueFilters(filters, isBlacklist);
 
         if (ImGuiMCP::BeginTable(tableName, 4, ImGuiMCP::ImGuiTableFlags_Borders)) {
             ImGuiMCP::TableSetupColumn(GetLoc("auto.type", "Type"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 120.0f);
@@ -496,6 +806,9 @@ namespace SPIDUI {
             auto dataHandler = RE::TESDataHandler::GetSingleton();
             for (int i = 0; i < filters.size(); i++) {
                 auto& f = filters[i];
+                if (f.type == "Actor Value") {
+                    continue;
+                }
                 ImGuiMCP::TableNextRow();
                 ImGuiMCP::TableSetColumnIndex(0); ImGuiMCP::Text(f.type.c_str());
                 ImGuiMCP::TableSetColumnIndex(1);
@@ -901,7 +1214,7 @@ namespace SPIDUI {
                             if (ImGuiMCP::IsItemHovered()) ImGuiMCP::SetTooltip(GetLoc("auto.if_checked_item_won_t_be_removed_when_rule_becomes_invalid", "If checked, item won't be removed when rule becomes invalid."));
 
                             ImGuiMCP::TableSetColumnIndex(8);
-                            if (item.formType == "Outfit" || item.formType == "Spell") {
+                            if (item.formType == "Spell") {
                                 const char* modes[] = { GetLoc("auto.standard", "Standard"), GetLoc("auto.special", "Special"), GetLoc("auto.both", "Both") };
                                 ImGuiMCP::SetNextItemWidth(-1.0f); // Aplicando sua dúvida anterior
                                 if (ImGuiMCP::BeginCombo(("##mode" + internalID).c_str(), modes[it->functionOnType])) {
@@ -911,9 +1224,14 @@ namespace SPIDUI {
                                     ImGuiMCP::EndCombo();
                                 }
                                 if (ImGuiMCP::IsItemHovered()) {
-                                    if (item.formType == "Outfit") ImGuiMCP::SetTooltip(GetLoc("auto.0_normal_1_sleep_beta_2_both_beta", "0: Normal, 1: Sleep(beta), 2: Both(beta)"));
-                                    else ImGuiMCP::SetTooltip(GetLoc("auto.0_teach_1_cast_apply_2_both", "0: Teach, 1: Cast/Apply, 2: Both"));
+                                    ImGuiMCP::SetTooltip(GetLoc("auto.0_teach_1_cast_apply_2_both", "0: Teach, 1: Cast/Apply, 2: Both"));
                                 }
+                            }
+                            else if (IsEquipmentRewardType(item.formType)) {
+                                ImGuiMCP::SetNextItemWidth(-1.0f);
+                                DrawEquipmentContextCombo(
+                                    ("##context" + internalID).c_str(),
+                                    *it);
                             }
                             else {
                                 ImGuiMCP::TextDisabled("-");
@@ -1089,9 +1407,14 @@ namespace SPIDUI {
                         }
 
                         ImGuiMCP::TableSetColumnIndex(5);
-                        if (r.typeReward == "Outfit" || r.typeReward == "Spell") {
+                        if (r.typeReward == "Spell") {
                             const char* modeNames[] = { GetLoc("auto.standard", "Standard"), GetLoc("auto.special", "Special"), GetLoc("auto.both", "Both") };
                             ImGuiMCP::Text("%s", modeNames[r.functionOnType]);
+                        }
+                        else if (IsEquipmentRewardType(r.typeReward)) {
+                            const auto summary =
+                                EquipmentContextSummary(r.equipContexts);
+                            ImGuiMCP::TextUnformatted(summary.c_str());
                         }
                         else {
                             ImGuiMCP::TextDisabled("-");
@@ -2196,6 +2519,15 @@ namespace SPIDUI {
             reward.amount = amount;
             reward.chanceReward = chance;
             reward.functionOnType = functionOnType;
+            if (type == "Outfit") {
+                reward.equipContexts =
+                    functionOnType == 1 ?
+                    ToMask(EquipmentContext::kSleep) :
+                    functionOnType == 2 ?
+                    ToMask(EquipmentContext::kNormal) |
+                        ToMask(EquipmentContext::kSleep) :
+                    ToMask(EquipmentContext::kNormal);
+            }
             reward.isPersistent = true;
             return reward;
         }
@@ -2949,23 +3281,42 @@ namespace SPIDUI {
         static std::set<std::string> selectedRules;
         static char packageName[128] = "EDF_Export";
 
-        auto& rules = RuleManager::GetSingleton()->GetRules();
+        auto manager = RuleManager::GetSingleton();
+        auto& rules = manager->GetRules();
+        const auto& packages = manager->GetPackages();
+        std::erase_if(selectedRules, [&](const std::string& ruleID) {
+            return std::ranges::none_of(
+                rules,
+                [&ruleID](const Rule& rule) {
+                    return rule.id == ruleID;
+                });
+        });
 
-        ImGuiMCP::Text(GetLoc("auto.export_package", "Export Package"));
+        ImGuiMCP::Text(GetLoc(
+            "auto.export_packages",
+            "Export Packages"));
         ImGuiMCP::Separator();
-        ImGuiMCP::TextWrapped(GetLoc("auto.select_rules_to_export_into_one_zip_package", "Select rules to export into one ZIP package."));
+        ImGuiMCP::TextWrapped(GetLoc(
+            "auto.select_packages_and_rules_to_export",
+            "Select one or more packages and, inside each package, the rules to export. Package identities are preserved."));
         ImGuiMCP::TextColored({ 0.7f, 0.7f, 0.7f, 1.0f }, GetLoc("auto.zip_files_are_saved_to_data_viny_mods_edf_export", "ZIP files are saved to Data/Viny Mods/EDF/Export."));
         ImGuiMCP::Separator();
 
         ImGuiMCP::SetNextItemWidth(260.0f);
-        ImGuiMCP::InputText(GetLoc("auto.package_name", "Package Name"), packageName, sizeof(packageName), ImGuiMCP::ImGuiInputTextFlags_CallbackCharFilter, FilterFileNameChars);
+        ImGuiMCP::InputText(
+            GetLoc("auto.archive_name", "Archive Name"),
+            packageName,
+            sizeof(packageName),
+            ImGuiMCP::ImGuiInputTextFlags_CallbackCharFilter,
+            FilterFileNameChars);
         ImGuiMCP::SameLine();
         if (ImGuiMCP::Button(GetLoc("auto.clear_selection", "Clear Selection"))) {
             selectedRules.clear();
         }
         ImGuiMCP::SameLine();
-        if (ImGuiMCP::Button(GetLoc("auto.export_selected", "Export Selected"))) {
-            auto manager = RuleManager::GetSingleton();
+        if (ImGuiMCP::Button(GetLoc(
+                "auto.export_selected",
+                "Export Selected"))) {
             if (manager->SaveRules()) {
                 manager->ExportRulesPackage(packageName, selectedRules);
             }
@@ -2973,36 +3324,130 @@ namespace SPIDUI {
 
         ImGuiMCP::Separator();
 
-        auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg | ImGuiMCP::ImGuiTableFlags_Resizable;
-        if (ImGuiMCP::BeginTable("EDFExportRules", 3, tableFlags)) {
-            ImGuiMCP::TableSetupColumn(GetLoc("auto.export", "Export"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
-            ImGuiMCP::TableSetupColumn(GetLoc("auto.rule", "Rule"), ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
-            ImGuiMCP::TableSetupColumn(GetLoc("auto.version", "Version"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 80.0f);
-            ImGuiMCP::TableHeadersRow();
-
+        std::size_t selectedPackageCount = 0;
+        for (const auto& package : packages) {
+            std::vector<const Rule*> packageRules;
             for (const auto& rule : rules) {
-                ImGuiMCP::TableNextRow();
-
-                ImGuiMCP::TableSetColumnIndex(0);
-                bool selected = selectedRules.contains(rule.id);
-                ImGuiMCP::PushID(("export_" + rule.id).c_str());
-                if (ImGuiMCP::Checkbox("##select", &selected)) {
-                    if (selected) selectedRules.insert(rule.id);
-                    else selectedRules.erase(rule.id);
+                if (rule.packageID == package.id) {
+                    packageRules.push_back(std::addressof(rule));
                 }
-
-                ImGuiMCP::TableSetColumnIndex(1);
-                ImGuiMCP::TextUnformatted(rule.name.empty() ? GetLoc("auto.no_name", "No Name") : rule.name.c_str());
-
-                ImGuiMCP::TableSetColumnIndex(2);
-                ImGuiMCP::Text("%d", rule.version);
-                ImGuiMCP::PopID();
+            }
+            if (packageRules.empty()) {
+                continue;
             }
 
-            ImGuiMCP::EndTable();
+            const auto selectedCount = static_cast<std::size_t>(
+                std::ranges::count_if(
+                    packageRules,
+                    [&](const Rule* rule) {
+                        return selectedRules.contains(rule->id);
+                    }));
+            if (selectedCount > 0) {
+                ++selectedPackageCount;
+            }
+
+            ImGuiMCP::PushID(package.id.c_str());
+            bool selectWholePackage =
+                selectedCount == packageRules.size();
+            const bool partiallySelected =
+                selectedCount > 0 && !selectWholePackage;
+            if (partiallySelected) {
+                ImGuiMCP::PushItemFlag(
+                    ImGuiMCP::ImGuiItemFlags_MixedValue,
+                    true);
+            }
+            const bool packageSelectionChanged = ImGuiMCP::Checkbox(
+                    "##selectPackage",
+                    &selectWholePackage);
+            if (partiallySelected) {
+                ImGuiMCP::PopItemFlag();
+            }
+            if (packageSelectionChanged) {
+                for (const auto* rule : packageRules) {
+                    if (selectWholePackage) {
+                        selectedRules.insert(rule->id);
+                    }
+                    else {
+                        selectedRules.erase(rule->id);
+                    }
+                }
+            }
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(GetLoc(
+                    "auto.select_or_clear_entire_package",
+                    "Select or clear every rule in this package."));
+            }
+            ImGuiMCP::SameLine();
+
+            const auto packageHeader = std::format(
+                "{} [{}/{}]###exportPackageHeader",
+                package.displayName,
+                selectedCount,
+                packageRules.size());
+            const bool open =
+                ImGuiMCP::CollapsingHeader(packageHeader.c_str());
+            if (open) {
+                ImGuiMCP::TextDisabled("%s", package.id.c_str());
+                const auto tableFlags =
+                    ImGuiMCP::ImGuiTableFlags_Borders |
+                    ImGuiMCP::ImGuiTableFlags_RowBg |
+                    ImGuiMCP::ImGuiTableFlags_Resizable;
+                if (ImGuiMCP::BeginTable(
+                        "EDFExportPackageRules",
+                        3,
+                        tableFlags)) {
+                    ImGuiMCP::TableSetupColumn(
+                        GetLoc("auto.export", "Export"),
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                        70.0f);
+                    ImGuiMCP::TableSetupColumn(
+                        GetLoc("auto.rule", "Rule"),
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
+                    ImGuiMCP::TableSetupColumn(
+                        GetLoc("auto.version", "Version"),
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                        80.0f);
+                    ImGuiMCP::TableHeadersRow();
+
+                    for (const auto* rule : packageRules) {
+                        ImGuiMCP::TableNextRow();
+                        ImGuiMCP::TableSetColumnIndex(0);
+                        bool selected =
+                            selectedRules.contains(rule->id);
+                        ImGuiMCP::PushID(rule->id.c_str());
+                        if (ImGuiMCP::Checkbox(
+                                "##selectRule",
+                                &selected)) {
+                            if (selected) {
+                                selectedRules.insert(rule->id);
+                            }
+                            else {
+                                selectedRules.erase(rule->id);
+                            }
+                        }
+
+                        ImGuiMCP::TableSetColumnIndex(1);
+                        ImGuiMCP::TextUnformatted(
+                            rule->name.empty() ?
+                                GetLoc("auto.no_name", "No Name") :
+                                rule->name.c_str());
+
+                        ImGuiMCP::TableSetColumnIndex(2);
+                        ImGuiMCP::Text("%d", rule->version);
+                        ImGuiMCP::PopID();
+                    }
+                    ImGuiMCP::EndTable();
+                }
+            }
+            ImGuiMCP::PopID();
         }
 
-        ImGuiMCP::Text(GetLoc("auto.selected_rule_s", "Selected: %d rule(s)"), static_cast<int>(selectedRules.size()));
+        ImGuiMCP::Text(
+            GetLoc(
+                "auto.selected_rules_and_packages",
+                "Selected: %d rule(s) from %d package(s)"),
+            static_cast<int>(selectedRules.size()),
+            static_cast<int>(selectedPackageCount));
     }
 
     void Register() {

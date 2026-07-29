@@ -11,6 +11,46 @@
 #include "Manager.h"
 
 std::vector<std::string> split(const std::string& s, char delimiter);
+
+enum class RuleCombatState : std::uint8_t {
+    kAny = 0,
+    kInCombat = 1,
+    kOutOfCombat = 2
+};
+
+enum class ActorValueMode : std::uint8_t {
+    kCurrent = 0,
+    kPermanent = 1,
+    kMaximum = 2
+};
+
+enum class NumericComparison : std::uint8_t {
+    kGreaterOrEqual = 0,
+    kLessOrEqual = 1,
+    kEqual = 2,
+    kBetween = 3
+};
+
+enum class EquipmentContext : std::uint8_t {
+    kNormal = 1u << 0,
+    kSleep = 1u << 1,
+    kCombat = 1u << 2
+};
+
+using EquipmentContextMask = std::uint8_t;
+
+constexpr EquipmentContextMask ToMask(EquipmentContext context)
+{
+    return static_cast<EquipmentContextMask>(context);
+}
+
+constexpr EquipmentContextMask kAllEquipmentContexts =
+    ToMask(EquipmentContext::kNormal) |
+    ToMask(EquipmentContext::kSleep) |
+    ToMask(EquipmentContext::kCombat);
+
+bool IsEquipmentRewardType(std::string_view type);
+
 struct Reward {
     std::string typeReward; // "Spell", "Perk", "Weapon", "Keyword"
     std::string formIDStr;  // e.g. "Skyrim.esm|D8D4E" (Plugin|FormID) or "D8D4E" (FormID only - unsafe without plugin)
@@ -18,6 +58,7 @@ struct Reward {
     uint32_t amount = 1;
     float chanceReward = 100.0f;
     int functionOnType = 0;
+    EquipmentContextMask equipContexts = ToMask(EquipmentContext::kNormal);
     bool isPersistent = true;
     //bool lootable = true;
     // Helper to separate Plugin | FormID
@@ -35,7 +76,16 @@ struct BlacklistFilter {
     std::string type;      // "NPC", "Faction", "Race", "Keyword"
     std::string formIDStr; // Plugin|FormID
     std::string editorID;
+    std::string actorValueName;
+    ActorValueMode actorValueMode = ActorValueMode::kCurrent;
+    NumericComparison comparison = NumericComparison::kGreaterOrEqual;
+    float minimumValue = 0.0f;
+    float maximumValue = 0.0f;
 };
+
+RE::ActorValue ResolveActorValue(std::string_view a_name);
+bool IsMaximumActorValueSupported(RE::ActorValue a_actorValue);
+bool IsActorValueFilterValid(const BlacklistFilter& a_filter);
 
 
 struct Rule {
@@ -50,6 +100,7 @@ struct Rule {
     int targetGender = 0;
     int targetHumanoid = 0;  // 0: Both, 1: Only humanoids, 2: Only non-humanoids
     int targetChild = 0;     // 0: Both, 1: Only children, 2: Only non-children
+    RuleCombatState combatState = RuleCombatState::kAny;
     bool targetRequiresAll = false;
     bool isExclusive = false;
     std::vector<BlacklistFilter> targetFilters; // Usando a mesma struct de filtro
@@ -87,7 +138,9 @@ enum class RuleDependency : std::uint32_t {
     kEnvironment = 1u << 5,
     kLevel = 1u << 6,
     kSleep = 1u << 7,
-    kAll = (1u << 8) - 1u
+    kCombat = 1u << 8,
+    kActorValue = 1u << 9,
+    kAll = (1u << 10) - 1u
 };
 
 using RuleDependencyMask = std::uint32_t;
@@ -100,6 +153,7 @@ constexpr RuleDependencyMask ToMask(RuleDependency a_dependency)
 struct RuleEvaluationDelta {
     RuleDependencyMask mask = ToMask(RuleDependency::kAll);
     std::set<RE::FormID> changedForms;
+    std::set<RE::ActorValue> changedActorValues;
 
     static RuleEvaluationDelta Full()
     {
@@ -127,6 +181,9 @@ struct RuleEvaluationDelta {
     {
         mask |= a_other.mask;
         changedForms.insert(a_other.changedForms.begin(), a_other.changedForms.end());
+        changedActorValues.insert(
+            a_other.changedActorValues.begin(),
+            a_other.changedActorValues.end());
     }
 };
 
@@ -187,6 +244,8 @@ public:
     RuleDependencyMask GetRuleDependencyMask(std::string_view a_ruleID) const;
     bool IsRuleInUnstableCycle(std::string_view a_ruleID) const;
     RuleEvaluationDelta DetectBaseNPCChanges(RE::Actor* a_actor);
+    RuleEvaluationDelta DetectActorValueChanges(RE::Actor* a_actor);
+    void ForgetActorRuntimeState(RE::FormID a_actorID);
     void ResetRuntimeCaches();
     std::uint64_t GetDependencyRevision() const { return _dependencyRevision; }
     float GetRandomFloat(float a_min, float a_max) {
@@ -207,11 +266,19 @@ private:
     std::map<std::string, std::string> _ruleOwners;
     std::map<RuleDependencyMask, std::set<std::string>> _rulesByDependency;
     std::map<RuleDependencyMask, std::map<RE::FormID, std::set<std::string>>> _rulesByExactDependency;
+    std::map<RE::ActorValue, std::set<std::string>> _rulesByActorValue;
     std::map<RuleDependencyMask, std::set<std::string>> _rulesWithUnresolvedDependency;
     std::set<std::string> _broadFullEvaluationRules;
     std::map<std::string, RuleDependencyMask> _ruleDependencyMasks;
     std::set<std::string> _unstableCycleRules;
     std::map<RE::FormID, std::pair<std::uint64_t, std::uint64_t>> _baseNPCFingerprints;
+    std::set<std::pair<RE::ActorValue, ActorValueMode>> _watchedActorValues;
+    std::map<
+        RE::FormID,
+        std::pair<
+            std::uint64_t,
+            std::map<std::pair<RE::ActorValue, ActorValueMode>, float>>>
+        _actorValueSnapshots;
     std::uint64_t _dependencyRevision = 0;
     bool _hasActorDependentRules = false;
     const std::string _modDir = "Data/Viny Mods/EDF";

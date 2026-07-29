@@ -38,7 +38,19 @@ public:
         const std::map<std::string, std::vector<Rule>>& histories,
         const std::filesystem::path& stagingRoot,
         RulePackage& outPackage);
+    bool CreateSnapshot(
+        const RulePackage& sourcePackage,
+        const std::vector<Rule>& rules,
+        const std::map<std::string, std::vector<Rule>>& histories,
+        const std::filesystem::path& stagingRoot,
+        RulePackage& outPackage);
 
 private:
+    bool WriteSnapshot(
+        RulePackage package,
+        const std::vector<Rule>& rules,
+        const std::map<std::string, std::vector<Rule>>& histories,
+        RulePackage& outPackage);
+
     std::vector<RulePackage> _packages;
 };
