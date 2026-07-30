@@ -1772,9 +1772,20 @@ namespace SPIDUI {
                         auto form = RE::TESForm::LookupByID(fID);
                         if (form) {
                             std::string dName = "";
-                            if (auto fullName = form->As<RE::TESFullName>()) dName = fullName->GetFullName();
-                            if (dName.empty()) dName = clib_util::editorID::get_editorID(form);
-                            ImGuiMCP::Text(dName.empty() ? r.formIDStr.c_str() : dName.c_str());
+                            if (auto fullName =
+                                    form->As<RE::TESFullName>()) {
+                                dName = Manager::ToUTF8(
+                                    fullName->GetFullName());
+                            }
+                            if (dName.empty()) {
+                                dName = Manager::ToUTF8(
+                                    clib_util::editorID::get_editorID(
+                                        form));
+                            }
+                            ImGuiMCP::TextUnformatted(
+                                dName.empty() ?
+                                    r.formIDStr.c_str() :
+                                    dName.c_str());
                         }
                         else {
                             ImGuiMCP::TextDisabled(r.formIDStr.c_str());
@@ -1947,9 +1958,71 @@ namespace SPIDUI {
             rule.name = nameBuf;
         }
 
-        ImGuiMCP::SetNextItemWidth(150.0f);
-        if (ImGuiMCP::InputInt(GetLoc("auto.required_level", "Required Level"), &rule.level)) {
-            if (rule.level < 1) rule.level = 1;
+        ImGuiMCP::Text("%s", GetLoc(
+            "auto.actor_level",
+            "Actor Level:"));
+        ImGuiMCP::SameLine();
+        const char* levelComparisons[] = {
+            ">=", "<=", "=", GetLoc("auto.between", "Between")
+        };
+        auto levelComparison = std::clamp(
+            static_cast<int>(rule.levelComparison), 0, 3);
+        ImGuiMCP::SetNextItemWidth(85.0f);
+        if (ImGuiMCP::BeginCombo(
+                "##RuleLevelComparison",
+                levelComparisons[levelComparison])) {
+            for (int option = 0; option < 4; ++option) {
+                if (ImGuiMCP::Selectable(
+                        levelComparisons[option],
+                        levelComparison == option)) {
+                    rule.levelComparison =
+                        static_cast<NumericComparison>(option);
+                    if (rule.levelComparison ==
+                            NumericComparison::kBetween &&
+                        rule.maximumLevel < rule.level) {
+                        rule.maximumLevel = rule.level;
+                    }
+                    else if (rule.levelComparison !=
+                        NumericComparison::kBetween) {
+                        rule.maximumLevel = rule.level;
+                    }
+                }
+            }
+            ImGuiMCP::EndCombo();
+        }
+        ImGuiMCP::SameLine();
+        ImGuiMCP::SetNextItemWidth(90.0f);
+        if (ImGuiMCP::InputInt(
+                "##RuleLevelPrimary",
+                &rule.level, 0, 0)) {
+            rule.level = std::max(1, rule.level);
+            if (rule.levelComparison ==
+                    NumericComparison::kBetween &&
+                rule.maximumLevel < rule.level) {
+                rule.maximumLevel = rule.level;
+            }
+            else if (rule.levelComparison !=
+                NumericComparison::kBetween) {
+                rule.maximumLevel = rule.level;
+            }
+        }
+        if (rule.levelComparison ==
+            NumericComparison::kBetween) {
+            ImGuiMCP::SameLine();
+            ImGuiMCP::TextUnformatted("-");
+            ImGuiMCP::SameLine();
+            ImGuiMCP::SetNextItemWidth(90.0f);
+            if (ImGuiMCP::InputInt(
+                    "##RuleLevelMaximum",
+                    &rule.maximumLevel, 0, 0)) {
+                rule.maximumLevel =
+                    std::max(rule.level, rule.maximumLevel);
+            }
+        }
+        if (ImGuiMCP::IsItemHovered()) {
+            ImGuiMCP::SetTooltip(GetLoc(
+                "auto.actor_level_help",
+                "Compares the actor's current level. Between includes both limits."));
         }
         ImGuiMCP::SameLine();
 

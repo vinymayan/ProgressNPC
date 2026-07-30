@@ -7,6 +7,8 @@
     "active": "Active",
     "active_filters": "Active Filters:",
     "active_rules": "Active Rules",
+    "actor_level": "Actor Level:",
+    "actor_level_help": "Compares the actor's current level. Between includes both limits.",
     "actor_value": "Actor Value",
     "add_actor_value_filter": "+ Actor Value",
     "add_new_filter": "Add New Filter",

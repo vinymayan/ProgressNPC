@@ -141,6 +141,9 @@ struct Rule {
     bool isEnabled = true;
     std::string type = "NPC";
     int level = 1;
+    NumericComparison levelComparison =
+        NumericComparison::kGreaterOrEqual;
+    int maximumLevel = 1;
     int version = 0;
     // Novos campos de Alvos (Substituem type e filterFormIDs)
     int targetGender = 0;
@@ -167,6 +170,8 @@ struct Rule {
         return lastSavedHash != CalculateHash();
     }
 };
+
+bool MatchesRuleLevel(int actorLevel, const Rule& rule);
 
 struct RulePackage {
     std::string id;

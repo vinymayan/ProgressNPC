@@ -281,6 +281,8 @@ namespace
                 "name TEXT NOT NULL,"
                 "enabled INTEGER NOT NULL CHECK(enabled IN(0,1)),"
                 "level INTEGER NOT NULL,"
+                "level_comparison INTEGER NOT NULL DEFAULT 0 CHECK(level_comparison IN(0,1,2,3)),"
+                "maximum_level INTEGER NOT NULL DEFAULT 1 CHECK(maximum_level >= 1),"
                 "target_gender INTEGER NOT NULL,"
                 "target_humanoid INTEGER NOT NULL,"
                 "target_child INTEGER NOT NULL,"
@@ -365,6 +367,12 @@ namespace
             return false;
         }
         if (!EnsureColumn(
+                db, "rule_versions", "level_comparison",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(level_comparison IN(0,1,2,3))", context) ||
+            !EnsureColumn(
+                db, "rule_versions", "maximum_level",
+                "INTEGER NOT NULL DEFAULT 1 CHECK(maximum_level >= 1)", context) ||
+            !EnsureColumn(
                 db, "rule_filters", "option_mode",
                 "INTEGER NOT NULL DEFAULT 0", context) ||
             !EnsureColumn(
@@ -465,10 +473,11 @@ namespace
         SqliteStatement versionStatement;
         if (!Prepare(db,
                 "INSERT INTO rule_versions("
-                "rule_id,version,name,enabled,level,target_gender,target_humanoid,target_child,"
+                "rule_id,version,name,enabled,level,level_comparison,maximum_level,"
+                "target_gender,target_humanoid,target_child,"
                 "combat_state,follower_state,target_requires_all,rule_exclusive,blacklisted_gender,blacklisted_humanoid,"
                 "blacklisted_child,blacklist_requires_all,content_hash"
-                ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17);",
+                ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19);",
                 versionStatement,
                 context)) {
             return false;
@@ -478,18 +487,26 @@ namespace
         BindText(versionStatement.handle, 3, rule.name);
         sqlite3_bind_int(versionStatement.handle, 4, rule.isEnabled ? 1 : 0);
         sqlite3_bind_int(versionStatement.handle, 5, rule.level);
-        sqlite3_bind_int(versionStatement.handle, 6, rule.targetGender);
-        sqlite3_bind_int(versionStatement.handle, 7, rule.targetHumanoid);
-        sqlite3_bind_int(versionStatement.handle, 8, rule.targetChild);
-        sqlite3_bind_int(versionStatement.handle, 9, static_cast<int>(rule.combatState));
-        sqlite3_bind_int(versionStatement.handle, 10, static_cast<int>(rule.followerState));
-        sqlite3_bind_int(versionStatement.handle, 11, rule.targetRequiresAll ? 1 : 0);
-        sqlite3_bind_int(versionStatement.handle, 12, rule.isExclusive ? 1 : 0);
-        sqlite3_bind_int(versionStatement.handle, 13, rule.blacklistedGender);
-        sqlite3_bind_int(versionStatement.handle, 14, rule.blacklistedHumanoid);
-        sqlite3_bind_int(versionStatement.handle, 15, rule.blacklistedChild);
-        sqlite3_bind_int(versionStatement.handle, 16, rule.blacklistRequiresAll ? 1 : 0);
-        BindText(versionStatement.handle, 17, rule.CalculateHash());
+        sqlite3_bind_int(
+            versionStatement.handle, 6,
+            static_cast<int>(rule.levelComparison));
+        sqlite3_bind_int(
+            versionStatement.handle, 7,
+            rule.levelComparison == NumericComparison::kBetween ?
+                rule.maximumLevel :
+                rule.level);
+        sqlite3_bind_int(versionStatement.handle, 8, rule.targetGender);
+        sqlite3_bind_int(versionStatement.handle, 9, rule.targetHumanoid);
+        sqlite3_bind_int(versionStatement.handle, 10, rule.targetChild);
+        sqlite3_bind_int(versionStatement.handle, 11, static_cast<int>(rule.combatState));
+        sqlite3_bind_int(versionStatement.handle, 12, static_cast<int>(rule.followerState));
+        sqlite3_bind_int(versionStatement.handle, 13, rule.targetRequiresAll ? 1 : 0);
+        sqlite3_bind_int(versionStatement.handle, 14, rule.isExclusive ? 1 : 0);
+        sqlite3_bind_int(versionStatement.handle, 15, rule.blacklistedGender);
+        sqlite3_bind_int(versionStatement.handle, 16, rule.blacklistedHumanoid);
+        sqlite3_bind_int(versionStatement.handle, 17, rule.blacklistedChild);
+        sqlite3_bind_int(versionStatement.handle, 18, rule.blacklistRequiresAll ? 1 : 0);
+        BindText(versionStatement.handle, 19, rule.CalculateHash());
         if (sqlite3_step(versionStatement.handle) != SQLITE_DONE) {
             logger::error("[RulePackageStore] Could not insert rule version '{}:{}': {}", rule.id, rule.version, sqlite3_errmsg(db));
             return false;
@@ -650,7 +667,8 @@ namespace
     {
         SqliteStatement statement;
         if (!Prepare(db,
-                "SELECT name,enabled,level,target_gender,target_humanoid,target_child,target_requires_all,"
+                "SELECT name,enabled,level,level_comparison,maximum_level,"
+                "target_gender,target_humanoid,target_child,target_requires_all,"
                 "combat_state,follower_state,rule_exclusive,blacklisted_gender,blacklisted_humanoid,blacklisted_child,blacklist_requires_all "
                 "FROM rule_versions WHERE rule_id=?1 AND version=?2;",
                 statement,
@@ -668,20 +686,28 @@ namespace
         rule.version = version;
         rule.name = ColumnText(statement.handle, 0);
         rule.isEnabled = sqlite3_column_int(statement.handle, 1) != 0;
-        rule.level = sqlite3_column_int(statement.handle, 2);
-        rule.targetGender = sqlite3_column_int(statement.handle, 3);
-        rule.targetHumanoid = sqlite3_column_int(statement.handle, 4);
-        rule.targetChild = sqlite3_column_int(statement.handle, 5);
-        rule.targetRequiresAll = sqlite3_column_int(statement.handle, 6) != 0;
+        rule.level = std::max(
+            1, sqlite3_column_int(statement.handle, 2));
+        rule.levelComparison = static_cast<NumericComparison>(
+            std::clamp(sqlite3_column_int(statement.handle, 3), 0, 3));
+        rule.maximumLevel = std::max(
+            1, sqlite3_column_int(statement.handle, 4));
+        if (rule.levelComparison != NumericComparison::kBetween) {
+            rule.maximumLevel = rule.level;
+        }
+        rule.targetGender = sqlite3_column_int(statement.handle, 5);
+        rule.targetHumanoid = sqlite3_column_int(statement.handle, 6);
+        rule.targetChild = sqlite3_column_int(statement.handle, 7);
+        rule.targetRequiresAll = sqlite3_column_int(statement.handle, 8) != 0;
         rule.combatState = static_cast<RuleCombatState>(
-            std::clamp(sqlite3_column_int(statement.handle, 7), 0, 2));
+            std::clamp(sqlite3_column_int(statement.handle, 9), 0, 2));
         rule.followerState = static_cast<RuleFollowerState>(
-            std::clamp(sqlite3_column_int(statement.handle, 8), 0, 2));
-        rule.isExclusive = sqlite3_column_int(statement.handle, 9) != 0;
-        rule.blacklistedGender = sqlite3_column_int(statement.handle, 10);
-        rule.blacklistedHumanoid = sqlite3_column_int(statement.handle, 11);
-        rule.blacklistedChild = sqlite3_column_int(statement.handle, 12);
-        rule.blacklistRequiresAll = sqlite3_column_int(statement.handle, 13) != 0;
+            std::clamp(sqlite3_column_int(statement.handle, 10), 0, 2));
+        rule.isExclusive = sqlite3_column_int(statement.handle, 11) != 0;
+        rule.blacklistedGender = sqlite3_column_int(statement.handle, 12);
+        rule.blacklistedHumanoid = sqlite3_column_int(statement.handle, 13);
+        rule.blacklistedChild = sqlite3_column_int(statement.handle, 14);
+        rule.blacklistRequiresAll = sqlite3_column_int(statement.handle, 15) != 0;
 
         SqliteStatement filters;
         if (!Prepare(db,

@@ -634,6 +634,14 @@ namespace {
         }
         AddInt(obj, alloc, "v", p.version);
         AddInt(obj, alloc, "l", p.level);
+        AddInt(
+            obj, alloc, "lc",
+            static_cast<int>(p.levelComparison));
+        AddInt(
+            obj, alloc, "lm",
+            p.levelComparison == NumericComparison::kBetween ?
+                p.maximumLevel :
+                p.level);
         AddInt(obj, alloc, "g", p.targetGender);
         AddInt(obj, alloc, "h", p.targetHumanoid);
         AddInt(obj, alloc, "c", p.targetChild);
@@ -656,6 +664,14 @@ namespace {
         AddBool(obj, alloc, "enabled", p.isEnabled);
         AddString(obj, alloc, "name", p.name);
         AddInt(obj, alloc, "level", p.level);
+        AddInt(
+            obj, alloc, "level_comparison",
+            static_cast<int>(p.levelComparison));
+        AddInt(
+            obj, alloc, "maximum_level",
+            p.levelComparison == NumericComparison::kBetween ?
+                p.maximumLevel :
+                p.level);
         AddInt(obj, alloc, "t_gender", p.targetGender);
         AddInt(obj, alloc, "t_humanoid", p.targetHumanoid);
         AddInt(obj, alloc, "t_child", p.targetChild);
@@ -694,6 +710,26 @@ std::string Rule::CalculateHash() const {
     return std::to_string(std::hash<std::string>{}(SerializeJson(hashValue)));
 }
 
+bool MatchesRuleLevel(const int actorLevel, const Rule& rule)
+{
+    const auto primary = std::max(1, rule.level);
+    switch (rule.levelComparison) {
+    case NumericComparison::kGreaterOrEqual:
+        return actorLevel >= primary;
+    case NumericComparison::kLessOrEqual:
+        return actorLevel <= primary;
+    case NumericComparison::kEqual:
+        return actorLevel == primary;
+    case NumericComparison::kBetween: {
+        const auto [minimum, maximum] = std::minmax(
+            primary, std::max(1, rule.maximumLevel));
+        return actorLevel >= minimum && actorLevel <= maximum;
+    }
+    default:
+        return actorLevel >= primary;
+    }
+}
+
 Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId, const std::string& fallbackName, bool fallbackEnabled) {
     Rule p;
     p.id = GetString(j, "id", fallbackId);
@@ -702,6 +738,28 @@ Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId
 
     p.version = GetInt(j, "v", GetInt(j, "version", 1));
     p.level = GetInt(j, "l", GetInt(j, "level", 1));
+    p.levelComparison = static_cast<NumericComparison>(std::clamp(
+        GetInt(
+            j,
+            "lc",
+            GetInt(
+                j,
+                "levelComparison",
+                GetInt(j, "level_comparison", 0))),
+        0,
+        3));
+    p.maximumLevel = GetInt(
+        j,
+        "lm",
+        GetInt(
+            j,
+            "maximumLevel",
+            GetInt(j, "maximum_level", p.level)));
+    p.level = std::max(1, p.level);
+    p.maximumLevel = std::max(1, p.maximumLevel);
+    if (p.levelComparison != NumericComparison::kBetween) {
+        p.maximumLevel = p.level;
+    }
     p.targetGender = GetInt(j, "g", GetInt(j, "targetGender", 0));
     p.targetHumanoid = GetInt(j, "h", GetInt(j, "t_humanoid", GetInt(j, "targetHumanoid", 0)));
     p.targetChild = GetInt(j, "c", GetInt(j, "t_child", GetInt(j, "targetChild", 0)));

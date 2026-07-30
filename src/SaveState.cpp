@@ -2442,7 +2442,7 @@ namespace
         auto* baseNPC = actor->GetActorBase();
         if (!rule || !baseNPC || !rule->isEnabled ||
             rule->version != a_request.ruleVersion ||
-            actor->GetLevel() < rule->level ||
+            !MatchesRuleLevel(actor->GetLevel(), *rule) ||
             !IsNPCMatchingTargets(baseNPC, *rule, false, actor) ||
             IsNPCMatchingTargets(baseNPC, *rule, true, actor)) {
             return;
@@ -3239,6 +3239,10 @@ static void ApplyRulesToInstancePass(
 
     auto* ruleManager = RuleManager::GetSingleton();
     auto& session = SaveStateManager::GetSingleton()->GetSessionData();
+    const auto actorLevel =
+        a_forcedLevel != -1 ?
+            a_forcedLevel :
+            a_actor->GetLevel();
     std::string fileNameStr = "Dynamic";
     if (auto file = GetSourceFileByFormID(baseNPC)) {
         fileNameStr = file->GetFilename();
@@ -3277,6 +3281,7 @@ static void ApplyRulesToInstancePass(
                     continue;
                 }
                 if (!rule.isEnabled ||
+                    !MatchesRuleLevel(actorLevel, rule) ||
                     !IsNPCMatchingTargets(baseNPC, rule, false, a_actor) ||
                     IsNPCMatchingTargets(baseNPC, rule, true, a_actor)) {
                     shouldRemove = true;
@@ -3387,8 +3392,9 @@ static void ApplyRulesToInstancePass(
                 continue;
             }
 
-            int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
-            if (level < currentRule->level) continue;
+            if (!MatchesRuleLevel(actorLevel, *currentRule)) {
+                continue;
+            }
 
             phaseRules.push_back(currentRule);
         }
@@ -3398,8 +3404,9 @@ static void ApplyRulesToInstancePass(
             const Rule& currentRule = *currentRulePtr;
             const std::string& ruleID = currentRule.id;
 
-            int level = (a_forcedLevel != -1) ? a_forcedLevel : a_actor->GetLevel();
-            if (level < currentRule.level) continue;
+            if (!MatchesRuleLevel(actorLevel, currentRule)) {
+                continue;
+            }
             AppliedRuleState& state = session.npcRuleVersions[npcKey][ruleID];
             int oldVersion = state.version;
 

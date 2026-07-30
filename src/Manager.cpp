@@ -422,24 +422,46 @@ void Manager::RegisterReadyCallback(std::function<void()> callback) {
     }
 }
 
-// Altere a implementaÃ§Ã£o:
 std::string Manager::ToUTF8(std::string_view a_str) {
     if (a_str.empty()) return "";
 
-    // Converte string_view para data temporÃ¡ria para o WinAPI
-    int wlen = MultiByteToWideChar(CP_ACP, 0, a_str.data(), static_cast<int>(a_str.size()), nullptr, 0);
+    const auto length = static_cast<int>(a_str.size());
+
+    // Localized and dynamic forms may already provide UTF-8. Passing valid
+    // UTF-8 through CP_ACP produces mojibake such as "Р...".
+    if (MultiByteToWideChar(
+            CP_UTF8,
+            MB_ERR_INVALID_CHARS,
+            a_str.data(),
+            length,
+            nullptr,
+            0) > 0) {
+        return std::string(a_str);
+    }
+
+    // Preserve support for actual ANSI plugin strings.
+    const int wlen = MultiByteToWideChar(
+        CP_ACP, 0, a_str.data(), length, nullptr, 0);
     if (wlen <= 0) return std::string(a_str);
 
     std::wstring wstr(wlen, 0);
-    MultiByteToWideChar(CP_ACP, 0, a_str.data(), static_cast<int>(a_str.size()), &wstr[0], wlen);
+    if (MultiByteToWideChar(
+            CP_ACP, 0, a_str.data(), length,
+            wstr.data(), wlen) <= 0) {
+        return std::string(a_str);
+    }
 
-    int u8len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    const int u8len = WideCharToMultiByte(
+        CP_UTF8, 0, wstr.data(), wlen,
+        nullptr, 0, nullptr, nullptr);
     if (u8len <= 0) return std::string(a_str);
 
     std::string u8str(u8len, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &u8str[0], u8len, nullptr, nullptr);
-
-    if (!u8str.empty() && u8str.back() == '\0') u8str.pop_back();
+    if (WideCharToMultiByte(
+            CP_UTF8, 0, wstr.data(), wlen,
+            u8str.data(), u8len, nullptr, nullptr) <= 0) {
+        return std::string(a_str);
+    }
 
     return u8str;
 }
