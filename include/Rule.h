@@ -83,10 +83,50 @@ struct BlacklistFilter {
     std::string formIDStr; // Plugin|FormID
     std::string editorID;
     std::string actorValueName;
+    // Type-specific data for filters that are not represented by a single form.
+    // Keeping these fields generic lets schema v1 remain forwards-compatible.
+    int optionMode = 0;
+    int optionValue = 0;
+    std::string optionText;
     ActorValueMode actorValueMode = ActorValueMode::kCurrent;
     NumericComparison comparison = NumericComparison::kGreaterOrEqual;
     float minimumValue = 0.0f;
     float maximumValue = 0.0f;
+};
+
+enum class NPCTraitFilter : int {
+    kUnique = 0,
+    kEssential = 1,
+    kProtected = 2
+};
+
+enum class QuestFilterMode : int {
+    kRunning = 0,
+    kCompleted = 1,
+    kStopped = 2,
+    kNotStarted = 3,
+    kStage = 4,
+    kSpecificAlias = 5,
+    kAnyAlias = 6
+};
+
+enum class CellTypeFilter : int {
+    kInterior = 0,
+    kExterior = 1
+};
+
+enum class EquippedCategoryFilter : int {
+    kUnarmed = 0,
+    kAnyWeapon = 1,
+    kOneHanded = 2,
+    kTwoHanded = 3,
+    kBow = 4,
+    kCrossbow = 5,
+    kStaff = 6,
+    kShield = 7,
+    kHeavyArmor = 8,
+    kLightArmor = 9,
+    kClothing = 10
 };
 
 RE::ActorValue ResolveActorValue(std::string_view a_name);
@@ -148,7 +188,10 @@ enum class RuleDependency : std::uint32_t {
     kCombat = 1u << 8,
     kActorValue = 1u << 9,
     kFollower = 1u << 10,
-    kAll = (1u << 11) - 1u
+    kQuest = 1u << 11,
+    kRelationship = 1u << 12,
+    kEquipment = 1u << 13,
+    kAll = (1u << 14) - 1u
 };
 
 using RuleDependencyMask = std::uint32_t;
@@ -234,6 +277,10 @@ public:
 
     // Create specific rule
     Rule& CreateRule(std::string_view packageID = "edf.local-rules");
+    std::optional<std::string> DuplicateRule(
+        std::string_view sourceRuleID,
+        std::string_view destinationPackageID,
+        std::string_view copyName = {});
     bool  DeleteRule(const std::string& id);
 
     bool CreateRulesPackageSnapshot(
@@ -285,6 +332,11 @@ private:
     std::map<RuleDependencyMask, std::set<std::string>> _rulesByDependency;
     std::map<RuleDependencyMask, std::map<RE::FormID, std::set<std::string>>> _rulesByExactDependency;
     std::map<RE::ActorValue, std::set<std::string>> _rulesByActorValue;
+    std::map<std::string, std::set<std::string>> _rulesBySourcePlugin;
+    std::map<int, std::set<std::string>> _rulesByNPCTrait;
+    std::map<int, std::set<std::string>> _rulesByCellType;
+    std::map<int, std::set<std::string>> _rulesByEquippedCategory;
+    std::set<std::string> _rulesByRelationship;
     std::map<RuleDependencyMask, std::set<std::string>> _rulesWithUnresolvedDependency;
     std::set<std::string> _broadFullEvaluationRules;
     std::map<std::string, RuleDependencyMask> _ruleDependencyMasks;

@@ -103,6 +103,8 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     PopulateList<RE::BGSVoiceType>("Voice Type");
     PopulateList<RE::TESClass>("Class");
     PopulateList<RE::BGSLocation>("Location");
+    PopulateList<RE::TESQuest>("Quest");
+    PopulateList<RE::TESWorldSpace>("Worldspace");
     PopulateCellList();
     PopulateList<RE::BGSHeadPart>("HeadPart Misc", [](RE::BGSHeadPart* hp) {
         return hp->type == RE::BGSHeadPart::HeadPartType::kMisc;
@@ -129,6 +131,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
         return lvnc && !lvnc->entries.empty();
         });
     PopulateList<RE::TESPackage>("Package");
+    PopulateSpecialFilterLists();
 
     _isPopulated = true;
     ++_listRevision;
@@ -216,6 +219,8 @@ void Manager::RefreshLists(std::string_view a_signatures) {
     if (includes("VTYP")) PopulateList<RE::BGSVoiceType>("Voice Type");
     if (includes("CLAS")) PopulateList<RE::TESClass>("Class");
     if (includes("LCTN") || includes("Location")) PopulateList<RE::BGSLocation>("Location");
+    if (includes("QUST") || includes("Quest")) PopulateList<RE::TESQuest>("Quest");
+    if (includes("WRLD") || includes("Worldspace")) PopulateList<RE::TESWorldSpace>("Worldspace");
     if (includes("CELL") || includes("Cell")) PopulateCellList();
     if (includes("HDPT")) {
         PopulateList<RE::BGSHeadPart>("HeadPart Misc", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kMisc; });
@@ -228,6 +233,10 @@ void Manager::RefreshLists(std::string_view a_signatures) {
     }
     if (includes("LVLN")) {
         PopulateList<RE::TESLevCharacter>("Leveled NPC", [](RE::TESLevCharacter* lvnc) { return lvnc && !lvnc->entries.empty(); });
+    }
+
+    if (includes("NPC_") || includes("KYWD") || includes("All")) {
+        PopulateSpecialFilterLists();
     }
 
     const bool inventoryChanged = includes("WEAP") || includes("ARMO") || includes("ALCH") || includes("INGR") ||
@@ -261,6 +270,76 @@ void Manager::RefreshLists(std::string_view a_signatures) {
     }
 
     ++_listRevision;
+}
+
+void Manager::PopulateSpecialFilterLists()
+{
+    auto& locationKeywords = _dataStore["Location Keyword"];
+    locationKeywords = _dataStore["Keyword"];
+    for (auto& keyword : locationKeywords) {
+        keyword.formType = "Location Keyword";
+    }
+    RebuildEditorIDIndex("Location Keyword");
+
+    auto& sourcePlugins = _dataStore["Source Plugin"];
+    sourcePlugins.clear();
+    std::set<std::string> pluginNames;
+    for (const auto& npc : _dataStore["NPC"]) {
+        if (!npc.pluginName.empty()) {
+            pluginNames.insert(npc.pluginName);
+        }
+    }
+    RE::FormID pseudoID = 1;
+    for (const auto& pluginName : pluginNames) {
+        sourcePlugins.push_back({
+            pseudoID++,
+            pluginName,
+            pluginName,
+            pluginName,
+            "Source Plugin"
+        });
+    }
+
+    const auto setPseudoList = [&](const std::string& type,
+        const std::initializer_list<std::pair<const char*, const char*>> entries) {
+        auto& list = _dataStore[type];
+        list.clear();
+        RE::FormID id = 1;
+        for (const auto& [editorID, name] : entries) {
+            list.push_back({
+                id++,
+                editorID,
+                name,
+                "EDF",
+                type
+            });
+        }
+    };
+    setPseudoList("NPC Trait", {
+        { "Unique", "Unique" },
+        { "Essential", "Essential" },
+        { "Protected", "Protected" }
+    });
+    setPseudoList("Relationship Rank", {
+        { "Player", "Relationship to Player" }
+    });
+    setPseudoList("Cell Type", {
+        { "Interior", "Interior" },
+        { "Exterior", "Exterior" }
+    });
+    setPseudoList("Equipped Category", {
+        { "Unarmed", "Unarmed" },
+        { "AnyWeapon", "Any Weapon" },
+        { "OneHanded", "One-Handed Weapon" },
+        { "TwoHanded", "Two-Handed Weapon" },
+        { "Bow", "Bow" },
+        { "Crossbow", "Crossbow" },
+        { "Staff", "Staff" },
+        { "Shield", "Shield" },
+        { "HeavyArmor", "Heavy Armor" },
+        { "LightArmor", "Light Armor" },
+        { "Clothing", "Clothing" }
+    });
 }
 
 const std::vector<InternalFormInfo>& Manager::GetList(const std::string& typeName) {

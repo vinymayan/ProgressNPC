@@ -53,6 +53,7 @@ private:
     template <typename T>
     void PopulateList(const std::string& a_typeName, std::function<bool(T*)> a_filter = nullptr);
     void PopulateCellList();
+    void PopulateSpecialFilterLists();
     void RebuildEditorIDIndex(std::string_view typeName);
     static std::string NormalizeEditorID(std::string_view editorID);
 

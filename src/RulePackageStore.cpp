@@ -89,6 +89,31 @@ namespace
         return text ? text : "";
     }
 
+    bool EnsureColumn(
+        sqlite3* db,
+        const std::string_view table,
+        const std::string_view column,
+        const std::string_view declaration,
+        const std::string_view context)
+    {
+        SqliteStatement columns;
+        const auto query = std::format("PRAGMA table_info({});", table);
+        if (!Prepare(db, query.c_str(), columns, context)) {
+            return false;
+        }
+        while (sqlite3_step(columns.handle) == SQLITE_ROW) {
+            if (ColumnText(columns.handle, 1) == column) {
+                return true;
+            }
+        }
+        const auto migration = std::format(
+            "ALTER TABLE {} ADD COLUMN {} {};",
+            table,
+            column,
+            declaration);
+        return Exec(db, migration.c_str(), context);
+    }
+
     std::string GenerateUUID()
     {
         static std::random_device randomDevice;
@@ -283,6 +308,9 @@ namespace
                 "form_id TEXT NOT NULL,"
                 "editor_id TEXT NOT NULL,"
                 "actor_value_name TEXT NOT NULL DEFAULT '',"
+                "option_mode INTEGER NOT NULL DEFAULT 0,"
+                "option_value INTEGER NOT NULL DEFAULT 0,"
+                "option_text TEXT NOT NULL DEFAULT '',"
                 "actor_value_mode INTEGER NOT NULL DEFAULT 0 CHECK(actor_value_mode IN(0,1,2)),"
                 "numeric_comparison INTEGER NOT NULL DEFAULT 0 CHECK(numeric_comparison IN(0,1,2,3)),"
                 "minimum_value REAL NOT NULL DEFAULT 0,"
@@ -334,6 +362,17 @@ namespace
                 context) ||
             !Exec(db, "CREATE INDEX IF NOT EXISTS idx_rule_versions_current ON rule_versions(rule_id,version DESC);", context) ||
             !Exec(db, "PRAGMA user_version=1;", context)) {
+            return false;
+        }
+        if (!EnsureColumn(
+                db, "rule_filters", "option_mode",
+                "INTEGER NOT NULL DEFAULT 0", context) ||
+            !EnsureColumn(
+                db, "rule_filters", "option_value",
+                "INTEGER NOT NULL DEFAULT 0", context) ||
+            !EnsureColumn(
+                db, "rule_filters", "option_text",
+                "TEXT NOT NULL DEFAULT ''", context)) {
             return false;
         }
 
@@ -461,9 +500,9 @@ namespace
             if (!Prepare(db,
                     "INSERT INTO rule_filters("
                     "rule_id,version,scope,ordinal,type,form_id,editor_id,"
-                    "actor_value_name,actor_value_mode,numeric_comparison,"
-                    "minimum_value,maximum_value"
-                    ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12);",
+                    "actor_value_name,option_mode,option_value,option_text,"
+                    "actor_value_mode,numeric_comparison,minimum_value,maximum_value"
+                    ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15);",
                     statement,
                     context)) {
                 return false;
@@ -479,17 +518,20 @@ namespace
                 BindText(statement.handle, 6, filters[index].formIDStr);
                 BindText(statement.handle, 7, filters[index].editorID);
                 BindText(statement.handle, 8, filters[index].actorValueName);
+                sqlite3_bind_int(statement.handle, 9, filters[index].optionMode);
+                sqlite3_bind_int(statement.handle, 10, filters[index].optionValue);
+                BindText(statement.handle, 11, filters[index].optionText);
                 sqlite3_bind_int(
-                    statement.handle, 9,
+                    statement.handle, 12,
                     static_cast<int>(filters[index].actorValueMode));
                 sqlite3_bind_int(
-                    statement.handle, 10,
+                    statement.handle, 13,
                     static_cast<int>(filters[index].comparison));
                 sqlite3_bind_double(
-                    statement.handle, 11,
+                    statement.handle, 14,
                     filters[index].minimumValue);
                 sqlite3_bind_double(
-                    statement.handle, 12,
+                    statement.handle, 15,
                     filters[index].maximumValue);
                 if (sqlite3_step(statement.handle) != SQLITE_DONE) {
                     return false;
@@ -644,6 +686,7 @@ namespace
         SqliteStatement filters;
         if (!Prepare(db,
                 "SELECT scope,type,form_id,editor_id,actor_value_name,"
+                "option_mode,option_value,option_text,"
                 "actor_value_mode,numeric_comparison,minimum_value,maximum_value "
                 "FROM rule_filters "
                 "WHERE rule_id=?1 AND version=?2 ORDER BY scope,ordinal;",
@@ -660,14 +703,17 @@ namespace
             filter.formIDStr = ColumnText(filters.handle, 2);
             filter.editorID = ColumnText(filters.handle, 3);
             filter.actorValueName = ColumnText(filters.handle, 4);
+            filter.optionMode = sqlite3_column_int(filters.handle, 5);
+            filter.optionValue = sqlite3_column_int(filters.handle, 6);
+            filter.optionText = ColumnText(filters.handle, 7);
             filter.actorValueMode = static_cast<ActorValueMode>(
-                std::clamp(sqlite3_column_int(filters.handle, 5), 0, 2));
+                std::clamp(sqlite3_column_int(filters.handle, 8), 0, 2));
             filter.comparison = static_cast<NumericComparison>(
-                std::clamp(sqlite3_column_int(filters.handle, 6), 0, 3));
+                std::clamp(sqlite3_column_int(filters.handle, 9), 0, 3));
             filter.minimumValue = static_cast<float>(
-                sqlite3_column_double(filters.handle, 7));
+                sqlite3_column_double(filters.handle, 10));
             filter.maximumValue = static_cast<float>(
-                sqlite3_column_double(filters.handle, 8));
+                sqlite3_column_double(filters.handle, 11));
             if (scope == "target") {
                 rule.targetFilters.push_back(std::move(filter));
             } else {

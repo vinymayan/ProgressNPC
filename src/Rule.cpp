@@ -111,7 +111,23 @@ namespace
             type == "Equipped Item" ||
             type == "Location" ||
             type == "Cell" ||
+            type == "Worldspace" ||
+            type == "Cell Type" ||
+            type == "Location Keyword" ||
+            type == "Quest" ||
+            type == "Relationship Rank" ||
+            type == "Equipped Category" ||
             type == "Actor Value";
+    }
+
+    bool IsNonFormFilterType(const std::string_view type)
+    {
+        return type == "Actor Value" ||
+            type == "Source Plugin" ||
+            type == "NPC Trait" ||
+            type == "Relationship Rank" ||
+            type == "Cell Type" ||
+            type == "Equipped Category";
     }
 
     bool HasActorDependentFilters(const Rule& rule)
@@ -321,8 +337,22 @@ RuleDependencyMask GetFilterDependencyMask(std::string_view a_type)
         a_type == "Gold" || a_type == "Equipped Item") {
         return ToMask(RuleDependency::kInventory);
     }
-    if (a_type == "Location" || a_type == "Cell") {
+    if (a_type == "Location" || a_type == "Cell" ||
+        a_type == "Worldspace" || a_type == "Cell Type" ||
+        a_type == "Location Keyword") {
         return ToMask(RuleDependency::kEnvironment);
+    }
+    if (a_type == "Quest" || a_type == "NPC Trait") {
+        return a_type == "NPC Trait" ?
+            ToMask(RuleDependency::kStatic) |
+                ToMask(RuleDependency::kQuest) :
+            ToMask(RuleDependency::kQuest);
+    }
+    if (a_type == "Relationship Rank") {
+        return ToMask(RuleDependency::kRelationship);
+    }
+    if (a_type == "Equipped Category") {
+        return ToMask(RuleDependency::kEquipment);
     }
     return ToMask(RuleDependency::kStatic);
 }
@@ -342,13 +372,18 @@ RuleDependencyMask GetRewardDependencyMask(std::string_view a_type)
     }
     if (a_type == "Outfit") {
         return ToMask(RuleDependency::kInventory) |
-            ToMask(RuleDependency::kSleep);
+            ToMask(RuleDependency::kSleep) |
+            ToMask(RuleDependency::kEquipment);
     }
     if (a_type == "Weapon" || a_type == "Armor" || a_type == "Ammo" ||
         a_type == "Potion" || a_type == "Ingredient" || a_type == "Scroll" ||
         a_type == "Book" || a_type == "Misc" || a_type == "SoulGem" ||
         a_type == "Key") {
-        return ToMask(RuleDependency::kInventory);
+        return ToMask(RuleDependency::kInventory) |
+            ((a_type == "Weapon" || a_type == "Armor" ||
+                 a_type == "Ammo") ?
+                ToMask(RuleDependency::kEquipment) :
+                ToMask(RuleDependency::kNone));
     }
     return ToMask(RuleDependency::kNone);
 }
@@ -448,6 +483,9 @@ namespace {
         AddString(obj, alloc, "formID", p.formIDStr);
         AddString(obj, alloc, "editorID", p.editorID);
         AddString(obj, alloc, "actorValueName", p.actorValueName);
+        AddInt(obj, alloc, "optionMode", p.optionMode);
+        AddInt(obj, alloc, "optionValue", p.optionValue);
+        AddString(obj, alloc, "optionText", p.optionText);
         AddInt(obj, alloc, "actorValueMode", static_cast<int>(p.actorValueMode));
         AddInt(obj, alloc, "comparison", static_cast<int>(p.comparison));
         AddFloat(obj, alloc, "minimumValue", p.minimumValue);
@@ -461,6 +499,9 @@ namespace {
         p.formIDStr = GetString(value, "formID");
         p.editorID = GetString(value, "editorID");
         p.actorValueName = GetString(value, "actorValueName");
+        p.optionMode = GetInt(value, "optionMode", 0);
+        p.optionValue = GetInt(value, "optionValue", 0);
+        p.optionText = GetString(value, "optionText");
         p.actorValueMode = static_cast<ActorValueMode>(std::clamp(
             GetInt(value, "actorValueMode", 0), 0, 2));
         p.comparison = static_cast<NumericComparison>(std::clamp(
@@ -901,6 +942,161 @@ bool IsActorEquippedItem(RE::Actor* actor, RE::TESBoundObject* item)
     return it != inventory.end() && it->second.second && it->second.second->IsWorn();
 }
 
+bool MatchesNumericComparison(
+    const float value,
+    const BlacklistFilter& filter)
+{
+    switch (filter.comparison) {
+    case NumericComparison::kGreaterOrEqual:
+        return value >= filter.minimumValue;
+    case NumericComparison::kLessOrEqual:
+        return value <= filter.minimumValue;
+    case NumericComparison::kEqual:
+        return value == filter.minimumValue;
+    case NumericComparison::kBetween: {
+        const auto [minimum, maximum] = std::minmax(
+            filter.minimumValue, filter.maximumValue);
+        return value >= minimum && value <= maximum;
+    }
+    default:
+        return false;
+    }
+}
+
+bool MatchesQuestAlias(
+    RE::Actor* actor,
+    RE::TESQuest* quest,
+    const std::optional<std::uint32_t> aliasID)
+{
+    if (!actor || !quest) {
+        return false;
+    }
+    const auto matchesAlias = [&](const std::uint32_t id) {
+        auto handle = quest->GetAliasedRef(id);
+        const auto reference = handle.get();
+        return reference && reference.get() == actor;
+    };
+    if (aliasID) {
+        return matchesAlias(*aliasID);
+    }
+    return std::ranges::any_of(
+        quest->aliases,
+        [&](const RE::BGSBaseAlias* alias) {
+            return alias && matchesAlias(alias->aliasID);
+        });
+}
+
+bool MatchesQuestFilter(
+    RE::Actor* actor,
+    RE::TESQuest* quest,
+    const BlacklistFilter& filter)
+{
+    if (!quest) {
+        return false;
+    }
+    switch (static_cast<QuestFilterMode>(filter.optionMode)) {
+    case QuestFilterMode::kRunning:
+        return quest->IsRunning();
+    case QuestFilterMode::kCompleted:
+        return quest->IsCompleted();
+    case QuestFilterMode::kStopped:
+        return quest->IsStopped();
+    case QuestFilterMode::kNotStarted:
+        return !quest->alreadyRun && !quest->IsRunning() &&
+            !quest->IsCompleted();
+    case QuestFilterMode::kStage:
+        return quest->GetCurrentStageID() ==
+            static_cast<std::uint16_t>(
+                std::clamp(filter.optionValue, 0, 0xFFFF));
+    case QuestFilterMode::kSpecificAlias:
+        return MatchesQuestAlias(
+            actor, quest,
+            static_cast<std::uint32_t>(
+                std::max(0, filter.optionValue)));
+    case QuestFilterMode::kAnyAlias:
+        return MatchesQuestAlias(actor, quest, std::nullopt);
+    default:
+        return false;
+    }
+}
+
+bool MatchesEquippedCategory(
+    RE::Actor* actor,
+    const EquippedCategoryFilter category,
+    const RE::TESObjectREFR::InventoryItemMap* inventorySnapshot = nullptr)
+{
+    if (!actor) {
+        return false;
+    }
+    const auto left = actor->GetEquippedObject(true);
+    const auto right = actor->GetEquippedObject(false);
+    const auto leftWeapon = left ? left->As<RE::TESObjectWEAP>() : nullptr;
+    const auto rightWeapon = right ? right->As<RE::TESObjectWEAP>() : nullptr;
+    const auto matchesWeapon = [category](const RE::TESObjectWEAP* weapon) {
+        if (!weapon) return false;
+        const auto type = weapon->GetWeaponType();
+        switch (category) {
+        case EquippedCategoryFilter::kAnyWeapon:
+            return true;
+        case EquippedCategoryFilter::kOneHanded:
+            return type >= RE::WEAPON_TYPE::kOneHandSword &&
+                type <= RE::WEAPON_TYPE::kOneHandMace;
+        case EquippedCategoryFilter::kTwoHanded:
+            return type == RE::WEAPON_TYPE::kTwoHandSword ||
+                type == RE::WEAPON_TYPE::kTwoHandAxe;
+        case EquippedCategoryFilter::kBow:
+            return weapon->IsBow();
+        case EquippedCategoryFilter::kCrossbow:
+            return weapon->IsCrossbow();
+        case EquippedCategoryFilter::kStaff:
+            return weapon->IsStaff();
+        default:
+            return false;
+        }
+    };
+    if (category == EquippedCategoryFilter::kUnarmed) {
+        return !leftWeapon && !rightWeapon;
+    }
+    if (matchesWeapon(leftWeapon) || matchesWeapon(rightWeapon)) {
+        return true;
+    }
+
+    if (category != EquippedCategoryFilter::kShield &&
+        category != EquippedCategoryFilter::kHeavyArmor &&
+        category != EquippedCategoryFilter::kLightArmor &&
+        category != EquippedCategoryFilter::kClothing) {
+        return false;
+    }
+    auto ownedInventory =
+        RE::TESObjectREFR::InventoryItemMap{};
+    if (!inventorySnapshot) {
+        ownedInventory = actor->GetInventory();
+        inventorySnapshot = std::addressof(ownedInventory);
+    }
+    return std::ranges::any_of(
+        *inventorySnapshot,
+        [category](const auto& entry) {
+            const auto* armor =
+                entry.first ? entry.first->As<RE::TESObjectARMO>() : nullptr;
+            const auto& data = entry.second.second;
+            if (!armor || !data || !data->IsWorn()) {
+                return false;
+            }
+            switch (category) {
+            case EquippedCategoryFilter::kShield:
+                return armor->IsShield();
+            case EquippedCategoryFilter::kHeavyArmor:
+                return armor->IsHeavyArmor();
+            case EquippedCategoryFilter::kLightArmor:
+                return armor->IsLightArmor();
+            case EquippedCategoryFilter::kClothing:
+                return armor->IsClothing();
+            default:
+                return false;
+            }
+        });
+}
+
 bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, RE::Actor* actor) {
     // 1. Seleciona os dados baseados no modo (Target vs Blacklist)
     int genderFilter = isBlacklist ? rule.blacklistedGender : rule.targetGender;
@@ -963,6 +1159,8 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
     }
 
     int matches = 0;
+    std::optional<RE::TESObjectREFR::InventoryItemMap>
+        equippedInventorySnapshot;
     for (const auto& filter : filters) {
         bool match = false;
         if (filter.type == "Actor Value") {
@@ -972,6 +1170,90 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
                 if (!requiresAll) {
                     return true;
                 }
+            }
+            continue;
+        }
+
+        if (filter.type == "Source Plugin") {
+            const auto* source = GetSourceFileByFormID(npc);
+            const auto sourceName = source ?
+                std::string(source->GetFilename()) :
+                std::string("Dynamic");
+            const auto& expectedSource =
+                filter.optionText.empty() ?
+                    filter.editorID :
+                    filter.optionText;
+            match = IEquals(sourceName, expectedSource) ||
+                (!source && IEquals(expectedSource, "Created"));
+        }
+        else if (filter.type == "NPC Trait") {
+            switch (static_cast<NPCTraitFilter>(filter.optionMode)) {
+            case NPCTraitFilter::kUnique:
+                match = npc->IsUnique();
+                break;
+            case NPCTraitFilter::kEssential:
+                match = actor ? actor->IsEssential() :
+                    npc->IsEssential();
+                break;
+            case NPCTraitFilter::kProtected:
+                match = actor ? actor->IsProtected() :
+                    npc->IsProtected();
+                break;
+            default:
+                break;
+            }
+        }
+        else if (filter.type == "Relationship Rank") {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* playerBase = player ? player->GetActorBase() : nullptr;
+            const auto* relationship = playerBase ?
+                RE::BGSRelationship::GetRelationship(npc, playerBase) :
+                nullptr;
+            const auto rank = relationship ?
+                4 - static_cast<int>(relationship->level.get()) :
+                -5;
+            match = MatchesNumericComparison(
+                static_cast<float>(rank), filter);
+        }
+        else if (filter.type == "Cell Type") {
+            const auto* cell = actor ? actor->GetParentCell() : nullptr;
+            match = cell &&
+                (static_cast<CellTypeFilter>(filter.optionMode) ==
+                    CellTypeFilter::kInterior ?
+                    cell->IsInteriorCell() :
+                    !cell->IsInteriorCell());
+        }
+        else if (filter.type == "Equipped Category") {
+            const auto category =
+                static_cast<EquippedCategoryFilter>(
+                    filter.optionMode);
+            const auto needsInventory =
+                category == EquippedCategoryFilter::kShield ||
+                category == EquippedCategoryFilter::kHeavyArmor ||
+                category == EquippedCategoryFilter::kLightArmor ||
+                category == EquippedCategoryFilter::kClothing;
+            if (needsInventory &&
+                !equippedInventorySnapshot) {
+                equippedInventorySnapshot.emplace(
+                    actor ? actor->GetInventory() :
+                        RE::TESObjectREFR::InventoryItemMap{});
+            }
+            match = MatchesEquippedCategory(
+                actor,
+                category,
+                equippedInventorySnapshot ?
+                    std::addressof(*equippedInventorySnapshot) :
+                    nullptr);
+        }
+
+        if (filter.type == "Source Plugin" ||
+            filter.type == "NPC Trait" ||
+            filter.type == "Relationship Rank" ||
+            filter.type == "Cell Type" ||
+            filter.type == "Equipped Category") {
+            if (match) {
+                ++matches;
+                if (!requiresAll) return true;
             }
             continue;
         }
@@ -1132,6 +1414,29 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
                     match = true;
                 }
             }
+        }
+        else if (filter.type == "Worldspace") {
+            if (actor) {
+                const auto* worldspace =
+                    RE::TESForm::LookupByID<RE::TESWorldSpace>(fID);
+                match = worldspace &&
+                    actor->GetWorldspace() == worldspace;
+            }
+        }
+        else if (filter.type == "Location Keyword") {
+            if (actor) {
+                const auto* keyword =
+                    RE::TESForm::LookupByID<RE::BGSKeyword>(fID);
+                for (auto* location = actor->GetCurrentLocation();
+                     keyword && location && !match;
+                     location = location->parentLoc) {
+                    match = location->HasKeyword(keyword);
+                }
+            }
+        }
+        else if (filter.type == "Quest") {
+            auto* quest = RE::TESForm::LookupByID<RE::TESQuest>(fID);
+            match = MatchesQuestFilter(actor, quest, filter);
         }
 
 
@@ -1570,6 +1875,55 @@ Rule& RuleManager::CreateRule(const std::string_view packageID) {
     return _rules.back();
 }
 
+std::optional<std::string> RuleManager::DuplicateRule(
+    const std::string_view sourceRuleID,
+    const std::string_view destinationPackageID,
+    const std::string_view copyName)
+{
+    const auto source = FindRule(std::string(sourceRuleID));
+    if (!source) {
+        return std::nullopt;
+    }
+    const auto& packages = GetPackages();
+    const auto packageExists = std::ranges::any_of(
+        packages,
+        [destinationPackageID](const RulePackage& package) {
+            return package.id == destinationPackageID &&
+                package.enabled;
+        });
+    if (!packageExists ||
+        IsPackagePendingDeletion(destinationPackageID)) {
+        return std::nullopt;
+    }
+
+    // Copy only authoring content. A duplicate deliberately has no database
+    // history and no relationship with the source rule's runtime/save ledger.
+    Rule copy = *source;
+    do {
+        copy.id = GenerateRuleUUID();
+    } while (_ruleOwners.contains(copy.id));
+    copy.packageID = std::string(destinationPackageID);
+    copy.name = copyName.empty() ?
+        std::format("{} (Copy)", source->name) :
+        std::string(copyName);
+    copy.isEnabled = false;
+    copy.version = 0;
+    copy.lastSavedHash.clear();
+
+    const auto copyID = copy.id;
+    _rules.push_back(std::move(copy));
+    _ruleOwners[copyID] = std::string(destinationPackageID);
+    _ruleHistories.erase(copyID);
+    RebuildDependencyIndex();
+    logger::info(
+        "Rule '{}' duplicated as '{}' in package '{}'; the copy remains "
+        "disabled and unsaved until the next Save.",
+        sourceRuleID,
+        copyID,
+        destinationPackageID);
+    return copyID;
+}
+
 bool RuleManager::DeleteRule(const std::string& id) {
     const auto found = std::ranges::find_if(_rules, [&id](const Rule& rule) {
         return rule.id == id;
@@ -1867,6 +2221,11 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
     _rulesByDependency.clear();
     _rulesByExactDependency.clear();
     _rulesByActorValue.clear();
+    _rulesBySourcePlugin.clear();
+    _rulesByNPCTrait.clear();
+    _rulesByCellType.clear();
+    _rulesByEquippedCategory.clear();
+    _rulesByRelationship.clear();
     _rulesWithUnresolvedDependency.clear();
     _ruleDependencyMasks.clear();
     _broadFullEvaluationRules.clear();
@@ -1885,7 +2244,10 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
         RuleDependency::kSleep,
         RuleDependency::kCombat,
         RuleDependency::kActorValue,
-        RuleDependency::kFollower
+        RuleDependency::kFollower,
+        RuleDependency::kQuest,
+        RuleDependency::kRelationship,
+        RuleDependency::kEquipment
     };
 
     _ruleIndices.reserve(_rules.size());
@@ -1911,6 +2273,15 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
     const auto addFilter = [&](const Rule& a_rule, const BlacklistFilter& a_filter) {
         const auto dependency = GetFilterDependencyMask(a_filter.type);
         addDependency(a_rule, dependency);
+        const auto addUnresolved = [&]() {
+            for (const auto dependencyBit : dependencyBits) {
+                const auto bit = ToMask(dependencyBit);
+                if ((dependency & bit) != 0) {
+                    _rulesWithUnresolvedDependency[bit].insert(
+                        a_rule.id);
+                }
+            }
+        };
         if (a_filter.type == "Actor Value") {
             const auto actorValue =
                 ResolveActorValue(a_filter.actorValueName);
@@ -1922,8 +2293,7 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
                     actorValue, a_filter.actorValueMode);
             }
             else {
-                _rulesWithUnresolvedDependency[dependency].insert(
-                    a_rule.id);
+                addUnresolved();
                 logger::warn(
                     "[RuleIndex] Rule '{}' has invalid Actor Value filter '{}'.",
                     a_rule.name,
@@ -1931,12 +2301,47 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
             }
             return dependency;
         }
+        if (a_filter.type == "Source Plugin" ||
+            a_filter.type == "NPC Trait" ||
+            a_filter.type == "Relationship Rank" ||
+            a_filter.type == "Cell Type" ||
+            a_filter.type == "Equipped Category") {
+            if (a_filter.type == "Source Plugin") {
+                auto source = a_filter.optionText.empty() ?
+                    a_filter.editorID :
+                    a_filter.optionText;
+                std::ranges::transform(
+                    source, source.begin(),
+                    [](const unsigned char value) {
+                        return static_cast<char>(
+                            std::tolower(value));
+                    });
+                _rulesBySourcePlugin[source].insert(a_rule.id);
+            }
+            else if (a_filter.type == "NPC Trait") {
+                _rulesByNPCTrait[a_filter.optionMode].insert(
+                    a_rule.id);
+            }
+            else if (a_filter.type == "Cell Type") {
+                _rulesByCellType[a_filter.optionMode].insert(
+                    a_rule.id);
+            }
+            else if (a_filter.type == "Equipped Category") {
+                _rulesByEquippedCategory[
+                    a_filter.optionMode].insert(a_rule.id);
+            }
+            else {
+                _rulesByRelationship.insert(a_rule.id);
+            }
+            addUnresolved();
+            return dependency;
+        }
         const auto formID = ResolveEDFFormID(
             a_filter.type, a_filter.editorID, a_filter.formIDStr);
         if (formID != 0) {
             _rulesByExactDependency[dependency][formID].insert(a_rule.id);
         } else {
-            _rulesWithUnresolvedDependency[dependency].insert(a_rule.id);
+            addUnresolved();
         }
         return dependency;
     };
@@ -1969,7 +2374,7 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
         for (const auto& filter : rule.targetFilters) {
             mask |= addFilter(rule, filter);
             if (filter.type == "Gold" || filter.type == "Leveled NPC" ||
-                (filter.type != "Actor Value" && ResolveEDFFormID(
+                (!IsNonFormFilterType(filter.type) && ResolveEDFFormID(
                     filter.type, filter.editorID, filter.formIDStr) == 0)) {
                 _broadFullEvaluationRules.insert(rule.id);
             }
@@ -2217,7 +2622,10 @@ std::vector<std::string> RuleManager::GetCandidateRuleIDs(
         RuleDependency::kSleep,
         RuleDependency::kCombat,
         RuleDependency::kActorValue,
-        RuleDependency::kFollower
+        RuleDependency::kFollower,
+        RuleDependency::kQuest,
+        RuleDependency::kRelationship,
+        RuleDependency::kEquipment
     };
 
     for (const auto dependency : dependencyBits) {
@@ -2346,6 +2754,58 @@ std::vector<std::string> RuleManager::GetCandidateRuleIDs(
         const std::set<std::string>& a_rules) {
         candidates.insert(a_rules.begin(), a_rules.end());
     };
+
+    auto sourcePlugin = std::string("Dynamic");
+    if (const auto* source = GetSourceFileByFormID(npc)) {
+        sourcePlugin = std::string(source->GetFilename());
+    }
+    std::ranges::transform(
+        sourcePlugin, sourcePlugin.begin(),
+        [](const unsigned char value) {
+            return static_cast<char>(std::tolower(value));
+        });
+    if (const auto found =
+            _rulesBySourcePlugin.find(sourcePlugin);
+        found != _rulesBySourcePlugin.end()) {
+        append(found->second);
+    }
+    const auto appendTrait = [&](const NPCTraitFilter trait,
+        const bool matches) {
+        if (!matches) return;
+        if (const auto found = _rulesByNPCTrait.find(
+                static_cast<int>(trait));
+            found != _rulesByNPCTrait.end()) {
+            append(found->second);
+        }
+    };
+    appendTrait(NPCTraitFilter::kUnique, npc->IsUnique());
+    appendTrait(
+        NPCTraitFilter::kEssential,
+        a_actor->IsEssential());
+    appendTrait(
+        NPCTraitFilter::kProtected,
+        a_actor->IsProtected());
+    if (const auto* cell = a_actor->GetParentCell()) {
+        const auto cellType = cell->IsInteriorCell() ?
+            CellTypeFilter::kInterior :
+            CellTypeFilter::kExterior;
+        if (const auto found = _rulesByCellType.find(
+                static_cast<int>(cellType));
+            found != _rulesByCellType.end()) {
+            append(found->second);
+        }
+    }
+    append(_rulesByRelationship);
+    for (const auto& [category, rules] :
+         _rulesByEquippedCategory) {
+        if (MatchesEquippedCategory(
+                a_actor,
+                static_cast<EquippedCategoryFilter>(
+                    category),
+                std::addressof(inventory))) {
+            append(rules);
+        }
+    }
     const auto appendExactForms = [&](RuleDependency a_dependency,
         const std::set<RE::FormID>& a_forms) {
         const auto dependency = ToMask(a_dependency);
@@ -2438,10 +2898,63 @@ std::vector<std::string> RuleManager::GetCandidateRuleIDs(
             if (auto location =
                     RE::TESForm::LookupByID<RE::BGSLocation>(a_formID)) {
                 auto current = a_actor->GetCurrentLocation();
-                return current &&
-                    (current == location || current->IsParent(location));
+                if (current &&
+                    (current == location || current->IsParent(location))) {
+                    return true;
+                }
+            }
+            if (auto worldspace =
+                    RE::TESForm::LookupByID<RE::TESWorldSpace>(a_formID)) {
+                return a_actor->GetWorldspace() == worldspace;
+            }
+            if (auto keyword =
+                    RE::TESForm::LookupByID<RE::BGSKeyword>(a_formID)) {
+                for (auto* location = a_actor->GetCurrentLocation();
+                     location;
+                     location = location->parentLoc) {
+                    if (location->HasKeyword(keyword)) {
+                        return true;
+                    }
+                }
             }
             return false;
+        });
+
+    appendMatchingExact(
+        RuleDependency::kQuest,
+        [&](RE::FormID a_formID) {
+            auto* quest =
+                RE::TESForm::LookupByID<RE::TESQuest>(a_formID);
+            if (!quest) {
+                return false;
+            }
+            const auto byQuest = _rulesByExactDependency.find(
+                ToMask(RuleDependency::kQuest));
+            if (byQuest == _rulesByExactDependency.end()) {
+                return false;
+            }
+            const auto rules = byQuest->second.find(a_formID);
+            if (rules == byQuest->second.end()) {
+                return false;
+            }
+            return std::ranges::any_of(
+                rules->second,
+                [&](const std::string& ruleID) {
+                    const auto* rule = FindRule(ruleID);
+                    if (!rule) return false;
+                    const auto matches = [&](const BlacklistFilter& filter) {
+                        return filter.type == "Quest" &&
+                            ResolveEDFFormID(
+                                filter.type,
+                                filter.editorID,
+                                filter.formIDStr) == a_formID &&
+                            MatchesQuestFilter(a_actor, quest, filter);
+                    };
+                    return std::ranges::any_of(
+                               rule->targetFilters, matches) ||
+                        std::ranges::any_of(
+                               rule->blacklistFilters, matches);
+                });
         });
 
     return { candidates.begin(), candidates.end() };
@@ -2485,6 +2998,9 @@ RuleEvaluationDelta RuleManager::DetectBaseNPCChanges(RE::Actor* a_actor)
     };
 
     mix(npc->IsFemale() ? 1u : 0u);
+    mix(npc->IsUnique() ? 1u : 0u);
+    mix(a_actor->IsEssential() ? 1u : 0u);
+    mix(a_actor->IsProtected() ? 1u : 0u);
     mixForm(npc->race);
     mixForm(npc->npcClass);
     mixForm(npc->voiceType);

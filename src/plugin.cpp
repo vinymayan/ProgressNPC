@@ -30,6 +30,8 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         //CellFullyLoadedHandler::Register();
         LoadEventHandler::Register();
         PersistentItemTransferHandler::Register();
+        EquipmentEventHandler::Register();
+        QuestEventHandler::Register();
         PlayerLevel::Register();
         CombatEventHandler::Register();
         FollowerDialogueEventHandler::Register();

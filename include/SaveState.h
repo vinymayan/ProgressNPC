@@ -355,6 +355,116 @@ public:
     }
 };
 
+class EquipmentEventHandler :
+    public RE::BSTEventSink<RE::TESEquipEvent> {
+public:
+    static EquipmentEventHandler* GetSingleton() {
+        static EquipmentEventHandler singleton;
+        return &singleton;
+    }
+
+    RE::BSEventNotifyControl ProcessEvent(
+        const RE::TESEquipEvent* event,
+        RE::BSTEventSource<RE::TESEquipEvent>*) override {
+        auto* reference = event && event->actor ?
+            event->actor.get() : nullptr;
+        auto* actor = reference ?
+            reference->As<RE::Actor>() : nullptr;
+        if (!actor) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+        RuleEvaluationDelta delta;
+        delta.mask = ToMask(RuleDependency::kEquipment) |
+            ToMask(RuleDependency::kInventory);
+        if (event->baseObject != 0) {
+            delta.changedForms.insert(event->baseObject);
+        }
+        ScheduleRuleEvaluation(actor, std::move(delta));
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    static void Register() {
+        if (auto* source =
+                RE::ScriptEventSourceHolder::GetSingleton()) {
+            source->AddEventSink(GetSingleton());
+            logger::info("EquipmentEventHandler registered.");
+        }
+    }
+};
+
+class QuestEventHandler :
+    public RE::BSTEventSink<RE::TESQuestStageEvent>,
+    public RE::BSTEventSink<RE::TESQuestStartStopEvent> {
+public:
+    static QuestEventHandler* GetSingleton() {
+        static QuestEventHandler singleton;
+        return &singleton;
+    }
+
+    RE::BSEventNotifyControl ProcessEvent(
+        const RE::TESQuestStageEvent* event,
+        RE::BSTEventSource<RE::TESQuestStageEvent>*) override {
+        if (event) {
+            ScheduleLoadedActors(event->formID);
+        }
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    RE::BSEventNotifyControl ProcessEvent(
+        const RE::TESQuestStartStopEvent* event,
+        RE::BSTEventSource<RE::TESQuestStartStopEvent>*) override {
+        if (event) {
+            ScheduleLoadedActors(event->formID);
+        }
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    static void Register() {
+        if (auto* source =
+                RE::ScriptEventSourceHolder::GetSingleton()) {
+            source->AddEventSink(
+                static_cast<
+                    RE::BSTEventSink<RE::TESQuestStageEvent>*>(
+                    GetSingleton()));
+            source->AddEventSink(
+                static_cast<
+                    RE::BSTEventSink<RE::TESQuestStartStopEvent>*>(
+                    GetSingleton()));
+            logger::info("QuestEventHandler registered.");
+        }
+    }
+
+private:
+    static void ScheduleLoadedActors(const RE::FormID questID) {
+        RuleEvaluationDelta delta;
+        delta.mask = ToMask(RuleDependency::kQuest) |
+            ToMask(RuleDependency::kRelationship) |
+            ToMask(RuleDependency::kStatic);
+        if (questID != 0) {
+            delta.changedForms.insert(questID);
+        }
+
+        if (auto* player =
+                RE::PlayerCharacter::GetSingleton()) {
+            ScheduleRuleEvaluation(player, delta);
+        }
+        if (auto* processLists =
+                RE::ProcessLists::GetSingleton()) {
+            for (auto& handle :
+                 processLists->highActorHandles) {
+                auto actorPtr = handle.get();
+                auto* actor =
+                    actorPtr ? actorPtr.get() : nullptr;
+                if (!actor || actor->IsPlayerRef() ||
+                    actor->IsDead()) {
+                    continue;
+                }
+                ScheduleRuleEvaluation(actor, delta);
+            }
+        }
+    }
+};
+
 class PlayerLevel : public RE::BSTEventSink<RE::LevelIncrease::Event> {
 public:
     static PlayerLevel* GetSingleton() {

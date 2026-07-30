@@ -168,6 +168,10 @@ namespace SPIDUI {
     static std::string activePackageID = "edf.local-rules";
     static std::string packageFilterID;
     static char newPackageName[128] = "";
+    static bool openDuplicateRuleModal = false;
+    static std::string duplicateSourceRuleID;
+    static std::string duplicateDestinationPackageID;
+    static char duplicateRuleName[256] = "";
 
     static std::string activeRuleID = "";      // ID da regra sendo editada no momento
     static int activeGroupIdx = -1;            // Índice do grupo de recompensa ativo
@@ -572,6 +576,216 @@ namespace SPIDUI {
         filter.formIDStr = baseID + "|" + std::to_string(value);
     }
 
+    BlacklistFilter MakeFilterFromSelection(
+        const InternalFormInfo& item,
+        const std::string& internalID)
+    {
+        BlacklistFilter filter;
+        filter.type = item.formType;
+        filter.formIDStr = internalID;
+        filter.editorID = item.editorID;
+        filter.optionText = item.name;
+
+        if (item.formType == "Source Plugin") {
+            filter.optionText = item.editorID;
+        }
+        else if (item.formType == "NPC Trait") {
+            filter.optionMode =
+                item.editorID == "Essential" ? 1 :
+                item.editorID == "Protected" ? 2 : 0;
+        }
+        else if (item.formType == "Cell Type") {
+            filter.optionMode =
+                item.editorID == "Exterior" ? 1 : 0;
+        }
+        else if (item.formType == "Equipped Category") {
+            static const std::array names{
+                "Unarmed", "AnyWeapon", "OneHanded", "TwoHanded",
+                "Bow", "Crossbow", "Staff", "Shield", "HeavyArmor",
+                "LightArmor", "Clothing"
+            };
+            const auto found = std::ranges::find(
+                names, item.editorID);
+            filter.optionMode = found == names.end() ? 0 :
+                static_cast<int>(
+                    std::distance(names.begin(), found));
+        }
+        else if (item.formType == "Relationship Rank") {
+            filter.comparison = NumericComparison::kGreaterOrEqual;
+            filter.minimumValue = 1.0f;
+            filter.maximumValue = 4.0f;
+            filter.optionText = "Player";
+        }
+        else if (item.formType == "Quest") {
+            filter.optionMode =
+                static_cast<int>(QuestFilterMode::kRunning);
+        }
+
+        if (FilterUsesNumericValue(item.formType)) {
+            filter.formIDStr += "|" +
+                std::to_string(
+                    DefaultFilterNumericValue(item.formType));
+        }
+        return filter;
+    }
+
+    const char* GetSpecialFilterName(
+        const BlacklistFilter& filter)
+    {
+        if (!filter.optionText.empty()) {
+            return filter.optionText.c_str();
+        }
+        return filter.editorID.empty() ?
+            filter.formIDStr.c_str() :
+            filter.editorID.c_str();
+    }
+
+    void RenderFilterCondition(BlacklistFilter& filter)
+    {
+        if (filter.type == "Quest") {
+            const char* modes[] = {
+                GetLoc("auto.quest_running", "Running"),
+                GetLoc("auto.quest_completed", "Completed"),
+                GetLoc("auto.quest_stopped", "Stopped"),
+                GetLoc("auto.quest_not_started", "Not Started"),
+                GetLoc("auto.quest_stage", "Stage"),
+                GetLoc("auto.quest_specific_alias", "Specific Alias"),
+                GetLoc("auto.quest_any_alias", "Any Alias")
+            };
+            filter.optionMode = std::clamp(filter.optionMode, 0, 6);
+            ImGuiMCP::SetNextItemWidth(155.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##QuestMode", modes[filter.optionMode])) {
+                for (int mode = 0; mode < 7; ++mode) {
+                    if (ImGuiMCP::Selectable(
+                            modes[mode],
+                            filter.optionMode == mode)) {
+                        filter.optionMode = mode;
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+            if (filter.optionMode ==
+                static_cast<int>(QuestFilterMode::kStage)) {
+                ImGuiMCP::SameLine();
+                ImGuiMCP::SetNextItemWidth(90.0f);
+                ImGuiMCP::InputInt(
+                    "##QuestStage",
+                    &filter.optionValue, 0, 0);
+                filter.optionValue =
+                    std::clamp(filter.optionValue, 0, 0xFFFF);
+            }
+            else if (filter.optionMode ==
+                static_cast<int>(
+                    QuestFilterMode::kSpecificAlias)) {
+                auto* quest = ResolveEDFForm(
+                    filter.type,
+                    filter.editorID,
+                    filter.formIDStr);
+                auto* typedQuest =
+                    quest ? quest->As<RE::TESQuest>() : nullptr;
+                const char* preview =
+                    GetLoc("auto.select_alias", "Select Alias");
+                if (typedQuest) {
+                    for (const auto* alias : typedQuest->aliases) {
+                        if (alias &&
+                            static_cast<int>(alias->aliasID) ==
+                                filter.optionValue) {
+                            preview = alias->aliasName.c_str();
+                            break;
+                        }
+                    }
+                }
+                ImGuiMCP::SameLine();
+                ImGuiMCP::SetNextItemWidth(180.0f);
+                if (ImGuiMCP::BeginCombo(
+                        "##QuestAlias", preview)) {
+                    if (typedQuest) {
+                        for (const auto* alias :
+                             typedQuest->aliases) {
+                            if (!alias) continue;
+                            const auto selected =
+                                static_cast<int>(alias->aliasID) ==
+                                filter.optionValue;
+                            const auto label = std::format(
+                                "{} ({})",
+                                alias->aliasName.c_str(),
+                                alias->aliasID);
+                            if (ImGuiMCP::Selectable(
+                                    label.c_str(), selected)) {
+                                filter.optionValue =
+                                    static_cast<int>(
+                                        alias->aliasID);
+                            }
+                        }
+                    }
+                    ImGuiMCP::EndCombo();
+                }
+            }
+            return;
+        }
+
+        if (filter.type == "Relationship Rank") {
+            const char* comparisons[] = {
+                ">=", "<=", "=", GetLoc("auto.between", "Between")
+            };
+            auto comparison = std::clamp(
+                static_cast<int>(filter.comparison), 0, 3);
+            ImGuiMCP::SetNextItemWidth(60.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##RelationshipComparison",
+                    comparisons[comparison])) {
+                for (int option = 0; option < 4; ++option) {
+                    if (ImGuiMCP::Selectable(
+                            comparisons[option],
+                            comparison == option)) {
+                        filter.comparison =
+                            static_cast<NumericComparison>(
+                                option);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+            const char* ranks[] = {
+                GetLoc("auto.no_relationship", "No Relationship"),
+                GetLoc("auto.archnemesis", "Archnemesis"),
+                GetLoc("auto.enemy", "Enemy"),
+                GetLoc("auto.foe", "Foe"),
+                GetLoc("auto.rival", "Rival"),
+                GetLoc("auto.acquaintance", "Acquaintance"),
+                GetLoc("auto.friend", "Friend"),
+                GetLoc("auto.confidant", "Confidant"),
+                GetLoc("auto.ally", "Ally"),
+                GetLoc("auto.lover", "Lover")
+            };
+            const auto drawRank = [&](const char* id, float& value) {
+                auto rank = std::clamp(
+                    static_cast<int>(std::round(value)), -5, 4);
+                ImGuiMCP::SameLine();
+                ImGuiMCP::SetNextItemWidth(125.0f);
+                if (ImGuiMCP::BeginCombo(id, ranks[rank + 5])) {
+                    for (int option = -5; option <= 4; ++option) {
+                        if (ImGuiMCP::Selectable(
+                                ranks[option + 5],
+                                rank == option)) {
+                            value = static_cast<float>(option);
+                        }
+                    }
+                    ImGuiMCP::EndCombo();
+                }
+            };
+            drawRank("##RelationshipMinimum", filter.minimumValue);
+            if (filter.comparison ==
+                NumericComparison::kBetween) {
+                drawRank(
+                    "##RelationshipMaximum",
+                    filter.maximumValue);
+            }
+            return;
+        }
+        ImGuiMCP::TextDisabled("-");
+    }
+
     void RenderActorValueFilters(
         std::vector<BlacklistFilter>& a_filters,
         const bool a_isBlacklist)
@@ -776,7 +990,9 @@ namespace SPIDUI {
         "Spell", "Perk", "Shout", "Combat Style", "Voice Type", "Class", "Location", "Cell", "Skin", "Inventory Item",
         "Inventory Count", "Gold", "Equipped Item",
         "Hair", "Facial Hair", "HeadPart Misc", "HeadPart Face",
-        "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows", "Leveled NPC"
+        "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows", "Leveled NPC",
+        "Source Plugin", "NPC Trait", "Quest", "Relationship Rank",
+        "Worldspace", "Cell Type", "Location Keyword", "Equipped Category"
         };
 
         ImGuiMCP::Text(GetLoc("auto.active_filters", "Active Filters:"));
@@ -958,9 +1174,10 @@ namespace SPIDUI {
         }
         RenderActorValueFilters(filters, isBlacklist);
 
-        if (ImGuiMCP::BeginTable(tableName, 4, ImGuiMCP::ImGuiTableFlags_Borders)) {
+        if (ImGuiMCP::BeginTable(tableName, 5, ImGuiMCP::ImGuiTableFlags_Borders)) {
             ImGuiMCP::TableSetupColumn(GetLoc("auto.type", "Type"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 120.0f);
             ImGuiMCP::TableSetupColumn(GetLoc("auto.name", "Name"), ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
+            ImGuiMCP::TableSetupColumn(GetLoc("auto.condition", "Condition"), ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             ImGuiMCP::TableSetupColumn(GetLoc("auto.identifier", "Identifier"), ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             ImGuiMCP::TableSetupColumn(GetLoc("auto.action", "Action"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
             ImGuiMCP::TableHeadersRow();
@@ -974,7 +1191,14 @@ namespace SPIDUI {
                 ImGuiMCP::TableSetColumnIndex(1);
                 std::string resolvedName = "Not Found";
 
-                if (auto form = ResolveEDFForm(
+                if (f.type == "Source Plugin" ||
+                    f.type == "NPC Trait" ||
+                    f.type == "Relationship Rank" ||
+                    f.type == "Cell Type" ||
+                    f.type == "Equipped Category") {
+                    resolvedName = GetSpecialFilterName(f);
+                }
+                else if (auto form = ResolveEDFForm(
                         f.type, f.editorID, f.formIDStr)) {
                     if (auto fullName = form->As<RE::TESFullName>()) {
                         resolvedName =
@@ -992,8 +1216,14 @@ namespace SPIDUI {
                     }
                 }
                 ImGuiMCP::TextUnformatted(resolvedName.c_str());
-                ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text(f.formIDStr.c_str());
+                ImGuiMCP::TableSetColumnIndex(2);
+                RenderFilterCondition(f);
                 ImGuiMCP::TableSetColumnIndex(3);
+                ImGuiMCP::TextUnformatted(
+                    f.type == "Source Plugin" ?
+                        f.optionText.c_str() :
+                        f.formIDStr.c_str());
+                ImGuiMCP::TableSetColumnIndex(4);
 
                 // Usamos o prefixo para evitar conflitos de ID no ImGui
                 if (ImGuiMCP::Button((idPrefix + std::to_string(i)).c_str())) {
@@ -1061,7 +1291,9 @@ namespace SPIDUI {
                 "Class", "Location", "Cell", "Skin", "Inventory Item", "Inventory Count",
                 "Gold", "Equipped Item", "Hair", "Facial Hair", "HeadPart Misc",
                 "HeadPart Face", "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows",
-                "Leveled NPC"
+                "Leveled NPC", "Source Plugin", "NPC Trait", "Quest",
+                "Relationship Rank", "Worldspace", "Cell Type",
+                "Location Keyword", "Equipped Category"
             };
         std::vector<SearchableComboOption> typeOptions;
         typeOptions.reserve(typeNames.size());
@@ -1097,7 +1329,9 @@ namespace SPIDUI {
                         "Spell", "Perk", "Shout", "Combat Style", "Voice Type", "Class", "Location", "Cell", "Skin", "Inventory Item",
                         "Inventory Count", "Gold", "Equipped Item",
                         "Hair", "Facial Hair", "HeadPart Misc", "HeadPart Face",
-                        "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows", "Leveled NPC"
+                        "HeadPart Eyes", "HeadPart Scar", "HeadPart Eyebrows", "Leveled NPC",
+                        "Source Plugin", "NPC Trait", "Quest", "Relationship Rank",
+                        "Worldspace", "Cell Type", "Location Keyword", "Equipped Category"
                         }) {
                         auto& l = Manager::GetSingleton()->GetList(type);
                         filterAllCache.insert(filterAllCache.end(), l.begin(), l.end());
@@ -1292,13 +1526,13 @@ namespace SPIDUI {
                                 (EditorIDMatches(f.editorID, item.editorID) || GetFilterBaseFormID(f.formIDStr) == internalID);
                             });
                         bool selected = (it != blacklistTarget->end());
-                        if (ImGuiMCP::Checkbox(("##" + internalID).c_str(), &selected)) {
+                        if (ImGuiMCP::Checkbox(
+                                ("##" + item.formType + internalID).c_str(),
+                                &selected)) {
                             if (selected) {
-                                auto formIDStr = internalID;
-                                if (FilterUsesNumericValue(item.formType)) {
-                                    formIDStr += "|" + std::to_string(DefaultFilterNumericValue(item.formType));
-                                }
-                                blacklistTarget->push_back({ item.formType, formIDStr, item.editorID });
+                                blacklistTarget->push_back(
+                                    MakeFilterFromSelection(
+                                        item, internalID));
                             }
                             else if (it != blacklistTarget->end()) {
                                 blacklistTarget->erase(it);
@@ -1974,6 +2208,23 @@ namespace SPIDUI {
                     }
                     RenderRuleEditor(rule);
                     if (ImGuiMCP::Button(
+                            (std::string(GetLoc(
+                                "auto.duplicate_rule",
+                                "Duplicate Rule")) +
+                                "###btnDuplicate" + rule.id).c_str())) {
+                        duplicateSourceRuleID = rule.id;
+                        duplicateDestinationPackageID =
+                            rule.packageID;
+                        const auto suggestedName =
+                            std::format("{} (Copy)", rule.name);
+                        strncpy_s(
+                            duplicateRuleName,
+                            suggestedName.c_str(),
+                            _TRUNCATE);
+                        openDuplicateRuleModal = true;
+                    }
+                    ImGuiMCP::SameLine();
+                    if (ImGuiMCP::Button(
                             (std::string(GetLoc("auto.delete_rule", "Delete Rule")) +
                                 "###btnDel" + rule.id).c_str())) {
                         toDelete = rule.id;
@@ -1991,6 +2242,83 @@ namespace SPIDUI {
             // Recalcula após deletar
             RuleManager::GetSingleton()->InitializeAffectedNPCsDatabase();
             needsNPCListUpdate = true;
+        }
+
+        if (openDuplicateRuleModal) {
+            ImGuiMCP::OpenPopup(GetLoc(
+                "auto.duplicate_rule",
+                "Duplicate Rule"));
+        }
+        if (ImGuiMCP::BeginPopupModal(
+                GetLoc("auto.duplicate_rule", "Duplicate Rule"),
+                &openDuplicateRuleModal,
+                ImGuiMCP::ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGuiMCP::InputText(
+                GetLoc("auto.rule_name", "Rule Name"),
+                duplicateRuleName,
+                sizeof(duplicateRuleName));
+
+            const auto* destination =
+                FindPackage(duplicateDestinationPackageID);
+            ImGuiMCP::SetNextItemWidth(280.0f);
+            if (ImGuiMCP::BeginCombo(
+                    GetLoc(
+                        "auto.destination_package",
+                        "Destination Package"),
+                    destination ?
+                        destination->displayName.c_str() :
+                        GetLoc("auto.select", "Select..."))) {
+                for (const auto& package :
+                     RuleManager::GetSingleton()->GetPackages()) {
+                    if (!package.enabled ||
+                        RuleManager::GetSingleton()->
+                            IsPackagePendingDeletion(package.id)) {
+                        continue;
+                    }
+                    const auto selected =
+                        duplicateDestinationPackageID ==
+                        package.id;
+                    if (ImGuiMCP::Selectable(
+                            package.displayName.c_str(),
+                            selected)) {
+                        duplicateDestinationPackageID =
+                            package.id;
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+
+            const auto canDuplicate =
+                duplicateRuleName[0] != '\0' &&
+                FindPackage(duplicateDestinationPackageID);
+            if (ImGuiMCP::Button(GetLoc(
+                    "auto.create_copy",
+                    "Create Copy")) &&
+                canDuplicate) {
+                if (const auto newRuleID =
+                        RuleManager::GetSingleton()->DuplicateRule(
+                            duplicateSourceRuleID,
+                            duplicateDestinationPackageID,
+                            duplicateRuleName)) {
+                    activeRuleID = *newRuleID;
+                    activePackageID =
+                        duplicateDestinationPackageID;
+                    needsNPCListUpdate = true;
+                    openDuplicateRuleModal = false;
+                    ImGuiMCP::CloseCurrentPopup();
+                }
+            }
+            ImGuiMCP::SameLine();
+            if (ImGuiMCP::Button(GetLoc(
+                    "auto.cancel",
+                    "Cancel"))) {
+                openDuplicateRuleModal = false;
+                ImGuiMCP::CloseCurrentPopup();
+            }
+            ImGuiMCP::TextDisabled("%s", GetLoc(
+                "auto.duplicate_rule_hint",
+                "The copy starts disabled at version 0 and is written only when Save is pressed."));
+            ImGuiMCP::EndPopup();
         }
 
 

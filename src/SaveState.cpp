@@ -648,10 +648,9 @@ void QueueFollowerStateRefreshAfterDialogue()
                     auto delta =
                         ruleManager->DetectFollowerStateChanges(
                             actor);
-                    if (delta.mask ==
-                        ToMask(RuleDependency::kNone)) {
-                        continue;
-                    }
+                    delta.mask |=
+                        ToMask(RuleDependency::kRelationship) |
+                        ToMask(RuleDependency::kQuest);
                     ScheduleRuleEvaluation(
                         actor, std::move(delta));
                     ++changedActors;
@@ -3098,11 +3097,15 @@ void StartRuleActivation(
 enum class RuleEvaluationPhase
 {
     kStatic = 0,
-    kTag = 1,
-    kFactionRank = 2,
-    kFollower = 3,
-    kAbility = 4,
-    kInventory = 5
+    kQuest = 1,
+    kRelationship = 2,
+    kEnvironment = 3,
+    kTag = 4,
+    kFactionRank = 5,
+    kFollower = 6,
+    kAbility = 7,
+    kInventory = 8,
+    kEquipment = 9
 };
 
 RuleEvaluationPhase MaxPhase(RuleEvaluationPhase a_lhs, RuleEvaluationPhase a_rhs)
@@ -3115,6 +3118,17 @@ RuleEvaluationPhase GetFilterEvaluationPhase(const std::string& a_type)
     if (a_type == "Keyword" || a_type == "Faction") {
         return RuleEvaluationPhase::kTag;
     }
+    if (a_type == "Quest" || a_type == "NPC Trait") {
+        return RuleEvaluationPhase::kQuest;
+    }
+    if (a_type == "Relationship Rank") {
+        return RuleEvaluationPhase::kRelationship;
+    }
+    if (a_type == "Location" || a_type == "Cell" ||
+        a_type == "Worldspace" || a_type == "Cell Type" ||
+        a_type == "Location Keyword") {
+        return RuleEvaluationPhase::kEnvironment;
+    }
     if (a_type == "Faction Rank") {
         return RuleEvaluationPhase::kFactionRank;
     }
@@ -3125,6 +3139,9 @@ RuleEvaluationPhase GetFilterEvaluationPhase(const std::string& a_type)
     if (a_type == "Inventory Item" || a_type == "Inventory Count" ||
         a_type == "Gold" || a_type == "Equipped Item") {
         return RuleEvaluationPhase::kInventory;
+    }
+    if (a_type == "Equipped Category") {
+        return RuleEvaluationPhase::kEquipment;
     }
     return RuleEvaluationPhase::kStatic;
 }
@@ -3149,6 +3166,12 @@ const char* RuleEvaluationPhaseName(RuleEvaluationPhase a_phase)
     switch (a_phase) {
     case RuleEvaluationPhase::kStatic:
         return "Static";
+    case RuleEvaluationPhase::kQuest:
+        return "Quest/NPC Trait";
+    case RuleEvaluationPhase::kRelationship:
+        return "Relationship";
+    case RuleEvaluationPhase::kEnvironment:
+        return "Environment";
     case RuleEvaluationPhase::kTag:
         return "Keyword/Faction";
     case RuleEvaluationPhase::kFactionRank:
@@ -3159,6 +3182,8 @@ const char* RuleEvaluationPhaseName(RuleEvaluationPhase a_phase)
         return "Spell/Perk/Shout/Actor Value";
     case RuleEvaluationPhase::kInventory:
         return "Inventory";
+    case RuleEvaluationPhase::kEquipment:
+        return "Equipment";
     default:
         return "Unknown";
     }
@@ -3322,11 +3347,15 @@ static void ApplyRulesToInstancePass(
     std::vector<PendingEquip> equipQueue;
     constexpr std::array rulePhases{
         RuleEvaluationPhase::kStatic,
+        RuleEvaluationPhase::kQuest,
+        RuleEvaluationPhase::kRelationship,
+        RuleEvaluationPhase::kEnvironment,
         RuleEvaluationPhase::kTag,
         RuleEvaluationPhase::kFactionRank,
         RuleEvaluationPhase::kFollower,
         RuleEvaluationPhase::kAbility,
-        RuleEvaluationPhase::kInventory
+        RuleEvaluationPhase::kInventory,
+        RuleEvaluationPhase::kEquipment
     };
 
     std::array<std::vector<const Rule*>, rulePhases.size()> rulesByPhase;
