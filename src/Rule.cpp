@@ -3101,7 +3101,7 @@ RuleEvaluationDelta RuleManager::DetectBaseNPCChanges(RE::Actor* a_actor)
     found->second = current;
     delta.mask = ToMask(RuleDependency::kStatic) |
         ToMask(RuleDependency::kTag);
-    logger::info(
+    logger::trace(
         "[RuleSnapshot] Base NPC '{}' ({:08X}) changed; static/tag candidates invalidated.",
         npc->GetName(), baseID);
     return delta;
@@ -3192,7 +3192,7 @@ RuleEvaluationDelta RuleManager::DetectFollowerStateChanges(
     _followerStateSnapshots[actorID] = current;
     delta.mask = ToMask(RuleDependency::kFollower);
     if (hadPreviousState) {
-        logger::info(
+        logger::debug(
             "[FollowerState] Actor '{}' ({:08X}) follower state {} -> {}.",
             a_actor->GetName(),
             actorID,
@@ -3268,7 +3268,7 @@ RuleManager::GetAffectedNPCsDatabase()
         }
     }
     _affectedNPCsDatabaseValid = true;
-    logger::info(
+    logger::debug(
         "[RuleIndex] UI affected-NPC preview built lazily with {} entries.",
         _affectedNPCsDatabase.size());
     return _affectedNPCsDatabase;
@@ -3282,6 +3282,6 @@ void RuleManager::InitializeAffectedNPCsDatabase() {
     _hasActorDependentRules = std::ranges::any_of(rules, [](const Rule& rule) {
         return rule.isEnabled && HasActorDependentFilters(rule);
     });
-    logger::info(
+    logger::debug(
         "[RuleIndex] Runtime dependency index ready; affected-NPC preview deferred until UI access.");
 }

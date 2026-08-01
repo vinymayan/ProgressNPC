@@ -125,6 +125,9 @@ void ManageSleepOutfitState(RE::Actor* a_actor, bool a_isEntering);
 void ScheduleSleepOutfitUpdate(RE::Actor* a_actor, bool a_isEntering);
 void EquipBestInventoryItems(RE::Actor* a_actor);
 void ReconcileEquipmentContext(RE::Actor* a_actor);
+bool CollectActiveEquipmentReconciliationEvent(
+    RE::Actor* a_actor,
+    RE::FormID a_formID);
 
 class NPCSettings {
 public:
@@ -234,6 +237,9 @@ void ApplyRulesToInstance(
 void ScheduleRuleEvaluation(
     RE::Actor* a_actor,
     RuleEvaluationDelta a_delta = RuleEvaluationDelta::Full());
+void BeginInventoryInteraction(RE::Actor* a_targetActor);
+void EndInventoryInteraction();
+bool IsInventoryInteractionActive(RE::Actor* a_actor);
 void QueueFollowerStateRefreshAfterDialogue();
 void SuspendRuleEvaluationForLoad();
 void ResumeRuleEvaluationAfterLoad();
@@ -271,7 +277,7 @@ private:
                     return _ShouldBackgroundClone(a_this);
                 }
 
-                logger::info("[ShouldBackgroundClone] Rules encontradas para {}, aplicando.", actor->GetName());
+                logger::trace("[ShouldBackgroundClone] Rules encontradas para {}, aplicando.", actor->GetName());
                 ScheduleRuleEvaluation(actor);
             }
         }
@@ -334,11 +340,20 @@ public:
         if (a_event) {
             auto delta = RuleEvaluationDelta::For(
                 RuleDependency::kInventory, a_event->baseObj);
+            const bool containerMenuOpen =
+                RE::UI::GetSingleton() &&
+                RE::UI::GetSingleton()->GetMenu<RE::ContainerMenu>();
             if (auto oldOwner = RE::TESForm::LookupByID<RE::Actor>(a_event->oldContainer)) {
+                if (containerMenuOpen) {
+                    BeginInventoryInteraction(oldOwner);
+                }
                 ScheduleRuleEvaluation(oldOwner, delta);
             }
             if (a_event->newContainer != a_event->oldContainer) {
                 if (auto newOwner = RE::TESForm::LookupByID<RE::Actor>(a_event->newContainer)) {
+                    if (containerMenuOpen) {
+                        BeginInventoryInteraction(newOwner);
+                    }
                     ScheduleRuleEvaluation(newOwner, delta);
                 }
             }
@@ -378,6 +393,10 @@ public:
             ToMask(RuleDependency::kInventory);
         if (event->baseObject != 0) {
             delta.changedForms.insert(event->baseObject);
+        }
+        if (CollectActiveEquipmentReconciliationEvent(
+                actor, event->baseObject)) {
+            return RE::BSEventNotifyControl::kContinue;
         }
         ScheduleRuleEvaluation(actor, std::move(delta));
         return RE::BSEventNotifyControl::kContinue;

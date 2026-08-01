@@ -31,6 +31,52 @@ namespace {
     thread_local RE::FormID g_activeEvaluationActor = 0;
     thread_local RuleEvaluationDelta* g_activeProducedDelta = nullptr;
 
+    struct InventoryInteractionState {
+        bool active = false;
+        std::uint64_t token = 0;
+        std::map<RE::FormID, RE::ActorHandle> actors;
+        std::map<RE::FormID, RuleEvaluationDelta> pendingDeltas;
+    };
+    std::mutex g_inventoryInteractionMutex;
+    InventoryInteractionState g_inventoryInteraction;
+    std::atomic_uint64_t g_nextInventoryInteractionToken{ 1 };
+
+    RuleEvaluationDelta MakeEmptyRuleEvaluationDelta()
+    {
+        RuleEvaluationDelta delta;
+        delta.mask = ToMask(RuleDependency::kNone);
+        return delta;
+    }
+
+    bool DeferInventoryInteractionEvaluation(
+        RE::Actor* a_actor,
+        const RuleEvaluationDelta& a_delta)
+    {
+        if (!a_actor) {
+            return false;
+        }
+
+        const auto actorID = a_actor->GetFormID();
+        std::lock_guard lock(g_inventoryInteractionMutex);
+        if (!g_inventoryInteraction.active ||
+            !g_inventoryInteraction.actors.contains(actorID)) {
+            return false;
+        }
+
+        auto pendingIt =
+            g_inventoryInteraction.pendingDeltas.try_emplace(
+                actorID,
+                MakeEmptyRuleEvaluationDelta()).first;
+        pendingIt->second.Merge(a_delta);
+        return true;
+    }
+
+    struct ActiveEquipmentReconciliation {
+        RE::FormID actorID = 0;
+        RuleEvaluationDelta delta;
+    };
+    thread_local ActiveEquipmentReconciliation* g_activeEquipmentReconciliation = nullptr;
+
     struct PendingSleepUpdate {
         std::uint64_t token = 0;
         bool isEntering = false;
@@ -285,10 +331,131 @@ void UpdateActorCombatContext(
     g_combatStates[actor->GetFormID()] = state;
 }
 
+void BeginInventoryInteraction(RE::Actor* a_targetActor)
+{
+    std::set<RE::FormID> actorIDs;
+    {
+        std::lock_guard lock(g_inventoryInteractionMutex);
+        if (!g_inventoryInteraction.active) {
+            g_inventoryInteraction.actors.clear();
+            g_inventoryInteraction.pendingDeltas.clear();
+        }
+        g_inventoryInteraction.active = true;
+        g_inventoryInteraction.token =
+            g_nextInventoryInteractionToken.fetch_add(
+                1, std::memory_order_relaxed);
+
+        const auto addActor = [&](RE::Actor* a_actor) {
+            if (!a_actor) {
+                return;
+            }
+            const auto actorID = a_actor->GetFormID();
+            const auto actorHandle = a_actor->GetHandle();
+            if (!actorHandle) {
+                return;
+            }
+            g_inventoryInteraction.actors[actorID] = actorHandle;
+            actorIDs.insert(actorID);
+        };
+        addActor(a_targetActor);
+        addActor(RE::PlayerCharacter::GetSingleton());
+    }
+
+    // An evaluation queued just before the menu opened must not run midway
+    // through the menu transaction. Move it into the same final-state batch.
+    std::lock_guard schedulerLock(g_scheduledEvaluationsMutex);
+    std::lock_guard interactionLock(g_inventoryInteractionMutex);
+    for (const auto actorID : actorIDs) {
+        const auto scheduled = g_scheduledEvaluations.find(actorID);
+        if (scheduled == g_scheduledEvaluations.end()) {
+            continue;
+        }
+        auto pendingIt =
+            g_inventoryInteraction.pendingDeltas.try_emplace(
+                actorID,
+                MakeEmptyRuleEvaluationDelta()).first;
+        pendingIt->second.Merge(scheduled->second.delta);
+        g_scheduledEvaluations.erase(scheduled);
+    }
+
+    logger::debug(
+        "[InventoryInteraction] Deferred EDF evaluation for {} actor(s).",
+        actorIDs.size());
+}
+
+bool IsInventoryInteractionActive(RE::Actor* a_actor)
+{
+    if (!a_actor) {
+        return false;
+    }
+    std::lock_guard lock(g_inventoryInteractionMutex);
+    return g_inventoryInteraction.active &&
+        g_inventoryInteraction.actors.contains(a_actor->GetFormID());
+}
+
+void EndInventoryInteraction()
+{
+    std::uint64_t token = 0;
+    {
+        std::lock_guard lock(g_inventoryInteractionMutex);
+        if (!g_inventoryInteraction.active) {
+            return;
+        }
+        token = g_inventoryInteraction.token;
+    }
+
+    // ContainerMenu can emit its final container/equip events immediately
+    // after the close notification. Keep collecting briefly, then evaluate
+    // only the settled inventory state on the main thread.
+    Utils::DelayedDispatcher::Get().PostDelayed(
+        std::chrono::milliseconds(75),
+        [token]() {
+            auto* taskInterface = SKSE::GetTaskInterface();
+            if (!taskInterface) {
+                return;
+            }
+            taskInterface->AddTask([token]() {
+                std::map<RE::FormID, RE::ActorHandle> actors;
+                std::map<RE::FormID, RuleEvaluationDelta> pendingDeltas;
+                {
+                    std::lock_guard lock(g_inventoryInteractionMutex);
+                    if (!g_inventoryInteraction.active ||
+                        g_inventoryInteraction.token != token) {
+                        return;
+                    }
+                    actors = std::move(g_inventoryInteraction.actors);
+                    pendingDeltas =
+                        std::move(g_inventoryInteraction.pendingDeltas);
+                    g_inventoryInteraction = {};
+                }
+
+                for (auto& [actorID, delta] : pendingDeltas) {
+                    const auto actorIt = actors.find(actorID);
+                    if (actorIt == actors.end()) {
+                        continue;
+                    }
+                    auto actorPtr = actorIt->second.get();
+                    auto* actor = actorPtr ? actorPtr.get() : nullptr;
+                    if (!actor || actor->IsDead()) {
+                        continue;
+                    }
+                    ScheduleRuleEvaluation(actor, std::move(delta));
+                }
+                logger::debug(
+                    "[InventoryInteraction] Released {} settled actor delta(s).",
+                    pendingDeltas.size());
+            });
+        });
+}
+
 void ScheduleRuleEvaluation(RE::Actor* a_actor, RuleEvaluationDelta a_delta)
 {
     if (!a_actor ||
         g_ruleEvaluationSuspended.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (DeferInventoryInteractionEvaluation(a_actor, a_delta)) {
         return;
     }
 
@@ -469,7 +636,6 @@ void ScheduleSleepOutfitUpdate(RE::Actor* a_actor, bool a_isEntering)
             std::lock_guard lock(g_sleepUpdatesMutex);
             g_sleepStates[actorID] = isEntering;
         }
-        ManageSleepOutfitState(actor, isEntering);
         ScheduleRuleEvaluation(
             actor,
             RuleEvaluationDelta::For(RuleDependency::kSleep));
@@ -492,6 +658,11 @@ void ForgetRuleEvaluationRuntimeState(RE::FormID a_actorID)
         std::lock_guard lock(g_combatStatesMutex);
         g_combatStates.erase(a_actorID);
     }
+    {
+        std::lock_guard lock(g_inventoryInteractionMutex);
+        g_inventoryInteraction.actors.erase(a_actorID);
+        g_inventoryInteraction.pendingDeltas.erase(a_actorID);
+    }
 }
 
 void ResetRuleEvaluationRuntimeState()
@@ -510,6 +681,12 @@ void ResetRuleEvaluationRuntimeState()
     {
         std::lock_guard lock(g_combatStatesMutex);
         g_combatStates.clear();
+    }
+    {
+        std::lock_guard lock(g_inventoryInteractionMutex);
+        g_inventoryInteraction = {};
+        g_nextInventoryInteractionToken.fetch_add(
+            1, std::memory_order_relaxed);
     }
     RuleManager::GetSingleton()->ResetRuntimeCaches();
     g_followerRefreshToken.fetch_add(1, std::memory_order_relaxed);
@@ -888,7 +1065,7 @@ void SaveStateManager::AuditPersistentItems(RE::Actor* a_actor)
         const auto protectedCount = itemState.expectedCount > itemState.missingCount ? itemState.expectedCount - itemState.missingCount : 0;
 
         if (currentCount < protectedCount) {
-            logger::info("[PersistentLedger] NPC '{}' Item '{}' Esperado {} Atual {} Retirado {} Restauravel {}",
+            logger::debug("[PersistentLedger] NPC '{}' Item '{}' Esperado {} Atual {} Retirado {} Restauravel {}",
                 a_actor->GetName(), item->GetName(), itemState.expectedCount, currentCount, itemState.missingCount, protectedCount - currentCount);
         }
     }
@@ -956,7 +1133,7 @@ void SaveStateManager::HandleContainerChanged(const RE::TESContainerChangedEvent
             }
 
             if (oldMissing != itemState.missingCount) {
-                logger::info("[PersistentLedger] Transferencia: Dono '{}' Item '{}' Esperado {} Ausente {} -> {}",
+                logger::debug("[PersistentLedger] Transferencia: Dono '{}' Item '{}' Esperado {} Ausente {} -> {}",
                     actor->GetName(), item->GetName(), itemState.expectedCount, oldMissing, itemState.missingCount);
             }
         }
@@ -1654,9 +1831,28 @@ namespace {
 
     struct ArmorEquipCandidate {
         RE::TESObjectARMO* armor = nullptr;
-        RE::InventoryEntryData* entry = nullptr;
+        RE::FormID formID = 0;
         int priority = kInventoryArmorPriority;
+        float armorRating = 0.0f;
         std::uint32_t slotMask = 0;
+        bool wasWorn = false;
+    };
+
+    struct EquipmentSnapshotEntry {
+        RE::TESBoundObject* object = nullptr;
+        RE::TESObjectARMO* armor = nullptr;
+        std::int32_t count = 0;
+        bool wasWorn = false;
+    };
+
+    struct EquipmentPlan {
+        std::vector<RE::TESBoundObject*> toUnequip;
+        std::vector<RE::TESBoundObject*> toEquip;
+
+        bool HasChanges() const
+        {
+            return !toUnequip.empty() || !toEquip.empty();
+        }
     };
 
     struct ActiveRuleArmorSelection {
@@ -1851,266 +2047,520 @@ namespace {
         return selection;
     }
 
+    bool RuleHasEquipmentRewards(const Rule& a_rule)
+    {
+        for (const auto& group : a_rule.rewardGroups) {
+            if (std::ranges::any_of(
+                    group.rewards,
+                    [](const Reward& a_reward) {
+                        return IsEquipmentRewardType(a_reward.typeReward);
+                    })) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool ActorHasManagedEquipmentRewards(RE::Actor* a_actor)
+    {
+        if (!a_actor) {
+            return false;
+        }
+
+        const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+        const auto& session =
+            SaveStateManager::GetSingleton()->GetSessionData();
+        const auto npcIt = session.npcRuleVersions.find(npcKey);
+        if (npcIt == session.npcRuleVersions.end()) {
+            return false;
+        }
+
+        for (const auto& [ruleID, state] : npcIt->second) {
+            if (!state.activationStateKnown ||
+                (!state.isActive &&
+                 state.persistentRewardKeys.empty())) {
+                continue;
+            }
+            const auto* rule =
+                RuleManager::GetSingleton()->GetRuleVersion(
+                    ruleID, state.version);
+            if (rule && RuleHasEquipmentRewards(*rule)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool ShouldReconcileEquipmentForDelta(
+        RE::Actor* a_actor,
+        const RuleEvaluationDelta& a_delta)
+    {
+        if (!a_actor || a_actor->IsPlayer() ||
+            !ActorHasManagedEquipmentRewards(a_actor)) {
+            return false;
+        }
+
+        constexpr auto relevantMask =
+            ToMask(RuleDependency::kSleep) |
+            ToMask(RuleDependency::kCombat);
+        return a_delta.IsFull() ||
+            a_delta.allowEquipmentReconciliation ||
+            (a_delta.mask & relevantMask) != 0;
+    }
+
+    std::vector<EquipmentSnapshotEntry> CaptureEquipmentSnapshot(
+        RE::Actor* a_actor)
+    {
+        std::vector<EquipmentSnapshotEntry> snapshot;
+        if (!a_actor) {
+            return snapshot;
+        }
+
+        auto inventory = a_actor->GetInventory();
+        snapshot.reserve(inventory.size());
+        for (const auto& [item, inventoryData] : inventory) {
+            if (!item || inventoryData.first <= 0) {
+                continue;
+            }
+
+            // InventoryEntryData owns shallow ExtraDataList pointers. Read the
+            // worn state now and never retain either pointer beyond this loop.
+            const bool wasWorn =
+                inventoryData.second &&
+                inventoryData.second->IsWorn();
+            snapshot.push_back({
+                item,
+                item->As<RE::TESObjectARMO>(),
+                inventoryData.first,
+                wasWorn
+            });
+        }
+        return snapshot;
+    }
+
+    void AppendUniqueEquipmentObject(
+        std::vector<RE::TESBoundObject*>& a_objects,
+        RE::TESBoundObject* a_object)
+    {
+        if (!a_object) {
+            return;
+        }
+        const auto formID = a_object->GetFormID();
+        if (std::ranges::none_of(
+                a_objects,
+                [formID](const RE::TESBoundObject* a_existing) {
+                    return a_existing &&
+                        a_existing->GetFormID() == formID;
+                })) {
+            a_objects.push_back(a_object);
+        }
+    }
+
+    EquipmentPlan BuildEquipmentPlan(
+        RE::Actor* a_actor,
+        const bool a_includeContextItems)
+    {
+        EquipmentPlan plan;
+        if (!a_actor || a_actor->IsDead() || a_actor->IsPlayer()) {
+            return plan;
+        }
+
+        struct ContextEquipCandidate {
+            RE::TESBoundObject* object = nullptr;
+            int priority = kInventoryArmorPriority;
+        };
+
+        std::map<RE::FormID, ContextEquipCandidate> desiredContextItems;
+        std::set<RE::FormID> inactiveContextItems;
+        if (a_includeContextItems) {
+            const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+            const auto& session =
+                SaveStateManager::GetSingleton()->GetSessionData();
+            const auto npcIt =
+                session.npcRuleVersions.find(npcKey);
+
+            const auto registerItem = [&](
+                RE::TESBoundObject* a_item,
+                const bool a_contextActive,
+                const int a_priority) {
+                if (!a_item) {
+                    return;
+                }
+
+                // Non-shield armor is resolved below as one compatible slot
+                // set together with the actor's regular inventory armor.
+                if (auto* armor =
+                        a_item->As<RE::TESObjectARMO>();
+                    armor && !armor->IsShield()) {
+                    return;
+                }
+
+                const auto formID = a_item->GetFormID();
+                if (!a_contextActive) {
+                    inactiveContextItems.insert(formID);
+                    return;
+                }
+                if (!CanActorEquipRuleItem(a_actor, a_item)) {
+                    logger::debug(
+                        "[EquipmentContext] Ignorando '{}' para '{}': "
+                        "tipo de equipamento, raça ou modelo incompatível.",
+                        a_item->GetName(),
+                        a_actor->GetName());
+                    return;
+                }
+
+                auto& candidate = desiredContextItems[formID];
+                candidate.object = a_item;
+                candidate.priority =
+                    std::max(candidate.priority, a_priority);
+            };
+
+            if (npcIt != session.npcRuleVersions.end()) {
+                for (const auto& [ruleID, state] : npcIt->second) {
+                    if (!state.activationStateKnown) {
+                        continue;
+                    }
+
+                    const auto* rule =
+                        RuleManager::GetSingleton()->GetRuleVersion(
+                            ruleID, state.version);
+                    if (!rule) {
+                        continue;
+                    }
+
+                    std::set<std::string> rewardKeys{
+                        state.persistentRewardKeys.begin(),
+                        state.persistentRewardKeys.end()
+                    };
+                    if (state.isActive) {
+                        rewardKeys.insert(
+                            state.activeRewardKeys.begin(),
+                            state.activeRewardKeys.end());
+                    }
+
+                    for (const auto& rewardKey : rewardKeys) {
+                        const RewardGroup* group = nullptr;
+                        const Reward* reward = nullptr;
+                        if (!ResolveRewardState(
+                                *rule,
+                                rewardKey,
+                                group,
+                                reward) ||
+                            !reward ||
+                            !IsEquipmentRewardType(
+                                reward->typeReward)) {
+                            continue;
+                        }
+
+                        const bool contextActive =
+                            IsRewardActiveInCurrentContext(
+                                a_actor, *reward);
+                        const auto [plugin, formID] =
+                            reward->ParseFormID();
+                        auto* rewardForm =
+                            RE::TESForm::LookupByID(formID);
+                        if (!rewardForm) {
+                            continue;
+                        }
+
+                        if (reward->typeReward == "Outfit") {
+                            auto* outfit =
+                                rewardForm->As<RE::BGSOutfit>();
+                            if (!outfit) {
+                                continue;
+                            }
+                            for (auto* form : outfit->outfitItems) {
+                                registerItem(
+                                    form ?
+                                        form->As<RE::TESBoundObject>() :
+                                        nullptr,
+                                    contextActive,
+                                    kRuleOutfitArmorPriority);
+                            }
+                        }
+                        else {
+                            registerItem(
+                                rewardForm->As<RE::TESBoundObject>(),
+                                contextActive,
+                                kRuleArmorPriority);
+                        }
+                    }
+                }
+            }
+
+            for (const auto& [formID, candidate] :
+                 desiredContextItems) {
+                inactiveContextItems.erase(formID);
+            }
+        }
+
+        const auto activeRuleSelection =
+            GetActiveRuleArmorSelection(a_actor);
+        auto snapshot = CaptureEquipmentSnapshot(a_actor);
+
+        std::vector<ArmorEquipCandidate> armorCandidates;
+        armorCandidates.reserve(snapshot.size());
+        for (const auto& entry : snapshot) {
+            auto* armor = entry.armor;
+            if (entry.count <= 0 || !armor ||
+                armor->IsShield() ||
+                activeRuleSelection.inactiveContextItems.contains(
+                    armor->GetFormID())) {
+                continue;
+            }
+
+            const auto slotMask =
+                armor->GetSlotMask().underlying();
+            if (slotMask == 0 ||
+                !HasCompatibleArmorModel(a_actor, armor)) {
+                logger::debug(
+                    "[EquipBest] Ignorando '{}' para '{}': "
+                    "raça, sexo, modelo ou slots incompatíveis.",
+                    armor->GetName(),
+                    a_actor->GetName());
+                continue;
+            }
+
+            const auto priorityIt =
+                activeRuleSelection.priorities.find(
+                    armor->GetFormID());
+            const auto priority =
+                priorityIt !=
+                    activeRuleSelection.priorities.end() ?
+                    priorityIt->second :
+                    kInventoryArmorPriority;
+            armorCandidates.push_back({
+                armor,
+                armor->GetFormID(),
+                priority,
+                armor->GetArmorRating(),
+                slotMask,
+                entry.wasWorn
+            });
+        }
+
+        std::ranges::sort(
+            armorCandidates,
+            [](const ArmorEquipCandidate& a_lhs,
+               const ArmorEquipCandidate& a_rhs) {
+                if (a_lhs.priority != a_rhs.priority) {
+                    return a_lhs.priority > a_rhs.priority;
+                }
+                if (a_lhs.armorRating != a_rhs.armorRating) {
+                    return a_lhs.armorRating >
+                        a_rhs.armorRating;
+                }
+                return a_lhs.formID < a_rhs.formID;
+            });
+
+        std::set<RE::FormID> selectedArmorIDs;
+        std::uint32_t occupiedSlots = 0;
+        for (const auto& candidate : armorCandidates) {
+            if ((occupiedSlots & candidate.slotMask) != 0) {
+                continue;
+            }
+            selectedArmorIDs.insert(candidate.formID);
+            occupiedSlots |= candidate.slotMask;
+            if (!candidate.wasWorn) {
+                AppendUniqueEquipmentObject(
+                    plan.toEquip, candidate.armor);
+            }
+        }
+
+        for (const auto& entry : snapshot) {
+            if (!entry.object || !entry.wasWorn) {
+                continue;
+            }
+
+            if (entry.armor && !entry.armor->IsShield()) {
+                const auto formID = entry.armor->GetFormID();
+                if (!selectedArmorIDs.contains(formID) &&
+                    (activeRuleSelection.inactiveContextItems.contains(
+                         formID) ||
+                     (entry.armor->GetSlotMask().underlying() &
+                      occupiedSlots) != 0)) {
+                    AppendUniqueEquipmentObject(
+                        plan.toUnequip, entry.object);
+                }
+                continue;
+            }
+
+            if (a_includeContextItems &&
+                inactiveContextItems.contains(
+                    entry.object->GetFormID())) {
+                AppendUniqueEquipmentObject(
+                    plan.toUnequip, entry.object);
+            }
+        }
+
+        if (a_includeContextItems) {
+            std::vector<ContextEquipCandidate> contextCandidates;
+            contextCandidates.reserve(desiredContextItems.size());
+            for (const auto& [formID, candidate] :
+                 desiredContextItems) {
+                contextCandidates.push_back(candidate);
+            }
+            std::ranges::sort(
+                contextCandidates,
+                [](const ContextEquipCandidate& a_lhs,
+                   const ContextEquipCandidate& a_rhs) {
+                    if (a_lhs.priority != a_rhs.priority) {
+                        return a_lhs.priority <
+                            a_rhs.priority;
+                    }
+                    return a_lhs.object->GetFormID() <
+                        a_rhs.object->GetFormID();
+                });
+
+            for (const auto& candidate : contextCandidates) {
+                const auto formID =
+                    candidate.object->GetFormID();
+                const auto found = std::ranges::find_if(
+                    snapshot,
+                    [formID](const EquipmentSnapshotEntry& a_entry) {
+                        return a_entry.object &&
+                            a_entry.object->GetFormID() == formID;
+                    });
+                if (candidate.object &&
+                    found != snapshot.end() &&
+                    found->count > 0 &&
+                    !found->wasWorn) {
+                    AppendUniqueEquipmentObject(
+                        plan.toEquip, candidate.object);
+                }
+            }
+        }
+
+        std::ranges::sort(
+            plan.toUnequip,
+            [](const RE::TESBoundObject* a_lhs,
+               const RE::TESBoundObject* a_rhs) {
+                const auto lhsID =
+                    a_lhs ? a_lhs->GetFormID() : 0;
+                const auto rhsID =
+                    a_rhs ? a_rhs->GetFormID() : 0;
+                return lhsID < rhsID;
+            });
+        return plan;
+    }
+
+    bool ApplyEquipmentPlan(
+        RE::Actor* a_actor,
+        const EquipmentPlan& a_plan)
+    {
+        if (!a_actor || !a_plan.HasChanges()) {
+            return false;
+        }
+        if (IsInventoryInteractionActive(a_actor)) {
+            logger::debug(
+                "[EquipmentPlan] Physical reconciliation deferred while "
+                "'{}' is in an inventory interaction.",
+                a_actor->GetName());
+            return false;
+        }
+
+        auto* equipManager =
+            RE::ActorEquipManager::GetSingleton();
+        if (!equipManager) {
+            return false;
+        }
+
+        ActiveEquipmentReconciliation transaction;
+        transaction.actorID = a_actor->GetFormID();
+        transaction.delta.mask =
+            ToMask(RuleDependency::kEquipment) |
+            ToMask(RuleDependency::kInventory);
+        transaction.delta.allowEquipmentReconciliation = true;
+        for (auto* object : a_plan.toUnequip) {
+            if (object) {
+                transaction.delta.changedForms.insert(
+                    object->GetFormID());
+            }
+        }
+        for (auto* object : a_plan.toEquip) {
+            if (object) {
+                transaction.delta.changedForms.insert(
+                    object->GetFormID());
+            }
+        }
+
+        {
+            struct TransactionScope {
+                ActiveEquipmentReconciliation* previous = nullptr;
+
+                ~TransactionScope()
+                {
+                    g_activeEquipmentReconciliation = previous;
+                }
+            } transactionScope{
+                g_activeEquipmentReconciliation
+            };
+            g_activeEquipmentReconciliation =
+                std::addressof(transaction);
+
+            // The inventory snapshot has already been discarded. From this
+            // point onward no InventoryEntryData or ExtraDataList pointer is
+            // consulted.
+            for (auto* object : a_plan.toUnequip) {
+                if (object) {
+                    equipManager->UnequipObject(a_actor, object);
+                }
+            }
+            for (auto* object : a_plan.toEquip) {
+                if (!object) {
+                    continue;
+                }
+                equipManager->EquipObject(
+                    a_actor,
+                    object,
+                    nullptr,
+                    1,
+                    nullptr,
+                    false,
+                    false,
+                    false,
+                    true);
+            }
+        }
+        ScheduleRuleEvaluation(
+            a_actor, std::move(transaction.delta));
+        return true;
+    }
+
 }
 
 void EquipBestInventoryItems(RE::Actor* a_actor)
 {
-    if (!a_actor || a_actor->IsPlayer()) return;
-
-    auto equipManager = RE::ActorEquipManager::GetSingleton();
-    if (!equipManager) return;
-
-    auto inventory = a_actor->GetInventory();
-    const auto activeRuleSelection = GetActiveRuleArmorSelection(a_actor);
-
-    std::vector<ArmorEquipCandidate> candidates;
-    candidates.reserve(inventory.size());
-    for (auto& [item, inventoryData] : inventory) {
-        auto& [count, entry] = inventoryData;
-        auto armor = item ? item->As<RE::TESObjectARMO>() : nullptr;
-        if (count <= 0 || !armor || armor->IsShield()) continue;
-        if (activeRuleSelection.inactiveContextItems.contains(armor->GetFormID())) continue;
-
-        const auto slotMask = armor->GetSlotMask().underlying();
-        if (slotMask == 0 || !HasCompatibleArmorModel(a_actor, armor)) {
-            logger::debug(
-                "[EquipBest] Ignorando '{}' para '{}': raça, sexo, modelo ou slots incompatíveis.",
-                armor->GetName(), a_actor->GetName());
-            continue;
-        }
-
-        const auto priorityIt = activeRuleSelection.priorities.find(armor->GetFormID());
-        const auto priority = priorityIt != activeRuleSelection.priorities.end() ?
-            priorityIt->second :
-            kInventoryArmorPriority;
-        candidates.push_back({ armor, entry.get(), priority, slotMask });
-    }
-
-    std::ranges::sort(candidates, [](const ArmorEquipCandidate& a_lhs, const ArmorEquipCandidate& a_rhs) {
-        if (a_lhs.priority != a_rhs.priority) {
-            return a_lhs.priority > a_rhs.priority;
-        }
-        if (a_lhs.armor->GetArmorRating() != a_rhs.armor->GetArmorRating()) {
-            return a_lhs.armor->GetArmorRating() > a_rhs.armor->GetArmorRating();
-        }
-        return a_lhs.armor->GetFormID() < a_rhs.armor->GetFormID();
-    });
-
-    std::vector<const ArmorEquipCandidate*> selected;
-    std::set<RE::FormID> selectedIDs;
-    std::uint32_t occupiedSlots = 0;
-    for (const auto& candidate : candidates) {
-        if ((occupiedSlots & candidate.slotMask) != 0) continue;
-
-        selected.push_back(std::addressof(candidate));
-        selectedIDs.insert(candidate.armor->GetFormID());
-        occupiedSlots |= candidate.slotMask;
-    }
-
-    for (auto& [item, inventoryData] : inventory) {
-        auto armor = item ? item->As<RE::TESObjectARMO>() : nullptr;
-        auto entry = inventoryData.second.get();
-        if (!armor || !entry || !entry->IsWorn() || selectedIDs.contains(armor->GetFormID())) {
-            continue;
-        }
-
-        if (activeRuleSelection.inactiveContextItems.contains(
-                armor->GetFormID()) ||
-            (armor->GetSlotMask().underlying() & occupiedSlots) != 0) {
-            equipManager->UnequipObject(a_actor, armor);
-        }
-    }
-
-    for (const auto* candidate : selected) {
-        if (!candidate || !candidate->armor || !candidate->entry || candidate->entry->IsWorn()) {
-            continue;
-        }
-
-        auto extraData =
-            candidate->entry->extraLists && !candidate->entry->extraLists->empty() ?
-            candidate->entry->extraLists->front() :
-            nullptr;
-        equipManager->EquipObject(
-            a_actor, candidate->armor, extraData, 1, nullptr, false, false, false, true);
-
-        logger::debug(
-            "[EquipBest] Equipando '{}' em '{}' (prioridade {}, rating {}, slots {:08X}).",
-            candidate->armor->GetName(), a_actor->GetName(), candidate->priority,
-            candidate->armor->GetArmorRating(), candidate->slotMask);
-    }
+    ApplyEquipmentPlan(
+        a_actor,
+        BuildEquipmentPlan(a_actor, false));
 }
 
-// Gerencia apenas as peças controladas pelo ciclo de sono da EDF.
 void ReconcileEquipmentContext(RE::Actor* a_actor)
 {
-    if (!a_actor || a_actor->IsDead() || a_actor->IsPlayer()) {
-        return;
+    ApplyEquipmentPlan(
+        a_actor,
+        BuildEquipmentPlan(a_actor, true));
+}
+
+bool CollectActiveEquipmentReconciliationEvent(
+    RE::Actor* a_actor,
+    const RE::FormID a_formID)
+{
+    if (!a_actor || !g_activeEquipmentReconciliation ||
+        g_activeEquipmentReconciliation->actorID !=
+            a_actor->GetFormID()) {
+        return false;
     }
 
-    auto equipManager = RE::ActorEquipManager::GetSingleton();
-    if (!equipManager) {
-        return;
+    g_activeEquipmentReconciliation->delta.mask |=
+        ToMask(RuleDependency::kEquipment) |
+        ToMask(RuleDependency::kInventory);
+    if (a_formID != 0) {
+        g_activeEquipmentReconciliation->delta.changedForms.insert(
+            a_formID);
     }
-
-    // Body armor is selected as a complete, race-compatible slot set.
-    EquipBestInventoryItems(a_actor);
-
-    struct ContextEquipCandidate {
-        RE::TESBoundObject* object = nullptr;
-        int priority = kInventoryArmorPriority;
-    };
-
-    std::map<RE::FormID, ContextEquipCandidate> desired;
-    std::set<RE::FormID> inactive;
-    const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
-    auto& session = SaveStateManager::GetSingleton()->GetSessionData();
-    const auto npcIt = session.npcRuleVersions.find(npcKey);
-    if (npcIt == session.npcRuleVersions.end()) {
-        return;
-    }
-
-    const auto registerItem = [&](
-        RE::TESBoundObject* a_item,
-        const bool a_contextActive,
-        const int a_priority) {
-        if (!a_item) {
-            return;
-        }
-
-        // EquipBestInventoryItems owns non-shield body armor.
-        if (auto armor = a_item->As<RE::TESObjectARMO>();
-            armor && !armor->IsShield()) {
-            return;
-        }
-
-        const auto formID = a_item->GetFormID();
-        if (!a_contextActive) {
-            inactive.insert(formID);
-            return;
-        }
-        if (!CanActorEquipRuleItem(a_actor, a_item)) {
-            logger::debug(
-                "[EquipmentContext] Ignorando '{}' para '{}': "
-                "tipo de equipamento, raça ou modelo incompatível.",
-                a_item->GetName(),
-                a_actor->GetName());
-            return;
-        }
-
-        auto& candidate = desired[formID];
-        candidate.object = a_item;
-        candidate.priority = std::max(candidate.priority, a_priority);
-    };
-
-    for (const auto& [ruleID, state] : npcIt->second) {
-        if (!state.activationStateKnown) {
-            continue;
-        }
-
-        auto rule =
-            RuleManager::GetSingleton()->GetRuleVersion(ruleID, state.version);
-        if (!rule) {
-            continue;
-        }
-
-        std::set<std::string> rewardKeys{
-            state.persistentRewardKeys.begin(),
-            state.persistentRewardKeys.end()
-        };
-        if (state.isActive) {
-            rewardKeys.insert(
-                state.activeRewardKeys.begin(),
-                state.activeRewardKeys.end());
-        }
-
-        for (const auto& rewardKey : rewardKeys) {
-            const RewardGroup* group = nullptr;
-            const Reward* reward = nullptr;
-            if (!ResolveRewardState(*rule, rewardKey, group, reward) ||
-                !reward || !IsEquipmentRewardType(reward->typeReward)) {
-                continue;
-            }
-
-            const bool contextActive =
-                IsRewardActiveInCurrentContext(a_actor, *reward);
-            auto [plugin, formID] = reward->ParseFormID();
-            auto rewardForm = RE::TESForm::LookupByID(formID);
-            if (!rewardForm) {
-                continue;
-            }
-
-            if (reward->typeReward == "Outfit") {
-                auto outfit = rewardForm->As<RE::BGSOutfit>();
-                if (!outfit) {
-                    continue;
-                }
-                for (auto* form : outfit->outfitItems) {
-                    registerItem(
-                        form ? form->As<RE::TESBoundObject>() : nullptr,
-                        contextActive,
-                        kRuleOutfitArmorPriority);
-                }
-            }
-            else {
-                registerItem(
-                    rewardForm->As<RE::TESBoundObject>(),
-                    contextActive,
-                    kRuleArmorPriority);
-            }
-        }
-    }
-
-    for (const auto& [formID, candidate] : desired) {
-        inactive.erase(formID);
-    }
-
-    auto inventory = a_actor->GetInventory();
-    for (auto& [item, inventoryData] : inventory) {
-        auto entry = inventoryData.second.get();
-        if (!item || !entry || !entry->IsWorn() ||
-            !inactive.contains(item->GetFormID())) {
-            continue;
-        }
-        equipManager->UnequipObject(a_actor, item);
-    }
-
-    std::vector<ContextEquipCandidate> candidates;
-    candidates.reserve(desired.size());
-    for (const auto& [formID, candidate] : desired) {
-        if (candidate.object &&
-            a_actor->GetInventoryCount(candidate.object) > 0) {
-            candidates.push_back(candidate);
-        }
-    }
-    std::ranges::sort(
-        candidates,
-        [](const ContextEquipCandidate& a_lhs,
-           const ContextEquipCandidate& a_rhs) {
-            if (a_lhs.priority != a_rhs.priority) {
-                return a_lhs.priority < a_rhs.priority;
-            }
-            return a_lhs.object->GetFormID() <
-                a_rhs.object->GetFormID();
-        });
-
-    for (const auto& candidate : candidates) {
-        if (const auto found = inventory.find(candidate.object);
-            found != inventory.end() &&
-            found->second.second &&
-            found->second.second->IsWorn()) {
-            continue;
-        }
-        equipManager->EquipObject(
-            a_actor,
-            candidate.object,
-            nullptr,
-            1,
-            nullptr,
-            false,
-            false,
-            false,
-            true);
-    }
+    return true;
 }
 
 void ManageSleepOutfitState(RE::Actor* a_actor, bool)
@@ -3239,6 +3689,15 @@ static void ApplyRulesToInstancePass(
 
     auto* ruleManager = RuleManager::GetSingleton();
     auto& session = SaveStateManager::GetSingleton()->GetSessionData();
+    bool equipmentReconciliationNeeded = false;
+    constexpr auto equipmentObservationMask =
+        ToMask(RuleDependency::kInventory) |
+        ToMask(RuleDependency::kEquipment);
+    const bool isPureExternalEquipmentObservation =
+        !a_delta.IsFull() &&
+        !a_delta.allowEquipmentReconciliation &&
+        (a_delta.mask & equipmentObservationMask) != 0 &&
+        (a_delta.mask & ~equipmentObservationMask) == 0;
     const auto actorLevel =
         a_forcedLevel != -1 ?
             a_forcedLevel :
@@ -3296,6 +3755,10 @@ static void ApplyRulesToInstancePass(
                     }
 
                     if (appliedRule) {
+                        if (!isPureExternalEquipmentObservation) {
+                            equipmentReconciliationNeeded |=
+                                RuleHasEquipmentRewards(*appliedRule);
+                        }
                         RemoveAppliedActivationRewards(a_actor, *appliedRule, state);
                     }
                     else {
@@ -3341,7 +3804,10 @@ static void ApplyRulesToInstancePass(
         actorName, rulesToProcess.size(), a_delta.mask, a_delta.changedForms.size());
 
     if (rulesToProcess.empty()) {
-        if (!isPlayer) {
+        if (!isPlayer &&
+            (equipmentReconciliationNeeded ||
+             ShouldReconcileEquipmentForDelta(
+                 a_actor, a_delta))) {
             ReconcileEquipmentContext(a_actor);
         }
         logger::debug("[ApplyRules] FINALIZADO: Nenhuma regra aplicável para {}", actorName);
@@ -3462,16 +3928,15 @@ static void ApplyRulesToInstancePass(
 
                     RestorePersistentRewardIfNeeded(
                         a_actor, *reward, isPlayer, equipQueue, ruleID, group->name);
-                    QueuePersistentOutfitForNormalUse(
-                        a_actor, *reward, isPlayer, equipQueue);
                 }
                 state.version = currentRule.version;
             }
 
 
-        // Equipment is reconciled once after every candidate rule settles.
-        // Keeping the queue local preserves the reward APIs without issuing
-        // repeated engine equip calls for every rule in the pass.
+        // Only rewards physically added/restored by this pass authorize an
+        // equipment reconciliation. External equip events remain
+        // observational and are handled by their rule-filter delta alone.
+        equipmentReconciliationNeeded |= !equipQueue.empty();
         equipQueue.clear();
 
         logger::debug(" [Regras aplicadas] {} (Save #{}) - Regra: '{}', Versão: {}, Grupos Aplicados: {}",
@@ -3483,7 +3948,9 @@ static void ApplyRulesToInstancePass(
 
     // Também recompõe quando nenhuma regra da fase correspondeu (por
     // exemplo, após sair de uma Cell/Location e remover o outfit anterior).
-    if (!isPlayer) {
+    if (!isPlayer &&
+        (equipmentReconciliationNeeded ||
+         ShouldReconcileEquipmentForDelta(a_actor, a_delta))) {
         ReconcileEquipmentContext(a_actor);
     }
 }

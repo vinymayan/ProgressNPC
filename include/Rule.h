@@ -210,10 +210,13 @@ struct RuleEvaluationDelta {
     RuleDependencyMask mask = ToMask(RuleDependency::kAll);
     std::set<RE::FormID> changedForms;
     std::set<RE::ActorValue> changedActorValues;
+    bool allowEquipmentReconciliation = false;
 
     static RuleEvaluationDelta Full()
     {
-        return {};
+        RuleEvaluationDelta delta;
+        delta.allowEquipmentReconciliation = true;
+        return delta;
     }
 
     static RuleEvaluationDelta For(
@@ -240,6 +243,8 @@ struct RuleEvaluationDelta {
         changedActorValues.insert(
             a_other.changedActorValues.begin(),
             a_other.changedActorValues.end());
+        allowEquipmentReconciliation |=
+            a_other.allowEquipmentReconciliation;
     }
 };
 

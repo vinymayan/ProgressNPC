@@ -1458,7 +1458,7 @@ namespace SPIDUI {
             }
             lastListType = listType;
             needsRebuildFiltered = false;
-            logger::info("[UI] Filtro Rebuilt: {} itens para tipo {}", currentCache.size(), listType);
+            logger::debug("[UI] Filtro Rebuilt: {} itens para tipo {}", currentCache.size(), listType);
         }
 
 
@@ -1480,7 +1480,7 @@ namespace SPIDUI {
 
         if (ImGuiMCP::BeginTable("SelectionTable", columns, tableFlags, { 0, tableHeight })) {
             ImGuiMCP::TableSetupColumn(GetLoc("auto.active", "Active"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 60.0f);
-            ImGuiMCP::TableSetupColumn(GetLoc("auto.formid", "FormID"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            ImGuiMCP::TableSetupColumn(GetLoc("auto.formid", "FormID"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 95.0f);
             ImGuiMCP::TableSetupColumn(GetLoc("auto.name", "Name"), ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
             ImGuiMCP::TableSetupColumn(GetLoc("auto.type", "Type"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 130.0f);
             ImGuiMCP::TableSetupColumn(GetLoc("auto.plugin", "Plugin"), ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
@@ -2149,7 +2149,7 @@ namespace SPIDUI {
                 // VERIFICAÇÃO: Contexto válido + Player existe + Player está em uma célula carregada
                 // Se player->GetParentCell() for null, o jogador não está no mundo (Main Menu)
                 if (saveMgr->GetCurrentContext().isValid && player && player->GetParentCell()) {
-                    logger::info("[UI] Mundo ativo detectado. Aplicando regras em tempo real...");
+                    logger::debug("[UI] Mundo ativo detectado. Aplicando regras em tempo real...");
 
                     // Aplica ao Player
                     ApplyRulesToInstance(player);
@@ -2173,7 +2173,7 @@ namespace SPIDUI {
                             }
                         }
                     }
-                    logger::info("[UI] Atualização concluída com sucesso.");
+                    logger::debug("[UI] Atualização concluída com sucesso.");
                 }
                 else {
                     logger::info("[UI] Regras salvas. Nenhuma aplicação imediata (fora do jogo ou no Menu Principal).");

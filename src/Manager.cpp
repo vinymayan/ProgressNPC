@@ -38,7 +38,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
         factionRankList.push_back(std::move(faction));
     }
     RebuildEditorIDIndex("Faction Rank");
-    logger::info("Carregados {} itens do tipo {}", factionRankList.size(), "Faction Rank");
+    logger::debug("Carregados {} itens do tipo {}", factionRankList.size(), "Faction Rank");
     PopulateList<RE::TESRace>("Race");
     PopulateList<RE::BGSPerk>("Perk");
     PopulateList<RE::SpellItem>("Spell");
@@ -66,7 +66,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
         }
     }
     RebuildEditorIDIndex("Gold");
-    logger::info("Carregados {} itens do tipo {}", goldList.size(), "Gold");
+    logger::debug("Carregados {} itens do tipo {}", goldList.size(), "Gold");
     PopulateList<RE::TESSoulGem>("SoulGem");
     PopulateList<RE::TESKey>("Key");
     auto& inventoryItems = _dataStore["Inventory Item"];
@@ -79,14 +79,14 @@ void Manager::PopulateAllLists(bool forceRefresh) {
         }
     }
     RebuildEditorIDIndex("Inventory Item");
-    logger::info("Carregados {} itens do tipo {}", inventoryItems.size(), "Inventory Item");
+    logger::debug("Carregados {} itens do tipo {}", inventoryItems.size(), "Inventory Item");
     auto& inventoryCountItems = _dataStore["Inventory Count"];
     inventoryCountItems = inventoryItems;
     for (auto& item : inventoryCountItems) {
         item.formType = "Inventory Count";
     }
     RebuildEditorIDIndex("Inventory Count");
-    logger::info("Carregados {} itens do tipo {}", inventoryCountItems.size(), "Inventory Count");
+    logger::debug("Carregados {} itens do tipo {}", inventoryCountItems.size(), "Inventory Count");
     auto& equippedItems = _dataStore["Equipped Item"];
     equippedItems.clear();
     for (const auto& typeName : { "Weapon", "Armor", "Ammo" }) {
@@ -97,7 +97,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
         }
     }
     RebuildEditorIDIndex("Equipped Item");
-    logger::info("Carregados {} itens do tipo {}", equippedItems.size(), "Equipped Item");
+    logger::debug("Carregados {} itens do tipo {}", equippedItems.size(), "Equipped Item");
     // - v.1.2.0
     PopulateList<RE::TESCombatStyle>("Combat Style");
     PopulateList<RE::BGSVoiceType>("Voice Type");
@@ -692,7 +692,7 @@ void Manager::PopulateList(const std::string& a_typeName, std::function<bool(T*)
         }
     }
     RebuildEditorIDIndex(a_typeName);
-    logger::info("Carregados {} itens do tipo {}", list.size(), a_typeName);
+    logger::debug("Carregados {} itens do tipo {}", list.size(), a_typeName);
 }
 
 void Manager::ConvertAllNPCOutfitsToInventory() {

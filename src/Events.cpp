@@ -95,7 +95,7 @@ namespace
             }
         }
 
-        logger::info(
+        logger::debug(
             "[NPCVisualUpdate] NPC {:08X} updated; invalidated static/tag "
             "state and scheduled {} loaded actor(s).",
             npcFormID,
@@ -115,10 +115,10 @@ RE::BSEventNotifyControl DynamicFormsGeneratorListener::ProcessEvent(const SKSE:
     }
 
     if (eventName == "DynamicFormsGeneratorUpdated") {
-		logger::info("received DynamicFormsGeneratorUpdated event with arg: {}", a_event->strArg.c_str());
+		logger::debug("received DynamicFormsGeneratorUpdated event with arg: {}", a_event->strArg.c_str());
         Manager::GetSingleton()->RefreshLists(a_event->strArg.c_str());
         RuleManager::GetSingleton()->RebuildDependencyIndex(false);
-        logger::info(
+        logger::debug(
             "[DFG] EditorID and rule dependency indexes refreshed without scheduling actor evaluation.");
         return RE::BSEventNotifyControl::kContinue;
     }
@@ -142,8 +142,10 @@ void FollowerDialogueEventHandler::Register()
     }
     ui->AddEventSink(GetSingleton());
     logger::info(
-        "[FollowerState] Dialogue Menu listener registered.");
+        "[FollowerState] Dialogue and Container Menu listener registered.");
 }
+
+RE::TESObjectREFR* GetContainerFromMenu();
 
 RE::BSEventNotifyControl
 FollowerDialogueEventHandler::ProcessEvent(
@@ -154,6 +156,17 @@ FollowerDialogueEventHandler::ProcessEvent(
         !a_event->opening &&
         a_event->menuName == RE::DialogueMenu::MENU_NAME) {
         QueueFollowerStateRefreshAfterDialogue();
+    }
+    if (a_event &&
+        a_event->menuName == RE::ContainerMenu::MENU_NAME) {
+        if (a_event->opening) {
+            auto* container = GetContainerFromMenu();
+            BeginInventoryInteraction(
+                container ? container->As<RE::Actor>() : nullptr);
+        }
+        else {
+            EndInventoryInteraction();
+        }
     }
     return RE::BSEventNotifyControl::kContinue;
 }

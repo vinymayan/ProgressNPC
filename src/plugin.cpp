@@ -13,7 +13,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
     if (message->type == SKSE::MessagingInterface::kPostLoad) {
         hasDFG = GetModuleHandleA("DynamicFormsGenerator.dll") != nullptr;
         if (hasDFG) {
-            logger::info("DynamicFormsGenerator.dll found");
+            logger::info("DynamicFormsGenerator.dll found.");
         }
     }
 
@@ -105,7 +105,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         else {
             // Se falhou ao ler o save, limpamos o contexto por segurança
             SaveStateManager::GetSingleton()->ClearContext();
-            logger::error("Falha ao ler cabeçalho. Contexto invalidado.");
+            logger::error("Falha ao ler cabeçalho. Contexto invalidado");
         }
     }
     if (message->type == SKSE::MessagingInterface::kPostLoadGame) {

@@ -1,7 +1,10 @@
-#pragma once
+﻿#pragma once
 #include <spdlog/sinks/basic_file_sink.h>
 
-static void SetupLog() {
+
+namespace logger = SKSE::log;
+
+inline void SetupLog() {
     auto logsFolder = SKSE::log::log_directory();
     if (!logsFolder) SKSE::stl::report_and_fail("SKSE log_directory not provided, logs disabled.");
     auto pluginName = SKSE::PluginDeclaration::GetSingleton()->GetName();
@@ -19,3 +22,5 @@ static void SetupLog() {
     logger::info("Name of the plugin is {}.", pluginName);
     logger::info("Version of the plugin is {}.", SKSE::PluginDeclaration::GetSingleton()->GetVersion());
 }
+
+
