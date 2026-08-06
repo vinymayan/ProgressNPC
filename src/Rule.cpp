@@ -1,4 +1,7 @@
 #include "Rule.h"
+#include "DistributionCore/Domain.h"
+#include "DistributionCore/FilterEvaluator.h"
+#include "DistributionCore/RewardSelector.h"
 #include "RulePackageStore.h"
 #include "SaveState.h"
 #include <miniz.h> // Inclua a biblioteca miniz
@@ -238,89 +241,13 @@ RE::FormID ResolveEDFFormID(const std::string& a_type, const std::string& a_edit
 
 bool IsEquipmentRewardType(const std::string_view type)
 {
-    return type == "Outfit" || type == "Armor" ||
-        type == "Weapon" || type == "Ammo" || type == "Light";
-}
-
-RE::ActorValue ResolveActorValue(const std::string_view a_name)
-{
-    if (a_name.empty()) {
-        return RE::ActorValue::kNone;
-    }
-
-    const std::string name(a_name);
-    if (const auto resolved =
-            RE::ActorValueList::LookupActorValueByName(name.c_str());
-        resolved != RE::ActorValue::kNone) {
-        return resolved;
-    }
-
-    for (auto index = 0;
-         index < std::to_underlying(RE::ActorValue::kTotal);
-         ++index) {
-        const auto actorValue = static_cast<RE::ActorValue>(index);
-        const auto actorValueName =
-            RE::ActorValueList::GetActorValueName(actorValue);
-        if (actorValueName && IEquals(name, actorValueName)) {
-            return actorValue;
-        }
-    }
-    return RE::ActorValue::kNone;
-}
-
-bool IsMaximumActorValueSupported(const RE::ActorValue a_actorValue)
-{
-    return a_actorValue == RE::ActorValue::kHealth ||
-        a_actorValue == RE::ActorValue::kMagicka ||
-        a_actorValue == RE::ActorValue::kStamina;
-}
-
-bool IsActorValueFilterValid(const BlacklistFilter& a_filter)
-{
-    if (a_filter.type != "Actor Value") {
-        return true;
-    }
-    const auto actorValue =
-        ResolveActorValue(a_filter.actorValueName);
-    return actorValue != RE::ActorValue::kNone &&
-        (a_filter.actorValueMode != ActorValueMode::kMaximum ||
-            IsMaximumActorValueSupported(actorValue));
-}
-
-bool IsNumericValueFilterType(const std::string_view a_type)
-{
-    return a_type == "Inventory Count" ||
-        a_type == "Gold" ||
-        a_type == "Faction Rank";
-}
-
-void NormalizeNumericValueFilter(BlacklistFilter& a_filter)
-{
-    if (!IsNumericValueFilterType(a_filter.type)) {
-        return;
-    }
-
-    if (a_filter.minimumValue == 0.0f &&
-        a_filter.maximumValue == 0.0f) {
-        const auto tokens = split(a_filter.formIDStr, '|');
-        if (tokens.size() >= 3) {
-            try {
-                a_filter.minimumValue =
-                    static_cast<float>(std::stoi(tokens[2]));
-            }
-            catch (...) {
-                a_filter.minimumValue =
-                    a_filter.type == "Faction Rank" ? 0.0f : 1.0f;
-            }
-        }
-        else {
-            a_filter.minimumValue =
-                a_filter.type == "Faction Rank" ? 0.0f : 1.0f;
-        }
-    }
-    if (a_filter.comparison != NumericComparison::kBetween) {
-        a_filter.maximumValue = a_filter.minimumValue;
-    }
+    DistributionCore::RegisterBuiltInTypes();
+    const auto* descriptor =
+        DistributionCore::RewardRegistry().Find(type);
+    return descriptor &&
+        (descriptor->capabilities &
+            DistributionCore::ToMask(
+                DistributionCore::TypeCapability::kEquipment)) != 0;
 }
 
 bool IsActivePlayerFollower(RE::Actor* actor)
@@ -756,26 +683,6 @@ std::string Rule::CalculateHash() const {
     auto& alloc = doc.GetAllocator();
     auto hashValue = WriteHashRule(*this, alloc);
     return std::to_string(std::hash<std::string>{}(SerializeJson(hashValue)));
-}
-
-bool MatchesRuleLevel(const int actorLevel, const Rule& rule)
-{
-    const auto primary = std::max(1, rule.level);
-    switch (rule.levelComparison) {
-    case NumericComparison::kGreaterOrEqual:
-        return actorLevel >= primary;
-    case NumericComparison::kLessOrEqual:
-        return actorLevel <= primary;
-    case NumericComparison::kEqual:
-        return actorLevel == primary;
-    case NumericComparison::kBetween: {
-        const auto [minimum, maximum] = std::minmax(
-            primary, std::max(1, rule.maximumLevel));
-        return actorLevel >= minimum && actorLevel <= maximum;
-    }
-    default:
-        return actorLevel >= primary;
-    }
 }
 
 Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId, const std::string& fallbackName, bool fallbackEnabled) {
@@ -1323,8 +1230,45 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
     int matches = 0;
     std::optional<RE::TESObjectREFR::InventoryItemMap>
         equippedInventorySnapshot;
+    DistributionCore::FilterEvaluationServices sharedServices;
+    sharedServices.resolveFormID =
+        [](const std::string_view a_type,
+           const std::string_view a_editorID,
+           const std::string_view a_formID) {
+            auto resolved = ResolveEDFFormID(
+                std::string(a_type),
+                std::string(a_editorID),
+                std::string(a_formID));
+            if (resolved == 0 && a_type == "Cell") {
+                resolved = ResolvePluginFormID(
+                    std::string(a_formID));
+            }
+            return resolved;
+        };
+    sharedServices.hasVirtualKeyword =
+        [](RE::Actor* a_target, RE::BGSKeyword* a_keyword) {
+            return SaveStateManager::GetSingleton()->
+                HasVirtualKeyword(a_target, a_keyword);
+        };
     for (const auto& filter : filters) {
         bool match = false;
+        const auto sharedResult =
+            DistributionCore::EvaluateFilter(
+                actor,
+                npc,
+                filter,
+                sharedServices);
+        if (sharedResult !=
+            DistributionCore::FilterEvaluation::kNotHandled) {
+            if (sharedResult ==
+                DistributionCore::FilterEvaluation::kMatch) {
+                ++matches;
+                if (!requiresAll) {
+                    return true;
+                }
+            }
+            continue;
+        }
         if (filter.type == "Actor Value") {
             match = MatchesActorValueFilter(actor, filter);
             if (match) {
@@ -2307,25 +2251,13 @@ std::vector<RewardGroup> RuleManager::RollForGroups(RE::TESNPC* npc, const Rule&
     std::vector<RewardGroup> wonGroups;
     if (!npc) return wonGroups;
 
-    if (rule.isExclusive) {
-        // Lógica: Escolhe apenas UM grupo da regra baseado nas chances (chanceGroup)
-        float roll = GetRandomFloat(0.0f, 100.0f);
-        float cumulative = 0.0f;
-        for (const auto& group : rule.rewardGroups) {
-            cumulative += group.chanceGroup;
-            if (roll <= cumulative) {
-                wonGroups.push_back(group);
-                break;
-            }
-        }
-    }
-    else {
-        // Lógica: Testa cada grupo independentemente
-        for (const auto& group : rule.rewardGroups) {
-            if (GetRandomFloat(0.0f, 100.0f) <= group.chanceGroup) {
-                wonGroups.push_back(group);
-            }
-        }
+    for (const auto index :
+         DistributionCore::RollGroupIndices(
+             rule,
+             [&] {
+                 return GetRandomFloat(0.0f, 100.0f);
+             })) {
+        wonGroups.push_back(rule.rewardGroups[index]);
     }
     return wonGroups;
 }
@@ -2346,44 +2278,18 @@ std::vector<Reward> RuleManager::GetRewardsForSpecificRule(RE::TESNPC* npc, cons
     std::vector<Reward> applicable;
     if (!npc) return applicable;
 
-    std::string npcName = npc->GetName();
-    logger::debug("[Sorteio] --- Iniciando processamento para: {} (Regra: {}) ---", npcName, rule.name);
-
-    auto processGroup = [&](const RewardGroup& group) {
-        if (group.isExclusive) {
-            float roll = GetRandomFloat(0.0f, 100.0f);
-            float cumulative = 0.0f;
-            for (const auto& reward : group.rewards) {
-                cumulative += reward.chanceReward;
-                if (roll <= cumulative) { applicable.push_back(reward); break; }
-            }
-        }
-        else {
-            for (const auto& reward : group.rewards) {
-                if (GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) applicable.push_back(reward);
-            }
-        }
-        };
-
-    if (rule.isExclusive) {
-        // LÓGICA: Escolhe apenas UM grupo da regra baseado nas chances
-        float roll = GetRandomFloat(0.0f, 100.0f);
-        float cumulative = 0.0f;
-        for (const auto& group : rule.rewardGroups) {
-            cumulative += group.chanceGroup;
-            if (roll <= cumulative) {
-                logger::debug("  >> Grupo Selecionado Exclusivamente: {}", group.name);
-                processGroup(group);
-                break;
-            }
-        }
-    }
-    else {
-        // LÓGICA: Testa cada grupo independentemente
-        for (const auto& group : rule.rewardGroups) {
-            if (GetRandomFloat(0.0f, 100.0f) <= group.chanceGroup) {
-                processGroup(group);
-            }
+    for (const auto& selection :
+         DistributionCore::RollRuleRewards(
+             rule,
+             [&] {
+                 return GetRandomFloat(0.0f, 100.0f);
+             })) {
+        const auto& group =
+            rule.rewardGroups[selection.groupIndex];
+        for (const auto rewardIndex :
+             selection.rewardIndices) {
+            applicable.push_back(
+                group.rewards[rewardIndex]);
         }
     }
     return applicable;

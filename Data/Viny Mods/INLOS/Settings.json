@@ -1,0 +1,9 @@
+{
+  "enableDeath": true,
+  "enableDefeat": true,
+  "experienceMultiplier": 1.0,
+  "vanillaLootMode": 0,
+  "followerVanillaLootToPlayer": false,
+  "preserveQuestItemsWhenDiscarding": true,
+  "lootRecipientMode": 0
+}

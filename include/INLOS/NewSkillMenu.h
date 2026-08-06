@@ -1,0 +1,31 @@
+#pragma once
+
+#include "RE/T/TESForm.h"
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace INLOS::NewSkillMenu
+{
+    bool Initialize();
+    bool IsAvailable();
+    std::uint32_t InterfaceVersion();
+
+    bool RefreshSkills();
+    const std::vector<std::string>& AvailableSkills();
+    bool HasSkill(std::string_view a_skillID);
+
+    bool AddSkillExperience(
+        RE::FormID a_actorID,
+        std::string_view a_skillID,
+        float a_amount);
+    bool AddSkillBonus(
+        RE::FormID a_actorID,
+        std::string_view a_skillID,
+        int a_amount);
+    bool AddPerkPoints(
+        RE::FormID a_actorID,
+        int a_amount);
+}

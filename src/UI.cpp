@@ -1,5 +1,6 @@
 ﻿#include "UI.h"
 #include "RulePackageStore.h"
+#include "DistributionCore/UICommon.h"
 #include <algorithm>
 #include <cctype>
 #include <miniz.h>
@@ -223,20 +224,10 @@ namespace SPIDUI {
         return result;
     }
 
-    struct SearchableComboOption {
-        std::string value;
-        std::string label;
-    };
+    using SearchableComboOption =
+        DistributionCore::UI::SearchableComboOption;
 
-    struct SearchableComboState {
-        char search[128]{};
-        std::string appliedSearch;
-        std::uint64_t optionsRevision = static_cast<std::uint64_t>(-1);
-        std::size_t optionsSize = 0;
-        std::vector<std::size_t> filteredIndices;
-    };
-
-    bool DrawSearchableCombo(
+    bool DrawLocalizedSearchableCombo(
         const char* label,
         const char* preview,
         std::string_view stateID,
@@ -244,97 +235,17 @@ namespace SPIDUI {
         std::string& selectedValue,
         std::uint64_t optionsRevision)
     {
-        static std::unordered_map<std::string, SearchableComboState> states;
-        static auto clipper = ImGuiMCP::ImGuiListClipperManager::Create();
-
-        const std::string stateKey(stateID);
-        ImGuiMCP::PushID(stateKey.c_str());
-        const bool opened = ImGuiMCP::BeginCombo(label, preview);
-        if (!opened) {
-            ImGuiMCP::PopID();
-            return false;
-        }
-
-        auto& state = states[stateKey];
-        const bool appearing = ImGuiMCP::IsWindowAppearing();
-        if (appearing) {
-            state.search[0] = '\0';
-            state.appliedSearch.clear();
-            state.optionsRevision = static_cast<std::uint64_t>(-1);
-            ImGuiMCP::SetKeyboardFocusHere();
-        }
-
-        ImGuiMCP::SetNextItemWidth(-1.0f);
-        const bool searchChanged = ImGuiMCP::InputTextWithHint(
-            "##ComboSearch",
+        return DistributionCore::UI::DrawSearchableCombo(
+            label,
+            preview,
+            stateID,
+            options,
+            selectedValue,
+            optionsRevision,
             GetLoc("auto.search", "Search..."),
-            state.search,
-            sizeof(state.search));
-
-        const std::string normalizedSearch = ToLowerASCII(state.search);
-        if (searchChanged ||
-            state.appliedSearch != normalizedSearch ||
-            state.optionsRevision != optionsRevision ||
-            state.optionsSize != options.size()) {
-            state.filteredIndices.clear();
-            state.filteredIndices.reserve(options.size());
-            for (std::size_t index = 0; index < options.size(); ++index) {
-                if (normalizedSearch.empty() ||
-                    ToLowerASCII(options[index].label).contains(normalizedSearch)) {
-                    state.filteredIndices.push_back(index);
-                }
-            }
-            state.appliedSearch = normalizedSearch;
-            state.optionsRevision = optionsRevision;
-            state.optionsSize = options.size();
-        }
-
-        ImGuiMCP::Separator();
-        bool changed = false;
-        if (ImGuiMCP::BeginChild("##ComboResults", { 0.0f, 220.0f }, 0)) {
-            if (state.filteredIndices.empty()) {
-                ImGuiMCP::TextDisabled(
-                    GetLoc("auto.no_items_found_in_this_category", "No items found in this category."));
-            }
-            else {
-                ImGuiMCP::ImGuiListClipperManager::Begin(
-                    clipper, static_cast<int>(state.filteredIndices.size()), -1.0f);
-
-                if (appearing) {
-                    const auto selected = std::ranges::find_if(
-                        state.filteredIndices,
-                        [&](const std::size_t index) {
-                            return options[index].value == selectedValue;
-                        });
-                    if (selected != state.filteredIndices.end()) {
-                        ImGuiMCP::ImGuiListClipperManager::IncludeItemByIndex(
-                            clipper, static_cast<int>(std::distance(state.filteredIndices.begin(), selected)));
-                    }
-                }
-
-                while (ImGuiMCP::ImGuiListClipperManager::Step(clipper)) {
-                    for (int visibleIndex = clipper->DisplayStart;
-                         visibleIndex < clipper->DisplayEnd;
-                         ++visibleIndex) {
-                        const auto optionIndex =
-                            state.filteredIndices[static_cast<std::size_t>(visibleIndex)];
-                        const auto& option = options[optionIndex];
-                        const bool selected = option.value == selectedValue;
-
-                        ImGuiMCP::PushID(option.value.c_str());
-                        if (ImGuiMCP::Selectable(option.label.c_str(), selected)) {
-                            selectedValue = option.value;
-                            changed = true;
-                        }
-                        ImGuiMCP::PopID();
-                    }
-                }
-            }
-        }
-        ImGuiMCP::EndChild();
-        ImGuiMCP::EndCombo();
-        ImGuiMCP::PopID();
-        return changed;
+            GetLoc(
+                "auto.no_items_found_in_this_category",
+                "No items found in this category."));
     }
 
     const std::vector<SearchableComboOption>& GetActorValueOptions()
@@ -437,7 +348,7 @@ namespace SPIDUI {
 
         const auto* active = FindPackage(activePackageID);
         ImGuiMCP::SetNextItemWidth(260.0f);
-        DrawSearchableCombo(
+        DrawLocalizedSearchableCombo(
                 GetLoc("auto.active_package", "Active Package"),
                 active ? active->displayName.c_str() : "Local Rules",
                 "ActivePackageCombo",
@@ -492,7 +403,7 @@ namespace SPIDUI {
         packageFilterOptions.insert(
             packageFilterOptions.begin(),
             { "", GetLoc("auto.all_packages", "All Packages") });
-        DrawSearchableCombo(
+        DrawLocalizedSearchableCombo(
             GetLoc("auto.package_filter", "Package Filter"),
             filterLabel,
             "PackageFilterCombo",
@@ -950,7 +861,7 @@ namespace SPIDUI {
 
             ImGuiMCP::TableSetColumnIndex(1);
             ImGuiMCP::SetNextItemWidth(-1.0f);
-            DrawSearchableCombo(
+            DrawLocalizedSearchableCombo(
                 "##KnownActorValue",
                 GetLoc("auto.select", "Select..."),
                 std::format(
@@ -1422,6 +1333,7 @@ namespace SPIDUI {
         static size_t lastTargetSize = 0;
         static bool needsRebuildFiltered = true;
         static bool lastRewardMode = false;
+        static bool rewardPlayableOnly = true;
         static std::uint64_t lastManagerRevision = static_cast<std::uint64_t>(-1);
 
         std::vector<size_t>& currentCache = isRewardMode ? rewardFilteredIndices : blacklistFilteredIndices;
@@ -1465,7 +1377,7 @@ namespace SPIDUI {
         for (const auto* typeName : typeNames) {
             typeOptions.push_back({ typeName, typeName });
         }
-        if (DrawSearchableCombo(
+        if (DrawLocalizedSearchableCombo(
                 "##FilterType",
                 listType.c_str(),
                 isRewardMode ? "RewardTypeCombo" : "FilterTypeCombo",
@@ -1473,6 +1385,16 @@ namespace SPIDUI {
                 listType,
                 isRewardMode ? 1 : 2)) {
             needsRebuildFiltered = true;
+        }
+        if (isRewardMode) {
+            ImGuiMCP::SameLine();
+            if (ImGuiMCP::Checkbox(
+                    GetLoc(
+                        "auto.playable_forms_only",
+                        "Playable Forms Only"),
+                    &rewardPlayableOnly)) {
+                needsRebuildFiltered = true;
+            }
         }
 
         const std::vector<InternalFormInfo>* sourceList = nullptr;
@@ -1589,7 +1511,7 @@ namespace SPIDUI {
                 needsRebuildFiltered = true;
             }
         }
-        if (DrawSearchableCombo(
+        if (DrawLocalizedSearchableCombo(
                 "##Plugin",
                 selectionPluginFilter == "All" ?
                     GetLoc("auto.all_plugins", "All Plugins") :
@@ -1612,6 +1534,11 @@ namespace SPIDUI {
 
             for (size_t i = 0; i < sourceList->size(); i++) {
                 const auto& item = (*sourceList)[i];
+                if (isRewardMode &&
+                    rewardPlayableOnly &&
+                    !item.playable) {
+                    continue;
+                }
                 if (selectionPluginFilter != "All" && item.pluginName != selectionPluginFilter) continue;
 
                 if (!searchStr.empty()) {

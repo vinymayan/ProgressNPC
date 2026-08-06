@@ -1,0 +1,17 @@
+{
+  "menu": {
+    "section": "INLOS",
+    "loot_rules": "Loot Rules",
+    "processed_encounters": "Processed Encounters",
+    "settings": "Settings"
+  },
+  "auto": {
+    "death": "Death",
+    "defeat": "Defeat",
+    "both": "Death or Defeat",
+    "victim": "Victim / Corpse",
+    "player": "Player",
+    "experience": "Experience",
+    "skill_experience": "Skill Experience"
+  }
+}

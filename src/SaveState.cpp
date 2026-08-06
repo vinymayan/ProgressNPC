@@ -1,4 +1,6 @@
 #include "SaveState.h"
+#include "DistributionCore/Domain.h"
+#include "DistributionCore/RewardSelector.h"
 #include "DelayedDispatcher.h"
 #include <atomic>
 #include <limits>
@@ -3080,43 +3082,10 @@ ResolveLeveledItemReward(
     const std::uint32_t a_count)
 {
     std::vector<std::pair<RE::TESBoundObject*, std::uint32_t>> result;
-    if (!a_actor || !a_list || a_count == 0) {
-        return result;
-    }
-
-    RE::BSScrapArray<RE::CALCED_OBJECT> calculated;
-    const auto actorLevel = static_cast<std::uint16_t>(
-        std::clamp(
-            static_cast<int>(a_actor->GetLevel()),
-            1,
-            0xFFFF));
-    const auto requestedCount = static_cast<std::int16_t>(
-        std::min<std::uint32_t>(
-            a_count,
-            static_cast<std::uint32_t>(
-                std::numeric_limits<std::int16_t>::max())));
-    a_list->CalculateCurrentFormList(
-        actorLevel,
-        requestedCount,
-        calculated,
-        0,
-        false);
-
-    std::map<RE::FormID, std::pair<RE::TESBoundObject*, std::uint32_t>>
-        aggregated;
-    for (const auto& entry : calculated) {
-        auto* item =
-            entry.form ? entry.form->As<RE::TESBoundObject>() : nullptr;
-        if (!item || item->As<RE::TESLevItem>() ||
-            entry.count == 0) {
-            continue;
-        }
-        auto& aggregate = aggregated[item->GetFormID()];
-        aggregate.first = item;
-        aggregate.second += entry.count;
-    }
-    for (const auto& [formID, item] : aggregated) {
-        result.push_back(item);
+    for (const auto& resolved :
+         DistributionCore::ResolveLeveledItems(
+             a_actor, a_list, a_count)) {
+        result.emplace_back(resolved.item, resolved.count);
     }
     return result;
 }
@@ -3706,25 +3675,16 @@ void StartRuleActivation(
         a_state.appliedGroups.push_back(group.name);
 
         std::vector<const Reward*> selectedRewards;
-        if (group.isExclusive) {
-            const auto roll = RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f);
-            float cumulative = 0.0f;
-            for (const auto& reward : group.rewards) {
-                cumulative += reward.chanceReward;
-                if (roll <= cumulative) {
-                    selectedRewards.push_back(std::addressof(reward));
-                    break;
-                }
-            }
+        for (const auto index :
+             DistributionCore::RollRewardIndices(
+                 group,
+                 [] {
+                     return RuleManager::GetSingleton()->
+                         GetRandomFloat(0.0f, 100.0f);
+                 })) {
+            selectedRewards.push_back(
+                std::addressof(group.rewards[index]));
         }
-        else {
-            for (const auto& reward : group.rewards) {
-                if (RuleManager::GetSingleton()->GetRandomFloat(0.0f, 100.0f) <= reward.chanceReward) {
-                    selectedRewards.push_back(std::addressof(reward));
-                }
-            }
-        }
-
         for (const auto* reward : selectedRewards) {
             if (!reward) continue;
 

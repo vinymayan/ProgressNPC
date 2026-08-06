@@ -15,6 +15,7 @@ struct InternalFormInfo {
     std::string name;
     std::string pluginName;
     std::string formType;
+    bool playable = true;
 
     // Helper for UI
     std::string GetDisplayName() const {

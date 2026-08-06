@@ -4,6 +4,7 @@
 #include "Events.h"
 #include "Manager.h"
 #include "Rule.h"
+#include "DistributionCore/Domain.h"
 
 namespace {
     bool hasDFG = false;
@@ -136,6 +137,7 @@ SKSEPluginLoad(const SKSE::LoadInterface *skse) {
     SetupLog();
     logger::info("Plugin loaded");
     SKSE::Init(skse);
+    DistributionCore::RegisterBuiltInTypes();
     DynamicFormsGeneratorListener::GetSingleton()->Register();
     BackgroundCloneHook::Install();
     SKSE::GetMessagingInterface()->RegisterListener(OnMessage);

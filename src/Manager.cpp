@@ -686,6 +686,10 @@ void Manager::PopulateList(const std::string& a_typeName, std::function<bool(T*)
             info.formID = currentID;
             info.formType = a_typeName;
             info.pluginName = ToUTF8(currentPlugin);
+            if (auto* boundObject =
+                    form->template As<RE::TESBoundObject>()) {
+                info.playable = boundObject->GetPlayable();
+            }
 
             // EditorID: clib_util pode lanÃ§ar exceÃ§Ãµes em contextos raros de memÃ³ria
             std::string rawEditorID = clib_util::editorID::get_editorID(form);

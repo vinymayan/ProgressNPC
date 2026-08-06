@@ -165,6 +165,7 @@
     "rule_name": "Rule Name",
     "save": "Save",
     "search": "Search",
+    "playable_forms_only": "Playable Forms Only",
     "select": "Select...",
     "select_or_clear_entire_package": "Select or clear every rule in this package.",
     "select_packages_and_rules_to_export": "Select one or more packages and, inside each package, the rules to export. Package identities are preserved.",
