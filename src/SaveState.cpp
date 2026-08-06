@@ -1,6 +1,7 @@
 #include "SaveState.h"
 #include "DelayedDispatcher.h"
 #include <atomic>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -124,6 +125,13 @@ namespace {
     {
         return std::string(a_ruleID) + kRewardStateDelimiter +
             BuildRewardStateKey(a_groupName, a_reward);
+    }
+
+    std::string BuildLeveledRewardLedgerGroup(
+        const std::string& a_groupName,
+        const Reward& a_reward)
+    {
+        return BuildRewardStateKey(a_groupName, a_reward);
     }
 
     bool ResolveRewardState(
@@ -1823,6 +1831,8 @@ namespace {
         if (a_type == "Scroll") return a_form->As<RE::ScrollItem>();
         if (a_type == "Book") return a_form->As<RE::TESObjectBOOK>();
         if (a_type == "Ammo") return a_form->As<RE::TESAmmo>();
+        if (a_type == "Light") return a_form->As<RE::TESObjectLIGH>();
+        if (a_type == "Gold") return a_form->As<RE::TESObjectMISC>();
         if (a_type == "Misc") return a_form->As<RE::TESObjectMISC>();
         if (a_type == "SoulGem") return a_form->As<RE::TESSoulGem>();
         if (a_type == "Key") return a_form->As<RE::TESKey>();
@@ -2573,6 +2583,51 @@ struct PendingEquip {
     int priority; // 0 para Outfit (Baixa), 1 para Recompensas Individuais (Alta)
 };
 
+struct ManagedRewardItemSnapshot {
+    RE::TESBoundObject* item = nullptr;
+    std::uint32_t expectedCount = 0;
+    std::uint32_t missingCount = 0;
+};
+
+std::vector<ManagedRewardItemSnapshot>
+GetManagedLeveledRewardItems(
+    RE::Actor* a_actor,
+    const Reward& a_reward,
+    const std::string& a_ruleID,
+    const std::string& a_groupName)
+{
+    std::vector<ManagedRewardItemSnapshot> result;
+    if (!a_actor || a_reward.typeReward != "Leveled Item") {
+        return result;
+    }
+
+    const auto npcKey = SaveStateManager::BuildNPCKey(a_actor);
+    const auto ledgerGroup =
+        BuildLeveledRewardLedgerGroup(a_groupName, a_reward);
+    const auto& session =
+        SaveStateManager::GetSingleton()->GetSessionData();
+    const auto npcIt = session.persistentItems.find(npcKey);
+    if (npcIt == session.persistentItems.end()) {
+        return result;
+    }
+
+    for (const auto& [managedKey, state] : npcIt->second) {
+        if (state.ruleID != a_ruleID ||
+            state.groupName != ledgerGroup ||
+            state.isPersistent != a_reward.isPersistent) {
+            continue;
+        }
+        if (auto* item = LookupBoundObjectByKey(managedKey)) {
+            result.push_back({
+                item,
+                state.expectedCount,
+                state.missingCount
+            });
+        }
+    }
+    return result;
+}
+
 void RemoveManagedTemporaryItemOnInvalidation(RE::Actor* a_actor, RE::TESBoundObject* a_item,
     uint32_t a_fallbackCount, const std::string& a_ruleID, const std::string& a_groupName)
 {
@@ -2715,6 +2770,29 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
                             RemoveManagedTemporaryItemOnInvalidation(a_actor, bound, 1, a_rule.id, group.name);
                         }
                     }
+                }
+            }
+            else if (reward.typeReward == "Leveled Item") {
+                const auto ledgerGroup =
+                    BuildLeveledRewardLedgerGroup(
+                        group.name, reward);
+                for (const auto& item :
+                     GetManagedLeveledRewardItems(
+                         a_actor,
+                         reward,
+                         a_rule.id,
+                         group.name)) {
+                    RemoveManagedTemporaryItemOnInvalidation(
+                        a_actor,
+                        item.item,
+                        item.expectedCount,
+                        a_rule.id,
+                        ledgerGroup);
+                    ScheduleRuleEvaluation(
+                        a_actor,
+                        RuleEvaluationDelta::For(
+                            RuleDependency::kInventory,
+                            item.item->GetFormID()));
                 }
             }
             else {
@@ -2995,6 +3073,54 @@ namespace
     }
 }
 
+std::vector<std::pair<RE::TESBoundObject*, std::uint32_t>>
+ResolveLeveledItemReward(
+    RE::Actor* a_actor,
+    RE::TESLevItem* a_list,
+    const std::uint32_t a_count)
+{
+    std::vector<std::pair<RE::TESBoundObject*, std::uint32_t>> result;
+    if (!a_actor || !a_list || a_count == 0) {
+        return result;
+    }
+
+    RE::BSScrapArray<RE::CALCED_OBJECT> calculated;
+    const auto actorLevel = static_cast<std::uint16_t>(
+        std::clamp(
+            static_cast<int>(a_actor->GetLevel()),
+            1,
+            0xFFFF));
+    const auto requestedCount = static_cast<std::int16_t>(
+        std::min<std::uint32_t>(
+            a_count,
+            static_cast<std::uint32_t>(
+                std::numeric_limits<std::int16_t>::max())));
+    a_list->CalculateCurrentFormList(
+        actorLevel,
+        requestedCount,
+        calculated,
+        0,
+        false);
+
+    std::map<RE::FormID, std::pair<RE::TESBoundObject*, std::uint32_t>>
+        aggregated;
+    for (const auto& entry : calculated) {
+        auto* item =
+            entry.form ? entry.form->As<RE::TESBoundObject>() : nullptr;
+        if (!item || item->As<RE::TESLevItem>() ||
+            entry.count == 0) {
+            continue;
+        }
+        auto& aggregate = aggregated[item->GetFormID()];
+        aggregate.first = item;
+        aggregate.second += entry.count;
+    }
+    for (const auto& [formID, item] : aggregated) {
+        result.push_back(item);
+    }
+    return result;
+}
+
 void ApplyRewardPhysical(
     RE::Actor* a_actor,
     const Reward& reward,
@@ -3094,6 +3220,13 @@ void ApplyRewardPhysical(
             }
         }
     }
+    else if (reward.typeReward == "Leveled Item") {
+        // Leveled rewards are resolved and tracked by
+        // ApplyRewardPhysicalTracked. Never add the abstract LVLI form to an
+        // actor inventory because the persistent ledger could not identify
+        // the concrete result selected by the game.
+        return;
+    }
     else {
         // Itens físicos (Weapon, Armor, etc)
         if (auto bound = rewardForm->As<RE::TESBoundObject>()) {
@@ -3120,6 +3253,9 @@ void TrackPersistentRewardItems(RE::Actor* a_actor, const Reward& reward, const 
     if (!rewardForm) return;
 
     auto saveManager = SaveStateManager::GetSingleton();
+    if (reward.typeReward == "Leveled Item") {
+        return;
+    }
     if (reward.typeReward == "Outfit") {
         if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
             for (auto* form : outfit->outfitItems) {
@@ -3145,6 +3281,9 @@ void EnsurePersistentRewardTracked(RE::Actor* a_actor, const Reward& reward, con
     if (!rewardForm) return;
 
     auto saveManager = SaveStateManager::GetSingleton();
+    if (reward.typeReward == "Leveled Item") {
+        return;
+    }
     if (reward.typeReward == "Outfit") {
         if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
             for (auto* form : outfit->outfitItems) {
@@ -3190,7 +3329,8 @@ void RestorePersistentBoundObject(RE::Actor* a_actor, RE::TESBoundObject* a_item
 
     a_actor->AddObjectToContainer(a_item, nullptr, static_cast<std::int32_t>(a_count), nullptr);
     if (!isPlayer && a_shouldEquip &&
-        (a_item->IsWeapon() || a_item->IsArmor() || a_item->IsAmmo())) {
+        (a_item->IsWeapon() || a_item->IsArmor() || a_item->IsAmmo() ||
+            a_item->As<RE::TESObjectLIGH>())) {
         equipQueue.push_back({ a_item, 1 });
     }
 
@@ -3210,7 +3350,27 @@ void RestorePersistentRewardIfNeeded(RE::Actor* a_actor, const Reward& reward, b
     const bool shouldEquip =
         IsRewardActiveInCurrentContext(a_actor, reward);
 
-    if (reward.typeReward == "Outfit") {
+    if (reward.typeReward == "Leveled Item") {
+        const auto ledgerGroup =
+            BuildLeveledRewardLedgerGroup(groupName, reward);
+        for (const auto& item :
+             GetManagedLeveledRewardItems(
+                 a_actor, reward, ruleID, groupName)) {
+            RestorePersistentBoundObject(
+                a_actor,
+                item.item,
+                GetPersistentRestoreCount(
+                    a_actor,
+                    item.item,
+                    ruleID,
+                    ledgerGroup,
+                    reward.isPersistent),
+                isPlayer,
+                false,
+                equipQueue);
+        }
+    }
+    else if (reward.typeReward == "Outfit") {
         if (auto outfit = rewardForm->As<RE::BGSOutfit>()) {
             for (auto* form : outfit->outfitItems) {
                 if (auto* bound = form->As<RE::TESBoundObject>()) {
@@ -3234,6 +3394,40 @@ void ApplyRewardPhysicalTracked(RE::Actor* a_actor, const Reward& reward, bool i
     const std::string& ruleID, int ruleVersion,
     std::uint64_t activationToken, const std::string& groupName)
 {
+    if (reward.typeReward == "Leveled Item") {
+        const auto [plugin, formID] = reward.ParseFormID();
+        auto* list =
+            RE::TESForm::LookupByID<RE::TESLevItem>(formID);
+        if (!list) {
+            return;
+        }
+        const auto ledgerGroup =
+            BuildLeveledRewardLedgerGroup(groupName, reward);
+        for (const auto& [item, count] :
+             ResolveLeveledItemReward(
+                 a_actor, list, reward.amount)) {
+            a_actor->AddObjectToContainer(
+                item,
+                nullptr,
+                static_cast<std::int32_t>(count),
+                nullptr);
+            SaveStateManager::GetSingleton()->
+                TrackPersistentItemGrant(
+                    a_actor,
+                    item,
+                    count,
+                    ruleID,
+                    ledgerGroup,
+                    reward.isPersistent);
+            ScheduleRuleEvaluation(
+                a_actor,
+                RuleEvaluationDelta::For(
+                    RuleDependency::kInventory,
+                    item->GetFormID()));
+        }
+        return;
+    }
+
     ApplyRewardPhysical(
         a_actor, reward, isPlayer, equipQueue, ruleID,
         ruleVersion, activationToken, groupName);
@@ -3265,6 +3459,13 @@ bool IsRewardRepresentedInCurrentState(
             npcIt->second, itemKey, a_ruleID, a_groupName, a_reward.isPersistent) != nullptr;
     };
 
+    if (a_reward.typeReward == "Leveled Item") {
+        return !GetManagedLeveledRewardItems(
+            a_actor,
+            a_reward,
+            a_ruleID,
+            a_groupName).empty();
+    }
     if (a_reward.typeReward == "Outfit") {
         auto outfit = rewardForm->As<RE::BGSOutfit>();
         if (!outfit) return false;
@@ -3338,6 +3539,17 @@ bool HasOutstandingNonPersistentReward(
         return itemState && itemState->missingCount > 0;
     };
 
+    if (a_reward.typeReward == "Leveled Item") {
+        return std::ranges::any_of(
+            GetManagedLeveledRewardItems(
+                a_actor,
+                a_reward,
+                a_ruleID,
+                a_groupName),
+            [](const ManagedRewardItemSnapshot& a_item) {
+                return a_item.missingCount > 0;
+            });
+    }
     if (a_reward.typeReward == "Outfit") {
         auto outfit = rewardForm->As<RE::BGSOutfit>();
         return outfit && std::ranges::any_of(outfit->outfitItems, [&](RE::TESForm* a_form) {

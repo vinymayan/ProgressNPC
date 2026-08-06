@@ -529,7 +529,7 @@ namespace SPIDUI {
 
     bool FilterUsesNumericValue(const std::string& type)
     {
-        return type == "Inventory Count" || type == "Gold" || type == "Faction Rank";
+        return IsNumericValueFilterType(type);
     }
 
     int DefaultFilterNumericValue(const std::string& type)
@@ -559,6 +559,12 @@ namespace SPIDUI {
 
     int GetFilterNumericValue(const BlacklistFilter& filter)
     {
+        if (filter.minimumValue != 0.0f ||
+            filter.maximumValue != 0.0f ||
+            filter.comparison != NumericComparison::kGreaterOrEqual) {
+            return static_cast<int>(
+                std::round(filter.minimumValue));
+        }
         auto tokens = split(filter.formIDStr, '|');
         if (tokens.size() < 3) return DefaultFilterNumericValue(filter.type);
         try {
@@ -574,6 +580,10 @@ namespace SPIDUI {
         if (filter.type != "Faction Rank") value = std::max(0, value);
         auto baseID = GetFilterBaseFormID(filter.formIDStr);
         filter.formIDStr = baseID + "|" + std::to_string(value);
+        filter.minimumValue = static_cast<float>(value);
+        if (filter.comparison != NumericComparison::kBetween) {
+            filter.maximumValue = filter.minimumValue;
+        }
     }
 
     BlacklistFilter MakeFilterFromSelection(
@@ -622,9 +632,13 @@ namespace SPIDUI {
         }
 
         if (FilterUsesNumericValue(item.formType)) {
-            filter.formIDStr += "|" +
-                std::to_string(
-                    DefaultFilterNumericValue(item.formType));
+            const auto value =
+                DefaultFilterNumericValue(item.formType);
+            filter.formIDStr += "|" + std::to_string(value);
+            filter.comparison =
+                NumericComparison::kGreaterOrEqual;
+            filter.minimumValue = static_cast<float>(value);
+            filter.maximumValue = filter.minimumValue;
         }
         return filter;
     }
@@ -642,6 +656,59 @@ namespace SPIDUI {
 
     void RenderFilterCondition(BlacklistFilter& filter)
     {
+        if (FilterUsesNumericValue(filter.type)) {
+            NormalizeNumericValueFilter(filter);
+            const char* comparisons[] = {
+                ">=", "<=", "=", GetLoc("auto.between", "Between")
+            };
+            auto comparison = std::clamp(
+                static_cast<int>(filter.comparison), 0, 3);
+            ImGuiMCP::SetNextItemWidth(60.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##NumericFilterComparison",
+                    comparisons[comparison])) {
+                for (int option = 0; option < 4; ++option) {
+                    if (ImGuiMCP::Selectable(
+                            comparisons[option],
+                            comparison == option)) {
+                        filter.comparison =
+                            static_cast<NumericComparison>(option);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+
+            auto minimum = static_cast<int>(
+                std::round(filter.minimumValue));
+            ImGuiMCP::SameLine();
+            ImGuiMCP::SetNextItemWidth(80.0f);
+            if (ImGuiMCP::InputInt(
+                    "##NumericFilterMinimum",
+                    &minimum, 0, 0)) {
+                SetFilterNumericValue(filter, minimum);
+            }
+            if (filter.comparison ==
+                NumericComparison::kBetween) {
+                auto maximum = static_cast<int>(
+                    std::round(filter.maximumValue));
+                ImGuiMCP::SameLine();
+                ImGuiMCP::SetNextItemWidth(80.0f);
+                if (ImGuiMCP::InputInt(
+                        "##NumericFilterMaximum",
+                        &maximum, 0, 0)) {
+                    if (filter.type != "Faction Rank") {
+                        maximum = std::max(0, maximum);
+                    }
+                    filter.maximumValue =
+                        static_cast<float>(maximum);
+                }
+            }
+            else {
+                filter.maximumValue = filter.minimumValue;
+            }
+            return;
+        }
+
         if (filter.type == "Quest") {
             const char* modes[] = {
                 GetLoc("auto.quest_running", "Running"),
@@ -1096,6 +1163,101 @@ namespace SPIDUI {
             ImGuiMCP::SetTooltip(tooltip);
         }
         if (!isBlacklist) {
+            const char* actorScopeOptions[] = {
+                GetLoc("auto.both", "Both"),
+                GetLoc("auto.player_only", "Player Only"),
+                GetLoc("auto.npcs_only", "NPCs Only")
+            };
+            int actorScope = std::clamp(
+                static_cast<int>(rule.actorScope), 0, 2);
+            ImGuiMCP::Text(
+                "%s",
+                GetLoc("auto.actor_scope", "Actor Scope:"));
+            ImGuiMCP::SameLine();
+            ImGuiMCP::SetNextItemWidth(170.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##targetActorScope",
+                    actorScopeOptions[actorScope])) {
+                for (int index = 0; index < 3; ++index) {
+                    if (ImGuiMCP::Selectable(
+                            actorScopeOptions[index],
+                            actorScope == index)) {
+                        rule.actorScope =
+                            static_cast<RuleActorScope>(index);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+
+            const char* summonedOptions[] = {
+                GetLoc("auto.any_actor", "Any Actor"),
+                GetLoc("auto.summoned_only", "Summoned Only"),
+                GetLoc(
+                    "auto.exclude_summoned",
+                    "Exclude Summoned")
+            };
+            int summonedState = std::clamp(
+                static_cast<int>(rule.summonedState), 0, 2);
+            ImGuiMCP::SameLine();
+            ImGuiMCP::Text(
+                "%s",
+                GetLoc(
+                    "auto.summoned_status",
+                    "Summoned Status:"));
+            ImGuiMCP::SameLine();
+            ImGuiMCP::SetNextItemWidth(190.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##targetSummonedState",
+                    summonedOptions[summonedState])) {
+                for (int index = 0; index < 3; ++index) {
+                    if (ImGuiMCP::Selectable(
+                            summonedOptions[index],
+                            summonedState == index)) {
+                        rule.summonedState =
+                            static_cast<RuleSummonedState>(index);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+
+            const char* hostilityOptions[] = {
+                GetLoc("auto.any_actor", "Any Actor"),
+                GetLoc(
+                    "auto.hostile_to_player",
+                    "Hostile to Player"),
+                GetLoc(
+                    "auto.friendly_or_ally",
+                    "Friendly / Ally")
+            };
+            int hostilityState = std::clamp(
+                static_cast<int>(rule.hostilityState), 0, 2);
+            ImGuiMCP::SameLine();
+            ImGuiMCP::Text(
+                "%s",
+                GetLoc(
+                    "auto.hostility_to_player",
+                    "Hostility:"));
+            ImGuiMCP::SameLine();
+            ImGuiMCP::SetNextItemWidth(190.0f);
+            if (ImGuiMCP::BeginCombo(
+                    "##targetHostilityState",
+                    hostilityOptions[hostilityState])) {
+                for (int index = 0; index < 3; ++index) {
+                    if (ImGuiMCP::Selectable(
+                            hostilityOptions[index],
+                            hostilityState == index)) {
+                        rule.hostilityState =
+                            static_cast<RuleHostilityState>(index);
+                    }
+                }
+                ImGuiMCP::EndCombo();
+            }
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(GetLoc(
+                    "auto.hostility_to_player_help",
+                    "Friendly / Ally means the actor is currently not hostile to the Player."));
+            }
+
             const char* combatOptions[] = {
                 GetLoc("auto.both", "Both"),
                 GetLoc("auto.in_combat", "In Combat"),
@@ -1187,6 +1349,7 @@ namespace SPIDUI {
                     continue;
                 }
                 ImGuiMCP::TableNextRow();
+                ImGuiMCP::PushID(i);
                 ImGuiMCP::TableSetColumnIndex(0); ImGuiMCP::Text(f.type.c_str());
                 ImGuiMCP::TableSetColumnIndex(1);
                 std::string resolvedName = "Not Found";
@@ -1228,8 +1391,10 @@ namespace SPIDUI {
                 // Usamos o prefixo para evitar conflitos de ID no ImGui
                 if (ImGuiMCP::Button((idPrefix + std::to_string(i)).c_str())) {
                     filters.erase(filters.begin() + i);
+                    ImGuiMCP::PopID();
                     break;
                 }
+                ImGuiMCP::PopID();
             }
             ImGuiMCP::EndTable();
         }
@@ -1283,7 +1448,7 @@ namespace SPIDUI {
             std::vector<const char*>{
                 "All", "Selected", "Perk", "Spell", "Shout", "Keyword", "Faction",
                 "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo",
-                "Misc", "SoulGem", "Key", "Outfit"
+                "Light", "Gold", "Leveled Item", "Misc", "SoulGem", "Key", "Outfit"
             } :
             std::vector<const char*>{
                 "All", "Selected", "NPC", "Faction", "Faction Rank", "Keyword", "Race",
@@ -1315,7 +1480,7 @@ namespace SPIDUI {
         if (listType == "All") {
             if (isRewardMode) {
                 if (rewardAllCache.empty()) {
-                    for (auto& type : { "Spell", "Shout", "Perk", "Keyword", "Faction", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key", "Outfit" }) {
+                    for (auto& type : { "Spell", "Shout", "Perk", "Keyword", "Faction", "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Light", "Gold", "Leveled Item", "Misc", "SoulGem", "Key", "Outfit" }) {
                         auto& l = Manager::GetSingleton()->GetList(type);
                         rewardAllCache.insert(rewardAllCache.end(), l.begin(), l.end());
                     }
@@ -1592,7 +1757,12 @@ namespace SPIDUI {
                             ImGuiMCP::TableSetColumnIndex(5);
                             ImGuiMCP::SetNextItemWidth(-1.0f);
                             int val = (int)it->amount;
-                            if (ImGuiMCP::InputInt(("##q" + internalID).c_str(), &val, 0, 0)) it->amount = (uint32_t)val;
+                            if (ImGuiMCP::InputInt(
+                                    ("##q" + internalID).c_str(),
+                                    &val, 0, 0)) {
+                                it->amount = static_cast<std::uint32_t>(
+                                    std::max(1, val));
+                            }
 
                             ImGuiMCP::TableSetColumnIndex(6);
                             ImGuiMCP::SetNextItemWidth(-1.0f);
@@ -2952,9 +3122,18 @@ namespace SPIDUI {
             if (form->As<RE::ScrollItem>()) return "Scroll";
             if (form->As<RE::TESObjectBOOK>()) return "Book";
             if (form->As<RE::TESAmmo>()) return "Ammo";
+            if (form->As<RE::TESObjectLIGH>()) return "Light";
+            if (form->As<RE::TESLevItem>()) return "Leveled Item";
             if (form->As<RE::TESSoulGem>()) return "SoulGem";
             if (form->As<RE::TESKey>()) return "Key";
-            if (form->As<RE::TESObjectMISC>()) return "Misc";
+            if (auto* misc = form->As<RE::TESObjectMISC>()) {
+                const auto editorID =
+                    clib_util::editorID::get_editorID(misc);
+                return misc->GetFormID() == 0xF ||
+                    std::string_view(editorID) == "Gold001" ?
+                    "Gold" :
+                    "Misc";
+            }
             return std::nullopt;
         }
 

@@ -134,6 +134,9 @@ namespace
     {
         return rule.combatState != RuleCombatState::kAny ||
             rule.followerState != RuleFollowerState::kAny ||
+            rule.actorScope != RuleActorScope::kBoth ||
+            rule.summonedState != RuleSummonedState::kAny ||
+            rule.hostilityState != RuleHostilityState::kAny ||
             std::ranges::any_of(rule.targetFilters, [](const auto& filter) {
             return IsActorDependentFilterType(filter.type);
         }) || std::ranges::any_of(rule.blacklistFilters, [](const auto& filter) {
@@ -236,7 +239,7 @@ RE::FormID ResolveEDFFormID(const std::string& a_type, const std::string& a_edit
 bool IsEquipmentRewardType(const std::string_view type)
 {
     return type == "Outfit" || type == "Armor" ||
-        type == "Weapon" || type == "Ammo";
+        type == "Weapon" || type == "Ammo" || type == "Light";
 }
 
 RE::ActorValue ResolveActorValue(const std::string_view a_name)
@@ -282,6 +285,42 @@ bool IsActorValueFilterValid(const BlacklistFilter& a_filter)
     return actorValue != RE::ActorValue::kNone &&
         (a_filter.actorValueMode != ActorValueMode::kMaximum ||
             IsMaximumActorValueSupported(actorValue));
+}
+
+bool IsNumericValueFilterType(const std::string_view a_type)
+{
+    return a_type == "Inventory Count" ||
+        a_type == "Gold" ||
+        a_type == "Faction Rank";
+}
+
+void NormalizeNumericValueFilter(BlacklistFilter& a_filter)
+{
+    if (!IsNumericValueFilterType(a_filter.type)) {
+        return;
+    }
+
+    if (a_filter.minimumValue == 0.0f &&
+        a_filter.maximumValue == 0.0f) {
+        const auto tokens = split(a_filter.formIDStr, '|');
+        if (tokens.size() >= 3) {
+            try {
+                a_filter.minimumValue =
+                    static_cast<float>(std::stoi(tokens[2]));
+            }
+            catch (...) {
+                a_filter.minimumValue =
+                    a_filter.type == "Faction Rank" ? 0.0f : 1.0f;
+            }
+        }
+        else {
+            a_filter.minimumValue =
+                a_filter.type == "Faction Rank" ? 0.0f : 1.0f;
+        }
+    }
+    if (a_filter.comparison != NumericComparison::kBetween) {
+        a_filter.maximumValue = a_filter.minimumValue;
+    }
 }
 
 bool IsActivePlayerFollower(RE::Actor* actor)
@@ -376,12 +415,14 @@ RuleDependencyMask GetRewardDependencyMask(std::string_view a_type)
             ToMask(RuleDependency::kEquipment);
     }
     if (a_type == "Weapon" || a_type == "Armor" || a_type == "Ammo" ||
+        a_type == "Light" || a_type == "Gold" ||
+        a_type == "Leveled Item" ||
         a_type == "Potion" || a_type == "Ingredient" || a_type == "Scroll" ||
         a_type == "Book" || a_type == "Misc" || a_type == "SoulGem" ||
         a_type == "Key") {
         return ToMask(RuleDependency::kInventory) |
             ((a_type == "Weapon" || a_type == "Armor" ||
-                 a_type == "Ammo") ?
+                 a_type == "Ammo" || a_type == "Light") ?
                 ToMask(RuleDependency::kEquipment) :
                 ToMask(RuleDependency::kNone));
     }
@@ -508,6 +549,7 @@ namespace {
             GetInt(value, "comparison", 0), 0, 3));
         p.minimumValue = GetFloat(value, "minimumValue", 0.0f);
         p.maximumValue = GetFloat(value, "maximumValue", 0.0f);
+        NormalizeNumericValueFilter(p);
         return p;
     }
 
@@ -647,6 +689,9 @@ namespace {
         AddInt(obj, alloc, "c", p.targetChild);
         AddInt(obj, alloc, "cb", static_cast<int>(p.combatState));
         AddInt(obj, alloc, "fs", static_cast<int>(p.followerState));
+        AddInt(obj, alloc, "as", static_cast<int>(p.actorScope));
+        AddInt(obj, alloc, "ss", static_cast<int>(p.summonedState));
+        AddInt(obj, alloc, "hs", static_cast<int>(p.hostilityState));
         AddBool(obj, alloc, "ra", p.targetRequiresAll);
         AddBool(obj, alloc, "ex", p.isExclusive);
         obj.AddMember("tf", WriteFilterArray(p.targetFilters, alloc), alloc);
@@ -677,6 +722,9 @@ namespace {
         AddInt(obj, alloc, "t_child", p.targetChild);
         AddInt(obj, alloc, "combat_state", static_cast<int>(p.combatState));
         AddInt(obj, alloc, "follower_state", static_cast<int>(p.followerState));
+        AddInt(obj, alloc, "actor_scope", static_cast<int>(p.actorScope));
+        AddInt(obj, alloc, "summoned_state", static_cast<int>(p.summonedState));
+        AddInt(obj, alloc, "hostility_state", static_cast<int>(p.hostilityState));
         AddBool(obj, alloc, "t_reqAll", p.targetRequiresAll);
         obj.AddMember("t_filters", WriteFilterArray(p.targetFilters, alloc), alloc);
         obj.AddMember("groups", WriteRewardGroupArray(p.rewardGroups, alloc), alloc);
@@ -775,6 +823,27 @@ Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId
             j,
             "fs",
             GetInt(j, "followerState", GetInt(j, "follower_state", 0))),
+        0,
+        2));
+    p.actorScope = static_cast<RuleActorScope>(std::clamp(
+        GetInt(
+            j,
+            "as",
+            GetInt(j, "actorScope", GetInt(j, "actor_scope", 0))),
+        0,
+        2));
+    p.summonedState = static_cast<RuleSummonedState>(std::clamp(
+        GetInt(
+            j,
+            "ss",
+            GetInt(j, "summonedState", GetInt(j, "summoned_state", 0))),
+        0,
+        2));
+    p.hostilityState = static_cast<RuleHostilityState>(std::clamp(
+        GetInt(
+            j,
+            "hs",
+            GetInt(j, "hostilityState", GetInt(j, "hostility_state", 0))),
         0,
         2));
     p.targetRequiresAll = GetBool(j, "ra", GetBool(j, "targetRequiresAll", false));
@@ -913,16 +982,6 @@ bool ResolveIsHumanoid(RE::TESNPC* npc, RE::Actor* actor)
         }
     }
     return true;
-}
-
-int GetFilterValue(const std::vector<std::string>& tokens, int fallback)
-{
-    if (tokens.size() < 3) return fallback;
-    try {
-        return std::stoi(tokens[2]);
-    } catch (...) {
-        return fallback;
-    }
 }
 
 std::optional<float> ReadActorValue(
@@ -1211,6 +1270,51 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         }
     }
 
+    if (!isBlacklist &&
+        rule.actorScope != RuleActorScope::kBoth) {
+        const bool isPlayer = actor && actor->IsPlayerRef();
+        if ((rule.actorScope == RuleActorScope::kPlayerOnly &&
+                !isPlayer) ||
+            (rule.actorScope == RuleActorScope::kNPCOnly &&
+                isPlayer)) {
+            return false;
+        }
+    }
+
+    if (!isBlacklist &&
+        rule.summonedState != RuleSummonedState::kAny) {
+        if (!actor) {
+            return false;
+        }
+        const bool isSummoned = actor->IsSummoned();
+        if ((rule.summonedState ==
+                RuleSummonedState::kSummonedOnly &&
+                !isSummoned) ||
+            (rule.summonedState ==
+                RuleSummonedState::kExcludeSummoned &&
+                isSummoned)) {
+            return false;
+        }
+    }
+
+    if (!isBlacklist &&
+        rule.hostilityState != RuleHostilityState::kAny) {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!actor || !player) {
+            return false;
+        }
+        const bool isHostile =
+            actor != player && actor->IsHostileToActor(player);
+        if ((rule.hostilityState ==
+                RuleHostilityState::kHostileToPlayer &&
+                !isHostile) ||
+            (rule.hostilityState ==
+                RuleHostilityState::kFriendlyOrAlly &&
+                isHostile)) {
+            return false;
+        }
+    }
+
     if (filters.empty()) {
         // Na Blacklist, vazio significa "não bloqueia ninguém". No Target, significa "afeta todos".
         return !isBlacklist;
@@ -1326,8 +1430,6 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
             // resolved directly from Plugin|LocalFormID.
             fID = ResolvePluginFormID(filter.formIDStr);
         }
-        const auto filterValue = GetFilterValue(tokens, 1);
-
         if (filter.type == "NPC") {
             if (npc->GetFormID() == fID ||
                 (npc->baseTemplateForm && npc->baseTemplateForm->GetFormID() == fID) ||
@@ -1364,8 +1466,14 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         }
         else if (filter.type == "Faction Rank") {
             auto fact = RE::TESForm::LookupByID<RE::TESFaction>(fID);
-            if (actor && fact && actor->GetFactionRank(fact, actor->IsPlayer()) >= filterValue) {
-                match = true;
+            if (actor && fact && actor->IsInFaction(fact)) {
+                auto normalized = filter;
+                NormalizeNumericValueFilter(normalized);
+                match = MatchesNumericComparison(
+                    static_cast<float>(
+                        actor->GetFactionRank(
+                            fact, actor->IsPlayer())),
+                    normalized);
             }
         }
         else if (filter.type == "Perk") {
@@ -1413,13 +1521,23 @@ bool IsNPCMatchingTargets(RE::TESNPC* npc, const Rule& rule, bool isBlacklist, R
         }
         else if (filter.type == "Inventory Count") {
             auto item = RE::TESForm::LookupByID<RE::TESBoundObject>(fID);
-            if (actor && item && actor->GetInventoryCount(item) >= std::max(1, filterValue)) {
-                match = true;
+            if (actor && item) {
+                auto normalized = filter;
+                NormalizeNumericValueFilter(normalized);
+                match = MatchesNumericComparison(
+                    static_cast<float>(
+                        std::max(0, actor->GetInventoryCount(item))),
+                    normalized);
             }
         }
         else if (filter.type == "Gold") {
-            if (actor && actor->GetGoldAmount() >= std::max(0, filterValue)) {
-                match = true;
+            if (actor) {
+                auto normalized = filter;
+                NormalizeNumericValueFilter(normalized);
+                match = MatchesNumericComparison(
+                    static_cast<float>(
+                        std::max(0, actor->GetGoldAmount())),
+                    normalized);
             }
         }
         else if (filter.type == "Equipped Item") {
@@ -2415,6 +2533,24 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
             addDependency(rule, ToMask(RuleDependency::kFollower));
             _hasFollowerDependentRules =
                 _hasFollowerDependentRules || rule.isEnabled;
+        }
+        if (rule.actorScope != RuleActorScope::kBoth ||
+            rule.summonedState != RuleSummonedState::kAny) {
+            mask |= ToMask(RuleDependency::kStatic);
+            addDependency(rule, ToMask(RuleDependency::kStatic));
+        }
+        if (rule.hostilityState != RuleHostilityState::kAny) {
+            constexpr std::array hostilityDependencies{
+                RuleDependency::kCombat,
+                RuleDependency::kTag,
+                RuleDependency::kRelationship
+            };
+            for (const auto dependency : hostilityDependencies) {
+                const auto bit = ToMask(dependency);
+                mask |= bit;
+                addDependency(rule, bit);
+                _rulesWithUnresolvedDependency[bit].insert(rule.id);
+            }
         }
         if (rule.targetFilters.empty()) {
             _broadFullEvaluationRules.insert(rule.id);

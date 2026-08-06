@@ -24,6 +24,24 @@ enum class RuleFollowerState : std::uint8_t {
     kExcludeActive = 2
 };
 
+enum class RuleActorScope : std::uint8_t {
+    kBoth = 0,
+    kPlayerOnly = 1,
+    kNPCOnly = 2
+};
+
+enum class RuleSummonedState : std::uint8_t {
+    kAny = 0,
+    kSummonedOnly = 1,
+    kExcludeSummoned = 2
+};
+
+enum class RuleHostilityState : std::uint8_t {
+    kAny = 0,
+    kHostileToPlayer = 1,
+    kFriendlyOrAlly = 2
+};
+
 enum class ActorValueMode : std::uint8_t {
     kCurrent = 0,
     kPermanent = 1,
@@ -132,6 +150,8 @@ enum class EquippedCategoryFilter : int {
 RE::ActorValue ResolveActorValue(std::string_view a_name);
 bool IsMaximumActorValueSupported(RE::ActorValue a_actorValue);
 bool IsActorValueFilterValid(const BlacklistFilter& a_filter);
+bool IsNumericValueFilterType(std::string_view a_type);
+void NormalizeNumericValueFilter(BlacklistFilter& a_filter);
 
 
 struct Rule {
@@ -151,6 +171,9 @@ struct Rule {
     int targetChild = 0;     // 0: Both, 1: Only children, 2: Only non-children
     RuleCombatState combatState = RuleCombatState::kAny;
     RuleFollowerState followerState = RuleFollowerState::kAny;
+    RuleActorScope actorScope = RuleActorScope::kBoth;
+    RuleSummonedState summonedState = RuleSummonedState::kAny;
+    RuleHostilityState hostilityState = RuleHostilityState::kAny;
     bool targetRequiresAll = false;
     bool isExclusive = false;
     std::vector<BlacklistFilter> targetFilters; // Usando a mesma struct de filtro
@@ -178,6 +201,7 @@ struct RulePackage {
     std::string displayName;
     bool enabled = true;
     std::filesystem::path path;
+    int schemaVersion = 1;
 };
 
 enum class RuleDependency : std::uint32_t {

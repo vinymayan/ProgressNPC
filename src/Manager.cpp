@@ -56,6 +56,16 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     PopulateList<RE::ScrollItem>("Scroll");
     PopulateList<RE::TESObjectBOOK>("Book");
     PopulateList<RE::TESAmmo>("Ammo");
+    PopulateList<RE::TESObjectLIGH>(
+        "Light",
+        [](RE::TESObjectLIGH* light) {
+            return light && light->CanBeCarried();
+        });
+    PopulateList<RE::TESLevItem>(
+        "Leveled Item",
+        [](RE::TESLevItem* list) {
+            return list && !list->entries.empty();
+        });
     PopulateList<RE::TESObjectMISC>("Misc");
     auto& goldList = _dataStore["Gold"];
     goldList.clear();
@@ -71,7 +81,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     PopulateList<RE::TESKey>("Key");
     auto& inventoryItems = _dataStore["Inventory Item"];
     inventoryItems.clear();
-    for (const auto& typeName : { "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key" }) {
+    for (const auto& typeName : { "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Light", "Misc", "SoulGem", "Key" }) {
         const auto& source = _dataStore[typeName];
         for (auto item : source) {
             item.formType = "Inventory Item";
@@ -89,7 +99,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     logger::debug("Carregados {} itens do tipo {}", inventoryCountItems.size(), "Inventory Count");
     auto& equippedItems = _dataStore["Equipped Item"];
     equippedItems.clear();
-    for (const auto& typeName : { "Weapon", "Armor", "Ammo" }) {
+    for (const auto& typeName : { "Weapon", "Armor", "Ammo", "Light" }) {
         const auto& source = _dataStore[typeName];
         for (auto item : source) {
             item.formType = "Equipped Item";
@@ -201,6 +211,20 @@ void Manager::RefreshLists(std::string_view a_signatures) {
     if (includes("SCRL")) PopulateList<RE::ScrollItem>("Scroll");
     if (includes("BOOK")) PopulateList<RE::TESObjectBOOK>("Book");
     if (includes("AMMO")) PopulateList<RE::TESAmmo>("Ammo");
+    if (includes("LIGH") || includes("Light")) {
+        PopulateList<RE::TESObjectLIGH>(
+            "Light",
+            [](RE::TESObjectLIGH* light) {
+                return light && light->CanBeCarried();
+            });
+    }
+    if (includes("LVLI") || includes("Leveled Item")) {
+        PopulateList<RE::TESLevItem>(
+            "Leveled Item",
+            [](RE::TESLevItem* list) {
+                return list && !list->entries.empty();
+            });
+    }
     if (includes("MISC")) {
         PopulateList<RE::TESObjectMISC>("Misc");
         auto& gold = _dataStore["Gold"];
@@ -240,11 +264,12 @@ void Manager::RefreshLists(std::string_view a_signatures) {
     }
 
     const bool inventoryChanged = includes("WEAP") || includes("ARMO") || includes("ALCH") || includes("INGR") ||
-        includes("SCRL") || includes("BOOK") || includes("AMMO") || includes("MISC") || includes("SLGM") || includes("KEYM");
+        includes("SCRL") || includes("BOOK") || includes("AMMO") || includes("LIGH") || includes("Light") ||
+        includes("MISC") || includes("SLGM") || includes("KEYM");
     if (inventoryChanged) {
         auto& inventory = _dataStore["Inventory Item"];
         inventory.clear();
-        for (const auto& typeName : { "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Misc", "SoulGem", "Key" }) {
+        for (const auto& typeName : { "Weapon", "Armor", "Potion", "Ingredient", "Scroll", "Book", "Ammo", "Light", "Misc", "SoulGem", "Key" }) {
             for (auto item : _dataStore[typeName]) {
                 item.formType = "Inventory Item";
                 inventory.push_back(std::move(item));
@@ -257,10 +282,11 @@ void Manager::RefreshLists(std::string_view a_signatures) {
         RebuildEditorIDIndex("Inventory Count");
     }
 
-    if (includes("WEAP") || includes("ARMO") || includes("AMMO")) {
+    if (includes("WEAP") || includes("ARMO") || includes("AMMO") ||
+        includes("LIGH") || includes("Light")) {
         auto& equipped = _dataStore["Equipped Item"];
         equipped.clear();
-        for (const auto& typeName : { "Weapon", "Armor", "Ammo" }) {
+        for (const auto& typeName : { "Weapon", "Armor", "Ammo", "Light" }) {
             for (auto item : _dataStore[typeName]) {
                 item.formType = "Equipped Item";
                 equipped.push_back(std::move(item));
