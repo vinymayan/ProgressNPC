@@ -13,7 +13,8 @@ namespace DistributionCore
     enum class Domain : std::uint8_t
     {
         kEDF = 1u << 0,
-        kINLOS = 1u << 1
+        kINLOS = 1u << 1,
+        kWIYT = 1u << 2
     };
 
     using DomainMask = std::uint8_t;
@@ -24,7 +25,9 @@ namespace DistributionCore
     }
 
     constexpr DomainMask kAllDomains =
-        ToMask(Domain::kEDF) | ToMask(Domain::kINLOS);
+        ToMask(Domain::kEDF) |
+        ToMask(Domain::kINLOS) |
+        ToMask(Domain::kWIYT);
 
     enum class EventType : std::uint8_t
     {

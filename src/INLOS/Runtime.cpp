@@ -616,7 +616,10 @@ namespace INLOS
                     a_lootRule.trigger != a_trigger)) {
                 return false;
             }
-            auto* npc = a_subject ? a_subject->GetActorBase() : nullptr;
+            if (!a_subject || a_subject->IsPlayerRef()) {
+                return false;
+            }
+            auto* npc = a_subject->GetActorBase();
             if (!npc || !MatchesLevel(a_subject, rule)) {
                 return false;
             }
@@ -628,14 +631,6 @@ namespace INLOS
             }
             if (a_lootRule.destination == Destination::kPlayer &&
                 !ResolveConfiguredLootReceiver(a_instigator)) {
-                return false;
-            }
-            if (rule.actorScope == RuleActorScope::kPlayerOnly &&
-                !a_subject->IsPlayerRef()) {
-                return false;
-            }
-            if (rule.actorScope == RuleActorScope::kNPCOnly &&
-                a_subject->IsPlayerRef()) {
                 return false;
             }
             if (rule.targetGender != 0) {
@@ -667,17 +662,6 @@ namespace INLOS
                     (rule.summonedState ==
                         RuleSummonedState::kExcludeSummoned &&
                         summoned)) {
-                    return false;
-                }
-            }
-            if (rule.combatState != RuleCombatState::kAny) {
-                const auto inCombat = a_subject->IsInCombat();
-                if ((rule.combatState ==
-                        RuleCombatState::kInCombat &&
-                        !inCombat) ||
-                    (rule.combatState ==
-                        RuleCombatState::kOutOfCombat &&
-                        inCombat)) {
                     return false;
                 }
             }

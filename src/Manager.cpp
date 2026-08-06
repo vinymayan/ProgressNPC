@@ -30,6 +30,7 @@ void Manager::PopulateAllLists(bool forceRefresh) {
     logger::info("Iniciando escaneamento de FormTypes{}...", forceRefresh ? " (refresh forçado)" : "");
 
     PopulateList<RE::BGSKeyword>("Keyword");
+    PopulateList<RE::TESGlobal>("Global");
     PopulateList<RE::TESFaction>("Faction");
     auto& factionRankList = _dataStore["Faction Rank"];
     factionRankList.clear();
@@ -186,6 +187,7 @@ void Manager::RefreshLists(std::string_view a_signatures) {
     }
 
     if (includes("KYWD")) PopulateList<RE::BGSKeyword>("Keyword");
+    if (includes("GLOB")) PopulateList<RE::TESGlobal>("Global");
     if (includes("FACT")) {
         PopulateList<RE::TESFaction>("Faction");
         auto& factionRanks = _dataStore["Faction Rank"];

@@ -603,6 +603,11 @@ CREATE TABLE IF NOT EXISTS rewards(
                 sqlite3_column_int(rules.handle, 11));
             rule.actorScope = static_cast<RuleActorScope>(
                 sqlite3_column_int(rules.handle, 12));
+            // INLOS evaluates loot only for dead/defeated NPCs. Keep the
+            // legacy columns readable, but normalize obsolete conditions so
+            // invisible values from older packages cannot block a rule.
+            rule.combatState = RuleCombatState::kAny;
+            rule.actorScope = RuleActorScope::kNPCOnly;
             rule.summonedState = static_cast<RuleSummonedState>(
                 sqlite3_column_int(rules.handle, 13));
             rule.hostilityState = static_cast<RuleHostilityState>(
@@ -1098,6 +1103,8 @@ CREATE TABLE IF NOT EXISTS rewards(
                 std::string(a_packageID) :
                 std::string(kLocalPackageID);
         rule.criteria.name = "New Loot Rule";
+        rule.criteria.actorScope = RuleActorScope::kNPCOnly;
+        rule.criteria.combatState = RuleCombatState::kAny;
         rule.criteria.version = 0;
         rule.criteria.lastSavedHash.clear();
         rule.criteria.rewardGroups.push_back(

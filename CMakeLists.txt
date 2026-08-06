@@ -47,11 +47,19 @@ file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/INLOS/*.cpp")
 file(
     GLOB_RECURSE
+    WIYT_SOURCES
+    CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/WIYT/*.cpp")
+list(APPEND WIYT_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/INLOS/NewSkillMenu.cpp")
+file(
+    GLOB_RECURSE
     EDF_SOURCES
     CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 list(FILTER EDF_SOURCES EXCLUDE REGEX "/src/DistributionCore/")
 list(FILTER EDF_SOURCES EXCLUDE REGEX "/src/INLOS/")
+list(FILTER EDF_SOURCES EXCLUDE REGEX "/src/WIYT/")
 list(FILTER EDF_SOURCES EXCLUDE REGEX "/src/Manager\\.cpp$")
 
 file(
@@ -141,9 +149,41 @@ target_link_libraries(
     unofficial::sqlite3::sqlite3)
 target_compile_definitions(INLOS PRIVATE INLOS_PLUGIN)
 
+add_commonlibsse_plugin(
+    WIYT
+    NAME "WIYT"
+    AUTHOR "${AUTHOR_NAME}"
+    VERSION "0.1.0.0"
+    SOURCES
+        ${WIYT_SOURCES})
+target_compile_features(WIYT PRIVATE cxx_std_23)
+target_precompile_headers(
+    WIYT
+    PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/PCH.h")
+target_include_directories(
+    WIYT
+    PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CLIB_UTIL_INCLUDE_DIRS}"
+    "${CLIB_UTILS_QTR_INCLUDE_DIRS}"
+    "${SKSE_MCP_INCLUDE_DIRS}")
+target_link_libraries(
+    WIYT
+    PRIVATE
+    DistributionRulesCore
+    miniz::miniz
+    unofficial::sqlite3::sqlite3)
+target_compile_definitions(WIYT PRIVATE WIYT_PLUGIN)
+
 source_group(
     TREE "${CMAKE_CURRENT_SOURCE_DIR}"
-    FILES ${PROJECT_HEADERS} ${EDF_SOURCES} ${CORE_SOURCES} ${INLOS_SOURCES})
+    FILES
+        ${PROJECT_HEADERS}
+        ${EDF_SOURCES}
+        ${CORE_SOURCES}
+        ${INLOS_SOURCES}
+        ${WIYT_SOURCES})
 
 set(wildlander_output false)
 set(steam_owrt_output false)
@@ -161,6 +201,14 @@ automaticGameFolderOutput(
 automaticGameFolderOutput(
     INLOS
     "INLOS"
+    wildlander_output
+    steam_owrt_output
+    steam_mods_output
+    lorerim_mods_output
+    lorerim3_mods_output)
+automaticGameFolderOutput(
+    WIYT
+    "WIYT"
     wildlander_output
     steam_owrt_output
     steam_mods_output

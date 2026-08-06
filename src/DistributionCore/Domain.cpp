@@ -134,7 +134,8 @@ namespace DistributionCore
                     ToMask(TypeCapability::kNumeric) });
             RewardRegistry().Register(
                 { "Skill Experience", "Vanilla Skill Experience",
-                    ToMask(Domain::kINLOS),
+                    ToMask(Domain::kINLOS) |
+                        ToMask(Domain::kWIYT),
                     ToMask(TypeCapability::kOneShotOnly) |
                     ToMask(TypeCapability::kNumeric) });
             for (const auto* type : {
@@ -143,7 +144,8 @@ namespace DistributionCore
                      "NSM Perk Points" }) {
                 RewardRegistry().Register(
                     { type, type,
-                        ToMask(Domain::kINLOS),
+                        ToMask(Domain::kINLOS) |
+                            ToMask(Domain::kWIYT),
                         ToMask(
                             TypeCapability::kOneShotOnly) |
                             ToMask(

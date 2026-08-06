@@ -1503,18 +1503,6 @@ namespace INLOS::UI
             }
 
             if (!a_blacklist) {
-                ImGuiMCP::TextUnformatted("Actor Scope:");
-                ImGuiMCP::SameLine();
-                ImGuiMCP::SetNextItemWidth(170.0f);
-                EnumCombo(
-                    "##ActorScope",
-                    rule.actorScope,
-                    {
-                        { RuleActorScope::kBoth, "Both" },
-                        { RuleActorScope::kPlayerOnly, "Player Only" },
-                        { RuleActorScope::kNPCOnly, "NPCs Only" }
-                    });
-                ImGuiMCP::SameLine();
                 ImGuiMCP::TextUnformatted("Summoned Status:");
                 ImGuiMCP::SameLine();
                 ImGuiMCP::SetNextItemWidth(190.0f);
@@ -1539,18 +1527,6 @@ namespace INLOS::UI
                         { RuleHostilityState::kFriendlyOrAlly, "Friendly / Ally" }
                     });
 
-                ImGuiMCP::TextUnformatted("Combat State:");
-                ImGuiMCP::SameLine();
-                ImGuiMCP::SetNextItemWidth(180.0f);
-                EnumCombo(
-                    "##Combat",
-                    rule.combatState,
-                    {
-                        { RuleCombatState::kAny, "Both" },
-                        { RuleCombatState::kInCombat, "In Combat" },
-                        { RuleCombatState::kOutOfCombat, "Out of Combat" }
-                    });
-                ImGuiMCP::SameLine();
                 ImGuiMCP::TextUnformatted("Follower Status:");
                 ImGuiMCP::SameLine();
                 ImGuiMCP::SetNextItemWidth(220.0f);
@@ -1853,11 +1829,6 @@ namespace INLOS::UI
             Reward& a_reward,
             const std::string_view a_stateID)
         {
-            ImGuiMCP::SetNextItemWidth(-1.0f);
-            InputString(
-                "##NSMSkillID",
-                a_reward.editorID);
-
             const auto& skills =
                 NewSkillMenu::AvailableSkills();
             if (!skills.empty()) {
@@ -1872,8 +1843,10 @@ namespace INLOS::UI
                 ImGuiMCP::SetNextItemWidth(-1.0f);
                 DistributionCore::UI::
                     DrawSearchableCombo(
-                        "##KnownNSMSkill",
-                        "Known NSM Skills...",
+                        "##NSMSkillID",
+                        a_reward.editorID.empty() ?
+                            "Select Skill Tree..." :
+                            a_reward.editorID.c_str(),
                         a_stateID,
                         options,
                         a_reward.editorID,
@@ -1881,6 +1854,14 @@ namespace INLOS::UI
                             NewSkillMenu::
                                 InterfaceVersion()) << 32) |
                             skills.size());
+            }
+            else {
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                InputString(
+                    "##NSMSkillID",
+                    a_reward.editorID);
+                ImGuiMCP::TextDisabled(
+                    "Manual Skill ID (NSM API list unavailable)");
             }
             if (NewSkillMenu::HasSkill(
                     a_reward.editorID)) {
@@ -2430,14 +2411,6 @@ namespace INLOS::UI
             }
 
             EnumCombo(
-                "Actor Scope",
-                rule.actorScope,
-                {
-                    { RuleActorScope::kBoth, "Both" },
-                    { RuleActorScope::kPlayerOnly, "Player Only" },
-                    { RuleActorScope::kNPCOnly, "NPC Only" }
-                });
-            EnumCombo(
                 "Gender",
                 rule.targetGender,
                 {
@@ -2476,14 +2449,6 @@ namespace INLOS::UI
                     { RuleHostilityState::kAny, "Any" },
                     { RuleHostilityState::kHostileToPlayer, "Hostile" },
                     { RuleHostilityState::kFriendlyOrAlly, "Friendly / Ally" }
-                });
-            EnumCombo(
-                "Combat State",
-                rule.combatState,
-                {
-                    { RuleCombatState::kAny, "Any" },
-                    { RuleCombatState::kInCombat, "In Combat" },
-                    { RuleCombatState::kOutOfCombat, "Out of Combat" }
                 });
             EnumCombo(
                 "Follower Status",
