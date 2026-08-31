@@ -745,7 +745,7 @@ namespace INLOS::UI
             ImGuiMCP::TableSetupColumn(
                 "Type",
                 ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
-                130.0f);
+                180.0f);
             ImGuiMCP::TableSetupColumn(
                 "Plugin",
                 ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
@@ -753,7 +753,7 @@ namespace INLOS::UI
                 ImGuiMCP::TableSetupColumn(
                     "Qty",
                     ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
-                    60.0f);
+                    70.0f);
                 ImGuiMCP::TableSetupColumn(
                     "Chance",
                     ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
@@ -1260,7 +1260,7 @@ namespace INLOS::UI
                             "Type",
                             ImGuiMCP::
                                 ImGuiTableColumnFlags_WidthFixed,
-                            120.0f);
+                            170.0f);
                         ImGuiMCP::TableSetupColumn(
                             "Reward",
                             ImGuiMCP::
@@ -1273,7 +1273,7 @@ namespace INLOS::UI
                             "Qty",
                             ImGuiMCP::
                                 ImGuiTableColumnFlags_WidthFixed,
-                            65.0f);
+                            75.0f);
                         ImGuiMCP::TableSetupColumn(
                             "Chance",
                             ImGuiMCP::
@@ -1569,6 +1569,15 @@ namespace INLOS::UI
                         return a_filter.type ==
                             "Actor Value";
                     });
+            std::vector<std::size_t> actorValueIndices;
+            actorValueIndices.reserve(filters.size());
+            for (std::size_t index = 0;
+                 index < filters.size();
+                 ++index) {
+                if (filters[index].type == "Actor Value") {
+                    actorValueIndices.push_back(index);
+                }
+            }
             if (hasActorValues &&
                 ImGuiMCP::BeginTable(
                     a_blacklist ?
@@ -1612,13 +1621,22 @@ namespace INLOS::UI
                     75.0f);
                 ImGuiMCP::TableHeadersRow();
 
-                for (std::size_t index = 0;
-                     index < filters.size();
-                     ++index) {
+                static auto actorValueClipper =
+                    ImGuiMCP::ImGuiListClipperManager::Create();
+                ImGuiMCP::ImGuiListClipperManager::Begin(
+                    actorValueClipper,
+                    static_cast<int>(actorValueIndices.size()),
+                    -1.0f);
+                auto removedActorValue = false;
+                while (!removedActorValue &&
+                       ImGuiMCP::ImGuiListClipperManager::Step(
+                           actorValueClipper)) {
+                  for (auto visible = actorValueClipper->DisplayStart;
+                       visible < actorValueClipper->DisplayEnd;
+                       ++visible) {
+                    const auto index = actorValueIndices[
+                        static_cast<std::size_t>(visible)];
                     auto& filter = filters[index];
-                    if (filter.type != "Actor Value") {
-                        continue;
-                    }
                     ImGuiMCP::PushID(
                         static_cast<int>(index));
                     ImGuiMCP::TableNextRow();
@@ -1634,7 +1652,8 @@ namespace INLOS::UI
                             "##Known",
                             "Select...",
                             std::format(
-                                "INLOS.{}.ActorValue.{}",
+                                "INLOS.{}.{}.ActorValue.{}",
+                                rule.id,
                                 a_blacklist ?
                                     "Blacklist" :
                                     "Target",
@@ -1703,13 +1722,24 @@ namespace INLOS::UI
                         filters.erase(
                             filters.begin() + index);
                         ImGuiMCP::PopID();
+                        removedActorValue = true;
                         break;
                     }
                     ImGuiMCP::PopID();
+                  }
                 }
                 ImGuiMCP::EndTable();
             }
 
+            std::vector<std::size_t> regularFilterIndices;
+            regularFilterIndices.reserve(filters.size());
+            for (std::size_t index = 0;
+                 index < filters.size();
+                 ++index) {
+                if (filters[index].type != "Actor Value") {
+                    regularFilterIndices.push_back(index);
+                }
+            }
             if (ImGuiMCP::BeginTable(
                     a_blacklist ?
                         "BlacklistTable" :
@@ -1735,13 +1765,22 @@ namespace INLOS::UI
                     60.0f);
                 ImGuiMCP::TableHeadersRow();
 
-                for (std::size_t index = 0;
-                     index < filters.size();
-                     ++index) {
+                static auto filterClipper =
+                    ImGuiMCP::ImGuiListClipperManager::Create();
+                ImGuiMCP::ImGuiListClipperManager::Begin(
+                    filterClipper,
+                    static_cast<int>(regularFilterIndices.size()),
+                    -1.0f);
+                auto removedFilter = false;
+                while (!removedFilter &&
+                       ImGuiMCP::ImGuiListClipperManager::Step(
+                           filterClipper)) {
+                  for (auto visible = filterClipper->DisplayStart;
+                       visible < filterClipper->DisplayEnd;
+                       ++visible) {
+                    const auto index = regularFilterIndices[
+                        static_cast<std::size_t>(visible)];
                     auto& filter = filters[index];
-                    if (filter.type == "Actor Value") {
-                        continue;
-                    }
                     ImGuiMCP::PushID(
                         static_cast<int>(index));
                     ImGuiMCP::TableNextRow();
@@ -1817,9 +1856,11 @@ namespace INLOS::UI
                         filters.erase(
                             filters.begin() + index);
                         ImGuiMCP::PopID();
+                        removedFilter = true;
                         break;
                     }
                     ImGuiMCP::PopID();
+                  }
                 }
                 ImGuiMCP::EndTable();
             }
@@ -1831,6 +1872,10 @@ namespace INLOS::UI
         {
             const auto& skills =
                 NewSkillMenu::AvailableSkills();
+            ImGuiMCP::ImVec2 available;
+            ImGuiMCP::GetContentRegionAvail(&available);
+            ImGuiMCP::SetNextItemWidth(
+                std::max(120.0f, available.x - 95.0f));
             if (!skills.empty()) {
                 std::vector<
                     DistributionCore::UI::
@@ -1840,7 +1885,6 @@ namespace INLOS::UI
                 for (const auto& skill : skills) {
                     options.push_back({ skill, skill });
                 }
-                ImGuiMCP::SetNextItemWidth(-1.0f);
                 DistributionCore::UI::
                     DrawSearchableCombo(
                         "##NSMSkillID",
@@ -1856,14 +1900,60 @@ namespace INLOS::UI
                             skills.size());
             }
             else {
-                ImGuiMCP::SetNextItemWidth(-1.0f);
                 InputString(
                     "##NSMSkillID",
                     a_reward.editorID);
-                ImGuiMCP::TextDisabled(
-                    "Manual Skill ID (NSM API list unavailable)");
             }
+            ImGuiMCP::SameLine();
             if (NewSkillMenu::HasSkill(
+                    a_reward.editorID)) {
+                ImGuiMCP::TextColored(
+                    { 0.3f, 0.9f, 0.4f, 1.0f },
+                    "VALID");
+            }
+            else {
+                ImGuiMCP::TextColored(
+                    { 1.0f, 0.65f, 0.2f, 1.0f },
+                    "UNRESOLVED");
+            }
+        }
+
+        void DrawNSMResourceField(
+            Reward& a_reward,
+            const std::string_view a_stateID)
+        {
+            const auto& resources =
+                NewSkillMenu::AvailableResources();
+            ImGuiMCP::ImVec2 available;
+            ImGuiMCP::GetContentRegionAvail(&available);
+            ImGuiMCP::SetNextItemWidth(
+                std::max(120.0f, available.x - 95.0f));
+            if (!resources.empty()) {
+                std::vector<
+                    DistributionCore::UI::
+                        SearchableComboOption>
+                    options;
+                options.reserve(resources.size());
+                for (const auto& resource : resources) {
+                    options.push_back({ resource, resource });
+                }
+                DistributionCore::UI::DrawSearchableCombo(
+                    "##NSMResourceID",
+                    a_reward.editorID.empty() ?
+                        "Select Resource..." :
+                        a_reward.editorID.c_str(),
+                    a_stateID,
+                    options,
+                    a_reward.editorID,
+                    resources.size());
+            }
+            else {
+                InputString(
+                    "##NSMResourceID",
+                    a_reward.editorID);
+            }
+            ImGuiMCP::SameLine();
+            if (NewSkillMenu::HasResource(
                     a_reward.editorID)) {
                 ImGuiMCP::TextColored(
                     { 0.3f, 0.9f, 0.4f, 1.0f },
@@ -1927,15 +2017,8 @@ namespace INLOS::UI
             }
             ImGuiMCP::SameLine();
             if (NewSkillMenu::IsAvailable()) {
-                ImGuiMCP::TextDisabled(
-                    "NSM API v%u | %d skills",
-                    NewSkillMenu::InterfaceVersion(),
-                    static_cast<int>(
-                        NewSkillMenu::
-                            AvailableSkills().size()));
-                ImGuiMCP::SameLine();
                 if (ImGuiMCP::Button(
-                        "Refresh NSM Skills")) {
+                        "Refresh NSM Lists")) {
                     NewSkillMenu::RefreshSkills();
                 }
             }
@@ -1943,10 +2026,18 @@ namespace INLOS::UI
                 ImGuiMCP::TextDisabled(
                     "NSM unavailable");
             }
-            ImGuiMCP::TextDisabled(
-                "Progression rewards never go to the corpse. "
-                "They use the killer/defeater allowed by INLOS Loot Receivers. "
-                "General and vanilla skill XP require the receiver to be the Player.");
+            constexpr ImGuiMCP::ImVec4 progressionTextColor{
+                0.78f, 0.86f, 0.98f, 1.0f
+            };
+            ImGuiMCP::TextColored(
+                progressionTextColor,
+                "Progression rewards are applied directly and never go to the corpse.");
+            ImGuiMCP::TextColored(
+                progressionTextColor,
+                "The receiver is the killer or defeater allowed by INLOS Loot Receivers.");
+            ImGuiMCP::TextColored(
+                progressionTextColor,
+                "General experience and vanilla skill XP require the receiver to be the Player.");
             if (rule.isExclusive) {
                 const auto total = std::accumulate(
                     rule.rewardGroups.begin(),
@@ -1971,6 +2062,12 @@ namespace INLOS::UI
             }
             ImGuiMCP::Separator();
 
+            const auto drawRewardGroups =
+                ImGuiMCP::BeginChild(
+                    "##INLOSRewardGroupsScroll",
+                    { 0.0f, 0.0f },
+                    false);
+            if (drawRewardGroups) {
             for (std::size_t groupIndex = 0;
                  groupIndex < rule.rewardGroups.size();) {
                 auto& group =
@@ -2077,6 +2174,21 @@ namespace INLOS::UI
                         group.rewards.push_back(
                             std::move(reward));
                     }
+                    ImGuiMCP::SameLine();
+                    if (ImGuiMCP::Button(
+                            "+ NSM Resource")) {
+                        Reward reward;
+                        reward.typeReward =
+                            "NSM Resource";
+                        if (!NewSkillMenu::
+                                AvailableResources().empty()) {
+                            reward.editorID =
+                                NewSkillMenu::
+                                    AvailableResources().front();
+                        }
+                        group.rewards.push_back(
+                            std::move(reward));
+                    }
 
                     if (group.isExclusive) {
                         const auto total =
@@ -2116,14 +2228,14 @@ namespace INLOS::UI
                         ImGuiMCP::TableSetupColumn(
                             "Type",
                             ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
-                            100.0f);
+                            150.0f);
                         ImGuiMCP::TableSetupColumn(
                             "Reward",
                             ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
                         ImGuiMCP::TableSetupColumn(
                             "Qty",
                             ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
-                            60.0f);
+                            70.0f);
                         ImGuiMCP::TableSetupColumn(
                             "Chance",
                             ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
@@ -2134,10 +2246,21 @@ namespace INLOS::UI
                             40.0f);
                         ImGuiMCP::TableHeadersRow();
 
-                        for (std::size_t rewardIndex = 0;
-                             rewardIndex <
-                                 group.rewards.size();
-                             ++rewardIndex) {
+                        static auto rewardClipper =
+                            ImGuiMCP::ImGuiListClipperManager::Create();
+                        ImGuiMCP::ImGuiListClipperManager::Begin(
+                            rewardClipper,
+                            static_cast<int>(group.rewards.size()),
+                            -1.0f);
+                        auto removedReward = false;
+                        while (!removedReward &&
+                               ImGuiMCP::ImGuiListClipperManager::Step(
+                                   rewardClipper)) {
+                          for (auto visible = rewardClipper->DisplayStart;
+                               visible < rewardClipper->DisplayEnd;
+                               ++visible) {
+                            const auto rewardIndex =
+                                static_cast<std::size_t>(visible);
                             auto& reward =
                                 group.rewards[rewardIndex];
                             ImGuiMCP::PushID(
@@ -2162,20 +2285,31 @@ namespace INLOS::UI
                                 DrawNSMSkillField(
                                     reward,
                                     std::format(
-                                        "INLOS.NSM.{}.{}",
+                                        "INLOS.{}.NSM.{}.{}",
+                                        rule.id,
                                         groupIndex,
                                         rewardIndex));
                             }
                             else if (
                                 reward.typeReward ==
-                                "NSM Perk Points") {
-                                ImGuiMCP::TextUnformatted(
-                                    "Configured receiver");
+                                "NSM Resource") {
+                                DrawNSMResourceField(
+                                    reward,
+                                    std::format(
+                                        "INLOS.{}.NSMResource.{}.{}",
+                                        rule.id,
+                                        groupIndex,
+                                        rewardIndex));
                             }
                             else if (reward.typeReward ==
                                      "Experience") {
                                 ImGuiMCP::TextUnformatted(
                                     "INLOS Experience");
+                            }
+                            else if (reward.typeReward ==
+                                     "NSM Perk Points") {
+                                ImGuiMCP::TextUnformatted(
+                                    "Configured Loot Receiver");
                             }
                             else {
                                 const auto& list =
@@ -2229,9 +2363,11 @@ namespace INLOS::UI
                                     group.rewards.begin() +
                                     rewardIndex);
                                 ImGuiMCP::PopID();
+                                removedReward = true;
                                 break;
                             }
                             ImGuiMCP::PopID();
+                          }
                         }
                         ImGuiMCP::EndTable();
                     }
@@ -2248,6 +2384,8 @@ namespace INLOS::UI
                     ++groupIndex;
                 }
             }
+            }
+            ImGuiMCP::EndChild();
         }
 
         void DrawReward(Reward& a_reward, bool& a_remove)
@@ -2913,7 +3051,6 @@ namespace INLOS::UI
                         ImGuiMCP::PopStyleColor(
                             styleColors);
                     }
-                    g_activeRule = lootRule->criteria.id;
                     DrawEDFStyleRule(*lootRule);
                     if (ImGuiMCP::Button("Delete Rule")) {
                         const auto id =
@@ -2948,8 +3085,16 @@ namespace INLOS::UI
                 "Manage Targets",
                 &g_targetsOpen)) {
             if (activeRule) {
+                ImGuiMCP::PushID(
+                    activeRule->criteria.id.c_str());
+                ImGuiMCP::TextColored(
+                    { 0.78f, 0.86f, 0.98f, 1.0f },
+                    "Rule: %s",
+                    activeRule->criteria.name.c_str());
+                ImGuiMCP::Separator();
                 DrawEDFStyleFilterWorkspace(
                     *activeRule, false);
+                ImGuiMCP::PopID();
             }
             else {
                 g_targetsOpen = false;
@@ -2967,8 +3112,16 @@ namespace INLOS::UI
                 "Manage Blacklist",
                 &g_blacklistOpen)) {
             if (activeRule) {
+                ImGuiMCP::PushID(
+                    activeRule->criteria.id.c_str());
+                ImGuiMCP::TextColored(
+                    { 0.78f, 0.86f, 0.98f, 1.0f },
+                    "Rule: %s",
+                    activeRule->criteria.name.c_str());
+                ImGuiMCP::Separator();
                 DrawEDFStyleFilterWorkspace(
                     *activeRule, true);
+                ImGuiMCP::PopID();
             }
             else {
                 g_blacklistOpen = false;
@@ -2986,63 +3139,22 @@ namespace INLOS::UI
                 "Rewards",
                 &g_rewardsOpen)) {
             if (activeRule) {
+                ImGuiMCP::PushID(
+                    activeRule->criteria.id.c_str());
+                ImGuiMCP::TextColored(
+                    { 0.78f, 0.86f, 0.98f, 1.0f },
+                    "Rule: %s",
+                    activeRule->criteria.name.c_str());
+                ImGuiMCP::Separator();
                 DrawEDFStyleRewardWorkspace(
                     *activeRule);
+                ImGuiMCP::PopID();
             }
             else {
                 g_rewardsOpen = false;
             }
             ImGuiMCP::EndPopup();
         }
-    }
-
-    void RenderHistory()
-    {
-        ImGuiMCP::Text(
-            "INLOS Experience: %.2f",
-            State::GetSingleton()->GetExperience());
-        ImGuiMCP::Separator();
-        const auto actors =
-            State::GetSingleton()->GetLifecycleSnapshot();
-        ImGuiMCP::Text(
-            "Tracked encounters: %d",
-            static_cast<int>(actors.size()));
-        if (ImGuiMCP::BeginTable(
-                "INLOSEncounters",
-                5,
-                ImGuiMCP::ImGuiTableFlags_Borders |
-                    ImGuiMCP::ImGuiTableFlags_RowBg)) {
-            ImGuiMCP::TableSetupColumn("Actor");
-            ImGuiMCP::TableSetupColumn("Generation");
-            ImGuiMCP::TableSetupColumn("Death");
-            ImGuiMCP::TableSetupColumn("Defeat");
-            ImGuiMCP::TableSetupColumn("Rules");
-            ImGuiMCP::TableHeadersRow();
-            for (const auto& [actorID, state] : actors) {
-                ImGuiMCP::TableNextRow();
-                ImGuiMCP::TableSetColumnIndex(0);
-                ImGuiMCP::Text("%08X", actorID);
-                ImGuiMCP::TableSetColumnIndex(1);
-                ImGuiMCP::Text("%u", state.generation);
-                ImGuiMCP::TableSetColumnIndex(2);
-                ImGuiMCP::TextUnformatted(
-                    state.deathProcessed ? "Yes" : "No");
-                ImGuiMCP::TableSetColumnIndex(3);
-                ImGuiMCP::TextUnformatted(
-                    state.defeatProcessed ? "Yes" : "No");
-                ImGuiMCP::TableSetColumnIndex(4);
-                ImGuiMCP::Text(
-                    "%d",
-                    static_cast<int>(
-                        state.appliedRuleIDs.size()));
-            }
-            ImGuiMCP::EndTable();
-        }
-        ImGuiMCP::Separator();
-        ImGuiMCP::TextWrapped(
-            "Death and defeat rewards are serialized in the SKSE co-save. "
-            "A rule configured for both events is applied only once per "
-            "encounter.");
     }
 
     void RenderSettings()
@@ -3101,6 +3213,18 @@ namespace INLOS::UI
         ImGuiMCP::TextWrapped(
             "This setting controls rules whose destination is "
             "'Configured Loot Receiver'. Summons resolve to their owner.");
+        ImGuiMCP::Separator();
+        ImGuiMCP::TextUnformatted("Duplicate Spell and Perk Rewards");
+        ImGuiMCP::Checkbox(
+            "Give Spell Tome When Spell Is Already Known",
+            &settings->giveSpellTomeWhenKnown);
+        ImGuiMCP::Checkbox(
+            "Give Book of Perks When Perk Is Already Owned",
+            &settings->givePerkBookWhenOwned);
+        ImGuiMCP::TextWrapped(
+            "These options affect living loot receivers that already own "
+            "the reward. Loot sent to a corpse remains physical and uses "
+            "the corresponding book when one is available.");
         if (ImGuiMCP::Button("Save Settings")) {
             settings->Save();
         }
@@ -3124,18 +3248,16 @@ namespace INLOS::UI
             return;
         }
         LoadLanguage();
-        SKSEMenuFramework::SetSection(
-            GetLoc("menu.section", "INLOS"));
+        SKSEMenuFramework::SetSection("Distribution System");
         SKSEMenuFramework::AddSectionItem(
-            GetLoc("menu.loot_rules", "Loot Rules"),
+            std::format(
+                "INLOS/{}",
+                GetLoc("menu.loot_rules", "Loot Rules")),
             RenderRules);
         SKSEMenuFramework::AddSectionItem(
-            GetLoc(
-                "menu.processed_encounters",
-                "Processed Encounters"),
-            RenderHistory);
-        SKSEMenuFramework::AddSectionItem(
-            GetLoc("menu.settings", "Settings"),
+            std::format(
+                "INLOS/{}",
+                GetLoc("menu.settings", "Settings")),
             RenderSettings);
         logger::info("[INLOS] UI registered.");
     }

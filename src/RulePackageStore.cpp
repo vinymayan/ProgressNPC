@@ -18,7 +18,7 @@ namespace
 {
     namespace fs = std::filesystem;
 
-    constexpr int SCHEMA_VERSION = 2;
+    constexpr int SCHEMA_VERSION = 3;
     constexpr std::size_t MAX_HISTORY = 100;
     constexpr std::string_view LEGACY_RULES_DIR = "Data/Viny Mods/EDF/Rules";
     constexpr std::string_view LEGACY_SKSE_RULES_DIR = "Data/SKSE/Plugins/EDF/Rules";
@@ -370,6 +370,8 @@ namespace
                 "function_on_type INTEGER NOT NULL,"
                 "equip_contexts INTEGER NOT NULL CHECK(equip_contexts BETWEEN 1 AND 7),"
                 "persistent INTEGER NOT NULL CHECK(persistent IN(0,1)),"
+                "actor_value_name TEXT NOT NULL DEFAULT '',"
+                "actor_value_amount REAL NOT NULL DEFAULT 0,"
                 "PRIMARY KEY(rule_id,version,group_ordinal,reward_ordinal),"
                 "FOREIGN KEY(rule_id,version,group_ordinal) "
                 "REFERENCES reward_groups(rule_id,version,group_ordinal) ON DELETE CASCADE"
@@ -411,7 +413,13 @@ namespace
                 "INTEGER NOT NULL DEFAULT 0 CHECK(summoned_state IN(0,1,2))", context) ||
             !EnsureColumn(
                 db, "rule_versions", "hostility_state",
-                "INTEGER NOT NULL DEFAULT 0 CHECK(hostility_state IN(0,1,2))", context)) {
+                "INTEGER NOT NULL DEFAULT 0 CHECK(hostility_state IN(0,1,2))", context) ||
+            !EnsureColumn(
+                db, "rewards", "actor_value_name",
+                "TEXT NOT NULL DEFAULT ''", context) ||
+            !EnsureColumn(
+                db, "rewards", "actor_value_amount",
+                "REAL NOT NULL DEFAULT 0", context)) {
             return false;
         }
 
@@ -429,7 +437,7 @@ namespace
         }
         if (!Exec(
                 db,
-                "UPDATE metadata SET value='2' WHERE key='schema_version';",
+                "UPDATE metadata SET value='3' WHERE key='schema_version';",
                 context)) {
             return false;
         }
@@ -459,7 +467,7 @@ namespace
         readMetadata.handle = nullptr;
         sqlite3_finalize(insertMetadata.handle);
         insertMetadata.handle = nullptr;
-        if (!Exec(db, "PRAGMA user_version=2;", context) ||
+        if (!Exec(db, "PRAGMA user_version=3;", context) ||
             !Exec(db, "COMMIT;", context)) {
             return false;
         }
@@ -620,8 +628,9 @@ namespace
             !Prepare(db,
                 "INSERT INTO rewards("
                 "rule_id,version,group_ordinal,reward_ordinal,type_reward,form_id,editor_id,"
-                "amount,chance,function_on_type,equip_contexts,persistent"
-                ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12);",
+                "amount,chance,function_on_type,equip_contexts,persistent,"
+                "actor_value_name,actor_value_amount"
+                ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14);",
                 rewardStatement,
                 context)) {
             return false;
@@ -657,6 +666,10 @@ namespace
                 sqlite3_bind_int(rewardStatement.handle, 10, reward.functionOnType);
                 sqlite3_bind_int(rewardStatement.handle, 11, reward.equipContexts);
                 sqlite3_bind_int(rewardStatement.handle, 12, reward.isPersistent ? 1 : 0);
+                BindText(rewardStatement.handle, 13, reward.actorValueName);
+                sqlite3_bind_double(
+                    rewardStatement.handle, 14,
+                    reward.actorValueAmount);
                 if (sqlite3_step(rewardStatement.handle) != SQLITE_DONE) {
                     return false;
                 }
@@ -821,7 +834,8 @@ namespace
 
             SqliteStatement rewards;
             if (!Prepare(db,
-                    "SELECT type_reward,form_id,editor_id,amount,chance,function_on_type,equip_contexts,persistent "
+                    "SELECT type_reward,form_id,editor_id,amount,chance,function_on_type,equip_contexts,persistent,"
+                    "actor_value_name,actor_value_amount "
                     "FROM rewards WHERE rule_id=?1 AND version=?2 AND group_ordinal=?3 "
                     "ORDER BY reward_ordinal;",
                     rewards,
@@ -843,6 +857,9 @@ namespace
                     std::clamp(sqlite3_column_int(rewards.handle, 6), 1,
                         static_cast<int>(kAllEquipmentContexts)));
                 reward.isPersistent = sqlite3_column_int(rewards.handle, 7) != 0;
+                reward.actorValueName = ColumnText(rewards.handle, 8);
+                reward.actorValueAmount = static_cast<float>(
+                    sqlite3_column_double(rewards.handle, 9));
                 group.rewards.push_back(std::move(reward));
             }
             rule.rewardGroups.push_back(std::move(group));

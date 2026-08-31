@@ -13,7 +13,7 @@ namespace WIYT
     public:
         static constexpr std::string_view kLocalPackageID =
             "wiyt.local-titles";
-        static constexpr int kSchemaVersion = 1;
+        static constexpr int kSchemaVersion = 2;
 
         static Store* GetSingleton();
 

@@ -33,5 +33,7 @@ namespace INLOS
         bool preserveQuestItemsWhenDiscarding = true;
         LootRecipientMode lootRecipientMode =
             LootRecipientMode::kPlayerOnly;
+        bool giveSpellTomeWhenKnown = true;
+        bool givePerkBookWhenOwned = true;
     };
 }

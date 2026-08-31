@@ -16,6 +16,9 @@ namespace WIYT
         float baseline = 0.0f;
         float highest = 0.0f;
         bool baselineSet = false;
+        bool prerequisitesMet = true;
+        bool progressTargetReached = false;
+        bool waitingForPrerequisites = false;
         std::set<std::uint64_t> uniqueKeys;
     };
 
@@ -31,6 +34,7 @@ namespace WIYT
     {
         std::map<std::string, RequirementProgress, std::less<>>
             requirements;
+        float rawOverallProgress = 0.0f;
         float overallProgress = 0.0f;
         bool completed = false;
         bool rewardsSelected = false;
@@ -63,6 +67,10 @@ namespace WIYT
             const TitleDefinition& a_title,
             const Requirement& a_requirement,
             float a_value);
+        ProgressChange SetPrerequisiteState(
+            const TitleDefinition& a_title,
+            const Requirement& a_requirement,
+            bool a_met);
 
         std::optional<TitleProgress> GetTitleProgress(
             std::string_view a_titleID) const;

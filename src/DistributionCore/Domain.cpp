@@ -133,6 +133,10 @@ namespace DistributionCore
                     ToMask(TypeCapability::kOneShotOnly) |
                     ToMask(TypeCapability::kNumeric) });
             RewardRegistry().Register(
+                { "Actor Value", "Actor Value",
+                    ToMask(Domain::kEDF),
+                    ToMask(TypeCapability::kNumeric) });
+            RewardRegistry().Register(
                 { "Skill Experience", "Vanilla Skill Experience",
                     ToMask(Domain::kINLOS) |
                         ToMask(Domain::kWIYT),
@@ -140,8 +144,7 @@ namespace DistributionCore
                     ToMask(TypeCapability::kNumeric) });
             for (const auto* type : {
                      "NSM Skill Experience",
-                     "NSM Skill Bonus",
-                     "NSM Perk Points" }) {
+                     "NSM Skill Bonus" }) {
                 RewardRegistry().Register(
                     { type, type,
                         ToMask(Domain::kINLOS) |
@@ -151,6 +154,17 @@ namespace DistributionCore
                             ToMask(
                                 TypeCapability::kNumeric) });
             }
+            RewardRegistry().Register(
+                { "NSM Perk Points", "NSM Perk Points",
+                    ToMask(Domain::kINLOS) |
+                        ToMask(Domain::kWIYT),
+                    ToMask(TypeCapability::kOneShotOnly) |
+                        ToMask(TypeCapability::kNumeric) });
+            RewardRegistry().Register(
+                { "NSM Resource", "NSM Resource",
+                    ToMask(Domain::kINLOS),
+                    ToMask(TypeCapability::kOneShotOnly) |
+                        ToMask(TypeCapability::kNumeric) });
         });
     }
 

@@ -6,6 +6,5 @@ namespace INLOS::UI
 {
     void Register();
     void RenderRules();
-    void RenderHistory();
     void RenderSettings();
 }

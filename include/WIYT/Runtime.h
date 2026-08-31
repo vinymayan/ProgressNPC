@@ -27,6 +27,7 @@ namespace WIYT
         public RE::BSTEventSink<RE::TESActivateEvent>,
         public RE::BSTEventSink<RE::TESQuestStageEvent>,
         public RE::BSTEventSink<RE::TESHitEvent>,
+        public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
         public RE::BSTEventSink<RE::ItemCrafted::Event>,
         public RE::BSTEventSink<RE::LocationDiscovery::Event>,
         public RE::BSTEventSink<SKSE::ModCallbackEvent>
@@ -51,6 +52,9 @@ namespace WIYT
         RE::BSEventNotifyControl ProcessEvent(
             const RE::TESHitEvent* a_event,
             RE::BSTEventSource<RE::TESHitEvent>*) override;
+        RE::BSEventNotifyControl ProcessEvent(
+            const RE::MenuOpenCloseEvent* a_event,
+            RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
         RE::BSEventNotifyControl ProcessEvent(
             const RE::ItemCrafted::Event* a_event,
             RE::BSTEventSource<RE::ItemCrafted::Event>*) override;

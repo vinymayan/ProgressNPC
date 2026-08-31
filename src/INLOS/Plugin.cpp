@@ -15,6 +15,12 @@ namespace
             return;
         }
         if (a_message->type ==
+                SKSE::MessagingInterface::kPreLoadGame ||
+            a_message->type ==
+                SKSE::MessagingInterface::kNewGame) {
+            INLOS::State::GetSingleton()->Revert();
+        }
+        if (a_message->type ==
             SKSE::MessagingInterface::kPostLoad) {
             INLOS::NewSkillMenu::Initialize();
             return;
@@ -41,7 +47,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     SetupLog();
     SKSE::Init(a_skse);
     DistributionCore::RegisterBuiltInTypes();
-    INLOS::State::InstallSerialization();
     SKSE::GetMessagingInterface()->RegisterListener(
         OnINLOSMessage);
     logger::info("INLOS loaded.");

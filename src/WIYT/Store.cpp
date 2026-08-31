@@ -340,6 +340,9 @@ CREATE TABLE IF NOT EXISTS requirements(
     graph_variable_name TEXT NOT NULL,
     graph_variable_type INTEGER NOT NULL CHECK(graph_variable_type BETWEEN 0 AND 2),
     filters_require_all INTEGER NOT NULL CHECK(filters_require_all IN(0,1)),
+    prerequisite_mode INTEGER NOT NULL DEFAULT 0 CHECK(prerequisite_mode BETWEEN 0 AND 1),
+    allow_follower_actions INTEGER NOT NULL DEFAULT 1 CHECK(allow_follower_actions IN(0,1)),
+    allow_summon_actions INTEGER NOT NULL DEFAULT 1 CHECK(allow_summon_actions IN(0,1)),
     PRIMARY KEY(title_id, version, position),
     UNIQUE(title_id, version, requirement_id),
     FOREIGN KEY(title_id, version)
@@ -397,6 +400,88 @@ CREATE TABLE IF NOT EXISTS rewards(
         ON DELETE CASCADE
 );
 )sql";
+
+        bool MigratePackage(Package& a_package)
+        {
+            if (a_package.schemaVersion == Store::kSchemaVersion) {
+                return true;
+            }
+            if (a_package.schemaVersion != 1) {
+                logger::error(
+                    "[WIYT Store] Unsupported schema version {} in '{}'.",
+                    a_package.schemaVersion,
+                    a_package.path.string());
+                return false;
+            }
+            Database database;
+            if (!OpenDatabase(
+                    a_package.path / "package.db",
+                    database)) {
+                return false;
+            }
+            Statement currentVersion;
+            if (!Prepare(
+                    database.handle,
+                    "PRAGMA user_version",
+                    currentVersion,
+                    "read migration version") ||
+                sqlite3_step(currentVersion.handle) != SQLITE_ROW) {
+                return false;
+            }
+            const auto databaseVersion =
+                sqlite3_column_int(currentVersion.handle, 0);
+            sqlite3_finalize(currentVersion.handle);
+            currentVersion.handle = nullptr;
+            if (databaseVersion == Store::kSchemaVersion) {
+                a_package.schemaVersion = Store::kSchemaVersion;
+                return WriteManifest(a_package);
+            }
+            if (
+                !Exec(database.handle, "BEGIN IMMEDIATE", "begin v2 migration") ||
+                !Exec(
+                    database.handle,
+                    "ALTER TABLE requirements ADD COLUMN "
+                    "prerequisite_mode INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK(prerequisite_mode BETWEEN 0 AND 1)",
+                    "add prerequisite mode") ||
+                !Exec(
+                    database.handle,
+                    "ALTER TABLE requirements ADD COLUMN "
+                    "allow_follower_actions INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK(allow_follower_actions IN(0,1))",
+                    "add follower authorship") ||
+                !Exec(
+                    database.handle,
+                    "ALTER TABLE requirements ADD COLUMN "
+                    "allow_summon_actions INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK(allow_summon_actions IN(0,1))",
+                    "add summon authorship") ||
+                !Exec(
+                    database.handle,
+                    "UPDATE metadata SET value='2' "
+                    "WHERE key='schema_version'",
+                    "update schema metadata") ||
+                !Exec(
+                    database.handle,
+                    "PRAGMA user_version=2",
+                    "update user version") ||
+                !Exec(database.handle, "COMMIT", "commit v2 migration")) {
+                Exec(database.handle, "ROLLBACK", "rollback v2 migration");
+                return false;
+            }
+            a_package.schemaVersion = Store::kSchemaVersion;
+            if (!WriteManifest(a_package)) {
+                logger::error(
+                    "[WIYT Store] Database migrated but manifest update "
+                    "failed for '{}'.",
+                    a_package.path.string());
+                return false;
+            }
+            logger::info(
+                "[WIYT Store] Migrated package '{}' from schema 1 to 2.",
+                a_package.displayName);
+            return true;
+        }
 
         bool BindAndStepFilter(
             sqlite3_stmt* a_statement,
@@ -491,7 +576,7 @@ CREATE TABLE IF NOT EXISTS rewards(
         if (!Prepare(
                 database.handle,
                 "INSERT OR REPLACE INTO metadata(key,value) VALUES"
-                "('package_id',?1),('schema_version','1')",
+                "('package_id',?1),('schema_version','2')",
                 metadata,
                 "metadata")) {
             Exec(database.handle, "ROLLBACK", "rollback schema");
@@ -501,7 +586,7 @@ CREATE TABLE IF NOT EXISTS rewards(
         if (sqlite3_step(metadata.handle) != SQLITE_DONE ||
             !Exec(
                 database.handle,
-                "PRAGMA user_version=1",
+                "PRAGMA user_version=2",
                 "user version") ||
             !Exec(database.handle, "COMMIT", "commit schema")) {
             Exec(database.handle, "ROLLBACK", "rollback schema");
@@ -538,8 +623,11 @@ CREATE TABLE IF NOT EXISTS rewards(
                     entry.path() / "manifest.json",
                     package) &&
                 package.enabled &&
-                package.schemaVersion == kSchemaVersion) {
-                _packages.push_back(std::move(package));
+                package.schemaVersion > 0 &&
+                package.schemaVersion <= kSchemaVersion) {
+                if (MigratePackage(package)) {
+                    _packages.push_back(std::move(package));
+                }
             }
         }
         std::ranges::sort(
@@ -693,7 +781,9 @@ CREATE TABLE IF NOT EXISTS rewards(
                     "activity_type,tracking_mode,aggregation,target_amount,"
                     "statistic_name,reference_form_id,reference_editor_id,"
                     "graph_variable_name,graph_variable_type,"
-                    "filters_require_all FROM requirements "
+                    "filters_require_all,prerequisite_mode,"
+                    "allow_follower_actions,allow_summon_actions "
+                    "FROM requirements "
                     "WHERE title_id=?1 AND version=?2 ORDER BY position",
                     requirements,
                     "load requirements")) {
@@ -735,6 +825,13 @@ CREATE TABLE IF NOT EXISTS rewards(
                     sqlite3_column_int(requirements.handle, 12);
                 requirement.filtersRequireAll =
                     sqlite3_column_int(requirements.handle, 13) != 0;
+                requirement.prerequisiteMode =
+                    static_cast<PrerequisiteMode>(
+                        sqlite3_column_int(requirements.handle, 14));
+                requirement.allowFollowerActions =
+                    sqlite3_column_int(requirements.handle, 15) != 0;
+                requirement.allowSummonActions =
+                    sqlite3_column_int(requirements.handle, 16) != 0;
 
                 Statement filters;
                 if (!Prepare(
@@ -782,8 +879,8 @@ CREATE TABLE IF NOT EXISTS rewards(
                     filter.maximumValue = static_cast<float>(
                         sqlite3_column_double(filters.handle, 11));
                     switch (scope) {
-                    case FilterScope::kCreditedActor:
-                        requirement.creditedActorFilters.push_back(
+                    case FilterScope::kPlayerPrerequisite:
+                        requirement.playerPrerequisiteFilters.push_back(
                             std::move(filter));
                         break;
                     case FilterScope::kTargetActor:
@@ -950,8 +1047,14 @@ CREATE TABLE IF NOT EXISTS rewards(
         Statement requirementStatement;
         if (!Prepare(
                 database.handle,
-                "INSERT INTO requirements VALUES("
-                "?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                "INSERT INTO requirements("
+                "title_id,version,position,requirement_id,name,source_type,"
+                "activity_type,tracking_mode,aggregation,target_amount,"
+                "statistic_name,reference_form_id,reference_editor_id,"
+                "graph_variable_name,graph_variable_type,filters_require_all,"
+                "prerequisite_mode,allow_follower_actions,allow_summon_actions) "
+                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,"
+                "?15,?16,?17,?18,?19)",
                 requirementStatement,
                 "requirements")) {
             rollback();
@@ -1040,6 +1143,18 @@ CREATE TABLE IF NOT EXISTS rewards(
                 requirementStatement.handle,
                 16,
                 requirement.filtersRequireAll);
+            sqlite3_bind_int(
+                requirementStatement.handle,
+                17,
+                static_cast<int>(requirement.prerequisiteMode));
+            sqlite3_bind_int(
+                requirementStatement.handle,
+                18,
+                requirement.allowFollowerActions);
+            sqlite3_bind_int(
+                requirementStatement.handle,
+                19,
+                requirement.allowSummonActions);
             if (sqlite3_step(requirementStatement.handle) !=
                 SQLITE_DONE) {
                 rollback();
@@ -1065,8 +1180,8 @@ CREATE TABLE IF NOT EXISTS rewards(
                 return true;
             };
             if (!saveFilters(
-                    FilterScope::kCreditedActor,
-                    requirement.creditedActorFilters) ||
+                    FilterScope::kPlayerPrerequisite,
+                    requirement.playerPrerequisiteFilters) ||
                 !saveFilters(
                     FilterScope::kTargetActor,
                     requirement.targetActorFilters) ||

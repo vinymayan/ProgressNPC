@@ -317,12 +317,54 @@ namespace WIYT
                 std::ranges::any_of(a_filters, predicate);
         }
 
+        bool PlayerPrerequisitesMet(
+            const Requirement& a_requirement)
+        {
+            return MatchActorFilters(
+                RE::PlayerCharacter::GetSingleton(),
+                a_requirement.playerPrerequisiteFilters,
+                a_requirement.filtersRequireAll);
+        }
+
+        bool MatchesAuthorship(
+            const Requirement& a_requirement,
+            const ProgressEvent& a_event)
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player || a_event.creditedActor != player) {
+                return false;
+            }
+            auto* source = a_event.sourceActor;
+            if (!source || source->IsPlayerRef()) {
+                return true;
+            }
+            if (source->IsSummoned()) {
+                return a_requirement.allowSummonActions &&
+                    Settings::GetSingleton()->creditSummonActions &&
+                    ResolveSummonOwner(source) == player;
+            }
+            return a_requirement.allowFollowerActions &&
+                Settings::GetSingleton()->creditFollowerActions &&
+                IsActivePlayerFollower(source);
+        }
+
         bool MatchSourceFilter(
             RE::TESForm* a_source,
             const BlacklistFilter& a_filter)
         {
             if (!a_source) {
                 return false;
+            }
+            if (a_filter.type == "Source Plugin") {
+                const auto* file = a_source->GetFile(0);
+                const auto source = file ?
+                    std::string(file->GetFilename()) :
+                    std::string("Dynamic");
+                const auto& expected = a_filter.optionText.empty() ?
+                    a_filter.editorID :
+                    a_filter.optionText;
+                return _stricmp(
+                    source.c_str(), expected.c_str()) == 0;
             }
             const auto expected = ResolveFormID(
                 a_filter.type,
@@ -359,6 +401,95 @@ namespace WIYT
                 std::ranges::any_of(a_filters, predicate);
         }
 
+        bool MatchEnvironmentFilter(
+            const ProgressEvent& a_event,
+            const BlacklistFilter& a_filter)
+        {
+            const auto expected = ResolveFormID(
+                a_filter.type,
+                a_filter.editorID,
+                a_filter.formIDStr);
+            if (a_filter.type == "Cell Type") {
+                return a_event.cell &&
+                    (static_cast<CellTypeFilter>(a_filter.optionMode) ==
+                            CellTypeFilter::kInterior ?
+                        a_event.cell->IsInteriorCell() :
+                        !a_event.cell->IsInteriorCell());
+            }
+            if (expected == 0) {
+                return false;
+            }
+            if (a_filter.type == "Cell") {
+                return a_event.cell &&
+                    a_event.cell->GetFormID() == expected;
+            }
+            if (a_filter.type == "Location") {
+                for (auto* location = a_event.location;
+                     location;
+                     location = location->parentLoc) {
+                    if (location->GetFormID() == expected) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if (a_filter.type == "Location Keyword") {
+                auto* keyword =
+                    RE::TESForm::LookupByID<RE::BGSKeyword>(expected);
+                for (auto* location = a_event.location;
+                     keyword && location;
+                     location = location->parentLoc) {
+                    if (location->HasKeyword(keyword)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if (a_filter.type == "Worldspace") {
+                auto* actor = a_event.sourceActor ?
+                    a_event.sourceActor :
+                    a_event.creditedActor;
+                const auto* worldspace = actor ?
+                    actor->GetWorldspace() :
+                    nullptr;
+                return worldspace &&
+                    worldspace->GetFormID() == expected;
+            }
+            return false;
+        }
+
+        bool MatchEnvironmentFilters(
+            const ProgressEvent& a_event,
+            const std::vector<BlacklistFilter>& a_filters,
+            const bool a_requireAll)
+        {
+            if (a_filters.empty()) {
+                return true;
+            }
+            const auto predicate =
+                [&](const BlacklistFilter& a_filter) {
+                    return MatchEnvironmentFilter(a_event, a_filter);
+                };
+            return a_requireAll ?
+                std::ranges::all_of(a_filters, predicate) :
+                std::ranges::any_of(a_filters, predicate);
+        }
+
+        bool FiltersAreValidForScope(
+            const Requirement& a_requirement,
+            const FilterScope a_scope,
+            const std::vector<BlacklistFilter>& a_filters)
+        {
+            return std::ranges::all_of(
+                a_filters,
+                [&](const BlacklistFilter& a_filter) {
+                    return IsFilterAllowedForScope(
+                        a_scope,
+                        a_requirement.activity,
+                        a_filter.type);
+                });
+        }
+
         bool MatchesRequirement(
             const Requirement& a_requirement,
             const ProgressEvent& a_event)
@@ -380,10 +511,22 @@ namespace WIYT
                     a_event.sourceForm->GetFormID() != reference)) {
                 return false;
             }
-            return MatchActorFilters(
-                       a_event.creditedActor,
-                       a_requirement.creditedActorFilters,
-                       a_requirement.filtersRequireAll) &&
+            if (!MatchesAuthorship(a_requirement, a_event) ||
+                !FiltersAreValidForScope(
+                    a_requirement,
+                    FilterScope::kTargetActor,
+                    a_requirement.targetActorFilters) ||
+                !FiltersAreValidForScope(
+                    a_requirement,
+                    FilterScope::kSourceForm,
+                    a_requirement.sourceFormFilters) ||
+                !FiltersAreValidForScope(
+                    a_requirement,
+                    FilterScope::kEnvironment,
+                    a_requirement.environmentFilters)) {
+                return false;
+            }
+            return
                 MatchActorFilters(
                        a_event.targetActor,
                        a_requirement.targetActorFilters,
@@ -392,10 +535,8 @@ namespace WIYT
                        a_event.sourceForm,
                        a_requirement.sourceFormFilters,
                        a_requirement.filtersRequireAll) &&
-                MatchActorFilters(
-                       a_event.sourceActor ?
-                           a_event.sourceActor :
-                           a_event.creditedActor,
+                MatchEnvironmentFilters(
+                       a_event,
                        a_requirement.environmentFilters,
                        a_requirement.filtersRequireAll);
         }
@@ -613,6 +754,27 @@ namespace WIYT
             }
         }
 
+        bool PrepareRequirementProgress(
+            const TitleDefinition& a_title,
+            const Requirement& a_requirement)
+        {
+            const auto prerequisitesMet =
+                FiltersAreValidForScope(
+                    a_requirement,
+                    FilterScope::kPlayerPrerequisite,
+                    a_requirement.playerPrerequisiteFilters) &&
+                PlayerPrerequisitesMet(a_requirement);
+            HandleProgressChange(
+                a_title,
+                State::GetSingleton()->SetPrerequisiteState(
+                    a_title,
+                    a_requirement,
+                    prerequisitesMet));
+            return prerequisitesMet ||
+                a_requirement.prerequisiteMode ==
+                    PrerequisiteMode::kRequiredToComplete;
+        }
+
         void ApplyStatisticValue(
             const std::string_view a_name,
             const float a_value)
@@ -635,6 +797,10 @@ namespace WIYT
                         _stricmp(
                             requirement.statisticName.c_str(),
                             std::string(a_name).c_str()) != 0) {
+                        continue;
+                    }
+                    if (!PrepareRequirementProgress(
+                            title, requirement)) {
                         continue;
                     }
                     HandleProgressChange(
@@ -707,6 +873,10 @@ namespace WIYT
                         }
                     }
                     if (resolved) {
+                        if (!PrepareRequirementProgress(
+                                title, requirement)) {
+                            continue;
+                        }
                         HandleProgressChange(
                             title,
                             State::GetSingleton()->
@@ -1069,6 +1239,10 @@ namespace WIYT
                 !MatchesRequirement(*requirement, a_event)) {
                 continue;
             }
+            if (!PrepareRequirementProgress(
+                    *title, *requirement)) {
+                continue;
+            }
             HandleProgressChange(
                 *title,
                 State::GetSingleton()->AddEventProgress(
@@ -1081,6 +1255,18 @@ namespace WIYT
 
     void RefreshProgressSources(const bool a_force)
     {
+        for (const auto& title :
+             Store::GetSingleton()->Titles()) {
+            const auto progress =
+                State::GetSingleton()->GetTitleProgress(title.id);
+            if (!title.enabled ||
+                (progress && progress->completed)) {
+                continue;
+            }
+            for (const auto& requirement : title.requirements) {
+                PrepareRequirementProgress(title, requirement);
+            }
+        }
         RefreshGlobalAndGraphSources();
         const auto now = std::chrono::steady_clock::now();
         if (!a_force &&
@@ -1186,6 +1372,12 @@ namespace WIYT
                 RE::LocationDiscovery::GetEventSource()) {
             source->AddEventSink(GetSingleton());
         }
+        if (auto* ui = RE::UI::GetSingleton()) {
+            ui->AddEventSink(
+                static_cast<
+                    RE::BSTEventSink<RE::MenuOpenCloseEvent>*>(
+                        GetSingleton()));
+        }
         logger::info("[WIYT] Progress event sinks registered.");
     }
 
@@ -1206,14 +1398,27 @@ namespace WIYT
             nullptr;
         auto* credited = ResolveCreditedActor(killer);
         if (target && credited) {
+            RE::TESForm* sourceForm = nullptr;
+            if (killer) {
+                std::scoped_lock lock(g_runtimeLock);
+                const auto found = g_recentHitSources.find(
+                    DamagePairKey(
+                        killer->GetFormID(),
+                        target->GetFormID()));
+                if (found != g_recentHitSources.end()) {
+                    sourceForm = RE::TESForm::LookupByID(
+                        found->second.formID);
+                }
+            }
+            auto* contextActor = killer ? killer : target;
             ReportProgressEvent({
                 ActivityType::kActorKilled,
                 credited,
                 killer,
                 target,
-                target->GetActorBase(),
-                credited->GetParentCell(),
-                credited->GetCurrentLocation(),
+                sourceForm,
+                contextActor->GetParentCell(),
+                contextActor->GetCurrentLocation(),
                 1.0f,
                 (static_cast<std::uint64_t>(
                      target->GetFormID()) <<
@@ -1457,6 +1662,16 @@ namespace WIYT
     }
 
     RE::BSEventNotifyControl EventHandler::ProcessEvent(
+        const RE::MenuOpenCloseEvent* a_event,
+        RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
+    {
+        if (a_event && !a_event->opening) {
+            RefreshProgressSources(false);
+        }
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    RE::BSEventNotifyControl EventHandler::ProcessEvent(
         const RE::LocationDiscovery::Event* a_event,
         RE::BSTEventSource<RE::LocationDiscovery::Event>*)
     {
@@ -1543,14 +1758,17 @@ namespace WIYT
             }
             auto* credited = ResolveCreditedActor(instigator);
             if (target && credited) {
+                auto* contextActor = instigator ?
+                    instigator :
+                    target;
                 ReportProgressEvent({
                     ActivityType::kActorDefeated,
                     credited,
                     instigator,
                     target,
-                    target->GetActorBase(),
-                    credited->GetParentCell(),
-                    credited->GetCurrentLocation(),
+                    nullptr,
+                    contextActor->GetParentCell(),
+                    contextActor->GetCurrentLocation(),
                     1.0f,
                     (static_cast<std::uint64_t>(
                          target->GetFormID()) <<

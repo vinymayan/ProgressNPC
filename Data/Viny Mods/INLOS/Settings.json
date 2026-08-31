@@ -5,5 +5,7 @@
   "vanillaLootMode": 0,
   "followerVanillaLootToPlayer": false,
   "preserveQuestItemsWhenDiscarding": true,
-  "lootRecipientMode": 0
+  "lootRecipientMode": 0,
+  "giveSpellTomeWhenKnown": true,
+  "givePerkBookWhenOwned": true
 }

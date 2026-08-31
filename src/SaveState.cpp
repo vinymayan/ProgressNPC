@@ -117,7 +117,53 @@ namespace {
             append(std::to_string(a_reward.equipContexts));
         }
         append(a_reward.isPersistent ? "1" : "0");
+        if (a_reward.typeReward == "Actor Value") {
+            append(a_reward.actorValueName);
+            append(std::format(
+                "{:.9g}", a_reward.actorValueAmount));
+        }
         return key;
+    }
+
+    bool ModifyActorValueReward(
+        RE::Actor* a_actor,
+        const Reward& a_reward,
+        const float a_direction)
+    {
+        if (!a_actor || !IsActorValueRewardValid(a_reward)) {
+            if (a_reward.typeReward == "Actor Value") {
+                logger::warn(
+                    "[ActorValueReward] Invalid reward '{}' amount {} for actor {:08X}.",
+                    a_reward.actorValueName,
+                    a_reward.actorValueAmount,
+                    a_actor ? a_actor->GetFormID() : 0);
+            }
+            return false;
+        }
+        const auto actorValue =
+            ResolveActorValue(a_reward.actorValueName);
+        auto* owner = a_actor->AsActorValueOwner();
+        if (!owner || actorValue == RE::ActorValue::kNone) {
+            return false;
+        }
+
+        const auto delta = a_reward.actorValueAmount * a_direction;
+        owner->ModActorValue(
+            RE::ACTOR_VALUE_MODIFIERS::kPermanent,
+            actorValue,
+            delta);
+
+        RuleEvaluationDelta evaluation;
+        evaluation.mask = ToMask(RuleDependency::kActorValue);
+        evaluation.changedActorValues.insert(actorValue);
+        ScheduleRuleEvaluation(a_actor, std::move(evaluation));
+        logger::debug(
+            "[ActorValueReward] Modified '{}' by {:+.3f} on '{}' ({:08X}).",
+            a_reward.actorValueName,
+            delta,
+            a_actor->GetName(),
+            a_actor->GetFormID());
+        return true;
     }
 
     std::string BuildRewardOwnerKey(
@@ -2680,6 +2726,10 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
     for (const auto& group : a_rule.rewardGroups) {
         for (const auto& reward : group.rewards) {
             if (reward.isPersistent) continue;
+            if (reward.typeReward == "Actor Value") {
+                ModifyActorValueReward(a_actor, reward, -1.0f);
+                continue;
+            }
             auto [plugin, fID] = reward.ParseFormID();
             auto rewardForm = RE::TESForm::LookupByID(fID);
             if (!rewardForm) continue;
@@ -3099,6 +3149,10 @@ void ApplyRewardPhysical(
     int a_ruleVersion,
     std::uint64_t a_activationToken,
     const std::string& a_groupName) {
+    if (reward.typeReward == "Actor Value") {
+        ModifyActorValueReward(a_actor, reward, 1.0f);
+        return;
+    }
     auto [plugin, fID] = reward.ParseFormID();
     auto rewardForm = RE::TESForm::LookupByID(fID);
     if (!rewardForm) return;

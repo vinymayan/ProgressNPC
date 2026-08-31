@@ -52,10 +52,16 @@ namespace WIYT
 
     enum class FilterScope : std::uint8_t
     {
-        kCreditedActor = 0,
+        kPlayerPrerequisite = 0,
         kTargetActor = 1,
         kSourceForm = 2,
         kEnvironment = 3
+    };
+
+    enum class PrerequisiteMode : std::uint8_t
+    {
+        kRequiredToCount = 0,
+        kRequiredToComplete = 1
     };
 
     enum class EventProvenance : std::uint8_t
@@ -80,7 +86,11 @@ namespace WIYT
         std::string graphVariableName;
         int graphVariableType = 2;
         bool filtersRequireAll = true;
-        std::vector<BlacklistFilter> creditedActorFilters;
+        PrerequisiteMode prerequisiteMode =
+            PrerequisiteMode::kRequiredToCount;
+        bool allowFollowerActions = true;
+        bool allowSummonActions = true;
+        std::vector<BlacklistFilter> playerPrerequisiteFilters;
         std::vector<BlacklistFilter> targetActorFilters;
         std::vector<BlacklistFilter> sourceFormFilters;
         std::vector<BlacklistFilter> environmentFilters;
@@ -112,7 +122,7 @@ namespace WIYT
         std::string displayName;
         bool enabled = true;
         std::filesystem::path path;
-        int schemaVersion = 1;
+        int schemaVersion = 2;
     };
 
     struct ProgressEvent
@@ -134,8 +144,15 @@ namespace WIYT
         std::string_view a_titleName);
     [[nodiscard]] std::string RequirementFingerprint(
         const Requirement& a_requirement);
+    [[nodiscard]] std::string LegacyRequirementFingerprintV1(
+        const Requirement& a_requirement);
     [[nodiscard]] const char* ToString(ProgressSource a_value);
     [[nodiscard]] const char* ToString(ActivityType a_value);
     [[nodiscard]] const char* ToString(TrackingMode a_value);
     [[nodiscard]] const char* ToString(Aggregation a_value);
+    [[nodiscard]] const char* ToString(PrerequisiteMode a_value);
+    [[nodiscard]] bool IsFilterAllowedForScope(
+        FilterScope a_scope,
+        ActivityType a_activity,
+        std::string_view a_type);
 }

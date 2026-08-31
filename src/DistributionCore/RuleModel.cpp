@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <sstream>
 
 namespace
@@ -69,6 +70,15 @@ bool IsActorValueFilterValid(const BlacklistFilter& a_filter)
     return actorValue != RE::ActorValue::kNone &&
         (a_filter.actorValueMode != ActorValueMode::kMaximum ||
             IsMaximumActorValueSupported(actorValue));
+}
+
+bool IsActorValueRewardValid(const Reward& a_reward)
+{
+    return a_reward.typeReward != "Actor Value" ||
+        (ResolveActorValue(a_reward.actorValueName) !=
+             RE::ActorValue::kNone &&
+         std::isfinite(a_reward.actorValueAmount) &&
+         a_reward.actorValueAmount != 0.0f);
 }
 
 bool IsNumericValueFilterType(const std::string_view a_type)

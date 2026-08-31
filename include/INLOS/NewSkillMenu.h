@@ -16,6 +16,8 @@ namespace INLOS::NewSkillMenu
     bool RefreshSkills();
     const std::vector<std::string>& AvailableSkills();
     bool HasSkill(std::string_view a_skillID);
+    const std::vector<std::string>& AvailableResources();
+    bool HasResource(std::string_view a_resourceID);
 
     bool AddSkillExperience(
         RE::FormID a_actorID,
@@ -28,4 +30,8 @@ namespace INLOS::NewSkillMenu
     bool AddPerkPoints(
         RE::FormID a_actorID,
         int a_amount);
+    bool AddResource(
+        RE::FormID a_actorID,
+        std::string_view a_resourceID,
+        float a_amount);
 }

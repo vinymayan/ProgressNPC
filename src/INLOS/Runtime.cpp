@@ -17,35 +17,6 @@ namespace INLOS
 {
     namespace
     {
-        constexpr std::uint32_t kSerializationID = 0x4F4C4E49;  // INLO
-        constexpr std::uint32_t kStateRecord = 0x54415453;       // STAT
-        constexpr std::uint32_t kSerializationVersion = 1;
-
-        bool WriteString(
-            SKSE::SerializationInterface* a_interface,
-            const std::string_view a_value)
-        {
-            const auto size = static_cast<std::uint32_t>(a_value.size());
-            return a_interface->WriteRecordData(size) &&
-                (size == 0 ||
-                    a_interface->WriteRecordData(
-                        a_value.data(), size));
-        }
-
-        bool ReadString(
-            SKSE::SerializationInterface* a_interface,
-            std::string& a_value)
-        {
-            std::uint32_t size = 0;
-            if (!a_interface->ReadRecordData(size) ||
-                size > 1024 * 1024) {
-                return false;
-            }
-            a_value.resize(size);
-            return size == 0 ||
-                a_interface->ReadRecordData(a_value.data(), size);
-        }
-
         RE::FormID ResolveFormID(
             const std::string_view a_editorID,
             const std::string_view a_reference)
@@ -947,7 +918,8 @@ namespace INLOS
                 a_reward.typeReward ==
                     "NSM Skill Experience" ||
                 a_reward.typeReward == "NSM Skill Bonus" ||
-                a_reward.typeReward == "NSM Perk Points";
+                a_reward.typeReward == "NSM Perk Points" ||
+                a_reward.typeReward == "NSM Resource";
             auto* progressionReceiver =
                 nonPhysicalReward ?
                     ResolveConfiguredLootReceiver(a_instigator) :
@@ -1041,6 +1013,20 @@ namespace INLOS
                 }
                 return;
             }
+            if (a_reward.typeReward == "NSM Resource") {
+                if (!NewSkillMenu::AddResource(
+                        progressionReceiver->GetFormID(),
+                        a_reward.editorID,
+                        static_cast<float>(a_reward.amount))) {
+                    logger::warn(
+                        "[INLOS] Could not add {} to NSM resource '{}' "
+                        "for actor {:08X}.",
+                        a_reward.amount,
+                        a_reward.editorID,
+                        progressionReceiver->GetFormID());
+                }
+                return;
+            }
 
             auto* destination =
                 a_rule.destination == Destination::kPlayer ?
@@ -1085,6 +1071,11 @@ namespace INLOS
                     destination->AddSpell(spell);
                     return;
                 }
+                if (!tangibleLoot &&
+                    !Settings::GetSingleton()->
+                        giveSpellTomeWhenKnown) {
+                    return;
+                }
                 if (!GiveBook(
                         destination,
                         FindSpellTome(spell),
@@ -1107,6 +1098,11 @@ namespace INLOS
                 if (!tangibleLoot &&
                     !destination->HasPerk(perk)) {
                     destination->AddPerk(perk);
+                    return;
+                }
+                if (!tangibleLoot &&
+                    !Settings::GetSingleton()->
+                        givePerkBookWhenOwned) {
                     return;
                 }
                 const auto editorID =
@@ -1281,137 +1277,6 @@ namespace INLOS
     {
         std::scoped_lock lock(_lock);
         return _experience;
-    }
-
-    std::vector<std::pair<RE::FormID, LifecycleState>>
-    State::GetLifecycleSnapshot() const
-    {
-        std::scoped_lock lock(_lock);
-        std::vector<std::pair<RE::FormID, LifecycleState>> result;
-        result.reserve(_actors.size());
-        for (const auto& entry : _actors) {
-            result.push_back(entry);
-        }
-        std::ranges::sort(
-            result,
-            {},
-            &std::pair<RE::FormID, LifecycleState>::first);
-        return result;
-    }
-
-    bool State::Save(
-        SKSE::SerializationInterface* a_interface) const
-    {
-        std::scoped_lock lock(_lock);
-        if (!a_interface->OpenRecord(
-                kStateRecord, kSerializationVersion) ||
-            !a_interface->WriteRecordData(_experience)) {
-            return false;
-        }
-        const auto count = static_cast<std::uint32_t>(_actors.size());
-        if (!a_interface->WriteRecordData(count)) {
-            return false;
-        }
-        for (const auto& [actorID, state] : _actors) {
-            const std::uint8_t flags =
-                (state.dead ? 1u : 0u) |
-                (state.deathProcessed ? 2u : 0u) |
-                (state.defeatProcessed ? 4u : 0u);
-            const auto ruleCount = static_cast<std::uint32_t>(
-                state.appliedRuleIDs.size());
-            if (!a_interface->WriteRecordData(actorID) ||
-                !a_interface->WriteRecordData(state.generation) ||
-                !a_interface->WriteRecordData(flags) ||
-                !a_interface->WriteRecordData(ruleCount)) {
-                return false;
-            }
-            for (const auto& ruleID : state.appliedRuleIDs) {
-                if (!WriteString(a_interface, ruleID)) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    bool State::Load(
-        SKSE::SerializationInterface* a_interface,
-        const std::uint32_t a_version)
-    {
-        if (a_version != kSerializationVersion) {
-            return false;
-        }
-        std::unordered_map<RE::FormID, LifecycleState> loaded;
-        float experience = 0.0f;
-        std::uint32_t count = 0;
-        if (!a_interface->ReadRecordData(experience) ||
-            !a_interface->ReadRecordData(count) ||
-            count > 1000000) {
-            return false;
-        }
-        for (std::uint32_t index = 0; index < count; ++index) {
-            RE::FormID actorID = 0;
-            LifecycleState state;
-            std::uint8_t flags = 0;
-            std::uint32_t ruleCount = 0;
-            if (!a_interface->ReadRecordData(actorID) ||
-                !a_interface->ReadRecordData(state.generation) ||
-                !a_interface->ReadRecordData(flags) ||
-                !a_interface->ReadRecordData(ruleCount) ||
-                ruleCount > 100000) {
-                return false;
-            }
-            state.dead = (flags & 1u) != 0;
-            state.deathProcessed = (flags & 2u) != 0;
-            state.defeatProcessed = (flags & 4u) != 0;
-            for (std::uint32_t ruleIndex = 0;
-                 ruleIndex < ruleCount;
-                 ++ruleIndex) {
-                std::string ruleID;
-                if (!ReadString(a_interface, ruleID)) {
-                    return false;
-                }
-                state.appliedRuleIDs.insert(std::move(ruleID));
-            }
-            RE::FormID resolved = actorID;
-            if (a_interface->ResolveFormID(actorID, resolved)) {
-                loaded.emplace(resolved, std::move(state));
-            }
-        }
-        std::scoped_lock lock(_lock);
-        _actors = std::move(loaded);
-        _experience = std::max(0.0f, experience);
-        return true;
-    }
-
-    void State::InstallSerialization()
-    {
-        auto* serialization = SKSE::GetSerializationInterface();
-        serialization->SetUniqueID(kSerializationID);
-        serialization->SetSaveCallback(
-            [](SKSE::SerializationInterface* a_interface) {
-                if (!GetSingleton()->Save(a_interface)) {
-                    logger::error("[INLOS] Failed to save state.");
-                }
-            });
-        serialization->SetLoadCallback(
-            [](SKSE::SerializationInterface* a_interface) {
-                GetSingleton()->Revert();
-                std::uint32_t type = 0;
-                std::uint32_t version = 0;
-                std::uint32_t length = 0;
-                while (a_interface->GetNextRecordInfo(
-                    type, version, length)) {
-                    if (type == kStateRecord &&
-                        !GetSingleton()->Load(a_interface, version)) {
-                        logger::error("[INLOS] Failed to load state.");
-                    }
-                }
-            });
-        serialization->SetRevertCallback(
-            [](SKSE::SerializationInterface*) {
-                GetSingleton()->Revert();
-            });
     }
 
     DeathEventHandler* DeathEventHandler::GetSingleton()

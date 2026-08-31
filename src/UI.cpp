@@ -1730,6 +1730,145 @@ namespace SPIDUI {
         }
     }
 
+    void RenderActorValueRewards(
+        RewardGroup& a_group,
+        const std::size_t a_groupIndex)
+    {
+        const auto hasActorValueRewards = std::ranges::any_of(
+            a_group.rewards,
+            [](const Reward& a_reward) {
+                return a_reward.typeReward == "Actor Value";
+            });
+        if (!hasActorValueRewards) {
+            return;
+        }
+
+        const auto tableFlags =
+            ImGuiMCP::ImGuiTableFlags_Borders |
+            ImGuiMCP::ImGuiTableFlags_RowBg |
+            ImGuiMCP::ImGuiTableFlags_Resizable;
+        if (!ImGuiMCP::BeginTable(
+                "ActorValueRewards", 7, tableFlags)) {
+            return;
+        }
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.actor_value", "Actor Value"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.known_values", "Known Values"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 170.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.value", "Value"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.chance", "Chance"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.persist", "Persist"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.status", "Status"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.action", "Action"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 55.0f);
+        ImGuiMCP::TableHeadersRow();
+
+        const auto& actorValueOptions = GetActorValueOptions();
+        for (std::size_t rewardIndex = 0;
+             rewardIndex < a_group.rewards.size();
+             ++rewardIndex) {
+            auto& reward = a_group.rewards[rewardIndex];
+            if (reward.typeReward != "Actor Value") {
+                continue;
+            }
+
+            ImGuiMCP::PushID(static_cast<int>(rewardIndex));
+            ImGuiMCP::TableNextRow();
+            ImGuiMCP::TableSetColumnIndex(0);
+            char nameBuffer[128]{};
+            strncpy_s(
+                nameBuffer,
+                reward.actorValueName.c_str(),
+                _TRUNCATE);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            if (ImGuiMCP::InputText(
+                    "##ActorValueRewardName",
+                    nameBuffer,
+                    sizeof(nameBuffer))) {
+                reward.actorValueName = nameBuffer;
+            }
+
+            ImGuiMCP::TableSetColumnIndex(1);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            DrawLocalizedSearchableCombo(
+                "##KnownActorValueReward",
+                GetLoc("auto.select", "Select..."),
+                std::format(
+                    "actor-value-reward-{}-{}",
+                    a_groupIndex,
+                    rewardIndex),
+                actorValueOptions,
+                reward.actorValueName,
+                1);
+
+            ImGuiMCP::TableSetColumnIndex(2);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            ImGuiMCP::InputFloat(
+                "##ActorValueRewardAmount",
+                &reward.actorValueAmount,
+                0.0f,
+                0.0f,
+                "%+.2f");
+
+            ImGuiMCP::TableSetColumnIndex(3);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            if (ImGuiMCP::InputFloat(
+                    "##ActorValueRewardChance",
+                    &reward.chanceReward,
+                    0.0f,
+                    0.0f,
+                    "%.1f")) {
+                reward.chanceReward = std::clamp(
+                    reward.chanceReward, 0.0f, 100.0f);
+            }
+
+            ImGuiMCP::TableSetColumnIndex(4);
+            ImGuiMCP::Checkbox(
+                "##ActorValueRewardPersistent",
+                &reward.isPersistent);
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(GetLoc(
+                    "auto.actor_value_reward_persistent_help",
+                    "If checked, the modifier won't be removed when the rule becomes invalid."));
+            }
+
+            ImGuiMCP::TableSetColumnIndex(5);
+            if (IsActorValueRewardValid(reward)) {
+                ImGuiMCP::TextColored(
+                    { 0.3f, 0.9f, 0.4f, 1.0f },
+                    "%s",
+                    GetLoc("auto.valid", "VALID"));
+            }
+            else {
+                ImGuiMCP::TextColored(
+                    { 1.0f, 0.25f, 0.25f, 1.0f },
+                    "%s",
+                    GetLoc("auto.invalid", "INVALID"));
+            }
+
+            ImGuiMCP::TableSetColumnIndex(6);
+            if (ImGuiMCP::Button("X##ActorValueReward")) {
+                a_group.rewards.erase(
+                    a_group.rewards.begin() + rewardIndex);
+                ImGuiMCP::PopID();
+                break;
+            }
+            ImGuiMCP::PopID();
+        }
+        ImGuiMCP::EndTable();
+    }
+
     // --- NOVO: Gerenciador de Grupos de Recompensa ---
     void RenderRewardGroups(Rule& rule) {
         if (ImGuiMCP::Button(GetLoc("auto.back", "Back"))) openRewardsModal = false;
@@ -1830,6 +1969,17 @@ namespace SPIDUI {
                     activeGroupIdx = static_cast<int>(gIdx);
                 }
                 ImGuiMCP::SameLine();
+                if (ImGuiMCP::Button(GetLoc(
+                        "auto.add_actor_value_reward",
+                        "+ Actor Value"))) {
+                    Reward reward;
+                    reward.typeReward = "Actor Value";
+                    reward.actorValueName = "Health";
+                    reward.actorValueAmount = 10.0f;
+                    reward.isPersistent = false;
+                    group.rewards.push_back(std::move(reward));
+                }
+                ImGuiMCP::SameLine();
                 ImGuiMCP::Checkbox(GetLoc("auto.exclusive_picks_only_one_from_list", "Exclusive (Picks only one from list)"), &group.isExclusive);
 
                 if (group.isExclusive) {
@@ -1843,6 +1993,8 @@ namespace SPIDUI {
 
                 ImGuiMCP::Spacing();
                 ImGuiMCP::Text(GetLoc("auto.rewards_in_group", "Rewards in Group:"));
+
+                RenderActorValueRewards(group, gIdx);
 
                 // --- Tabela de Visualização de Rewards ---
                 auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg | ImGuiMCP::ImGuiTableFlags_Resizable;
@@ -1858,6 +2010,9 @@ namespace SPIDUI {
 
                     for (size_t rIdx = 0; rIdx < group.rewards.size(); ++rIdx) {
                         auto& r = group.rewards[rIdx];
+                        if (r.typeReward == "Actor Value") {
+                            continue;
+                        }
                         ImGuiMCP::TableNextRow();
 
                         // Coluna 0: Tipo
@@ -4136,11 +4291,19 @@ namespace SPIDUI {
 
         LoadLanguage();
 
-        SKSEMenuFramework::SetSection(GetLoc("menu.section", "EDF"));
-        SKSEMenuFramework::AddSectionItem(GetLoc("menu.rules_manager", "Rules Manager"), Render);
-        SKSEMenuFramework::AddSectionItem(GetLoc("menu.npc_database", "NPC Database"), RenderNPCList);
-        SKSEMenuFramework::AddSectionItem(GetLoc("menu.export", "Export"), Export);
-        SKSEMenuFramework::AddSectionItem(GetLoc("menu.spid_to_edf", "SPID to EDF"), SPIDToEDF);
+        SKSEMenuFramework::SetSection("Distribution System");
+        SKSEMenuFramework::AddSectionItem(
+            std::format("EDF/{}", GetLoc("menu.rules_manager", "Rules Manager")),
+            Render);
+        SKSEMenuFramework::AddSectionItem(
+            std::format("EDF/{}", GetLoc("menu.npc_database", "NPC Database")),
+            RenderNPCList);
+        SKSEMenuFramework::AddSectionItem(
+            std::format("EDF/{}", GetLoc("menu.export", "Export")),
+            Export);
+        SKSEMenuFramework::AddSectionItem(
+            std::format("EDF/{}", GetLoc("menu.spid_to_edf", "SPID to EDF")),
+            SPIDToEDF);
         //SKSEMenuFramework::AddSectionItem(GetLoc("menu.settings", "Settings"), MenuSettings);
 
         logger::info("UI Registered via SKSEMenuFramework");

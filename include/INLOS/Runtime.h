@@ -31,14 +31,6 @@ namespace INLOS
 
         void AddExperience(float a_amount);
         float GetExperience() const;
-        std::vector<std::pair<RE::FormID, LifecycleState>>
-            GetLifecycleSnapshot() const;
-
-        static void InstallSerialization();
-        bool Save(SKSE::SerializationInterface* a_interface) const;
-        bool Load(
-            SKSE::SerializationInterface* a_interface,
-            std::uint32_t a_version);
 
     private:
         mutable std::mutex _lock;

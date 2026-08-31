@@ -96,13 +96,42 @@ namespace WIYT
             a_requirement.referenceEditorID << '|' <<
             a_requirement.graphVariableName << '|' <<
             a_requirement.graphVariableType << '|' <<
+            a_requirement.filtersRequireAll << '|' <<
+            static_cast<int>(a_requirement.prerequisiteMode) << '|' <<
+            a_requirement.allowFollowerActions << '|' <<
+            a_requirement.allowSummonActions;
+        const auto append = [&](const auto& a_filters) {
+            for (const auto& filter : a_filters) {
+                AppendFilter(stream, filter);
+            }
+        };
+        append(a_requirement.playerPrerequisiteFilters);
+        append(a_requirement.targetActorFilters);
+        append(a_requirement.sourceFormFilters);
+        append(a_requirement.environmentFilters);
+        return DeterministicHash(stream.str());
+    }
+
+    std::string LegacyRequirementFingerprintV1(
+        const Requirement& a_requirement)
+    {
+        std::ostringstream stream;
+        stream << static_cast<int>(a_requirement.source) << '|' <<
+            static_cast<int>(a_requirement.activity) << '|' <<
+            static_cast<int>(a_requirement.trackingMode) << '|' <<
+            static_cast<int>(a_requirement.aggregation) << '|' <<
+            a_requirement.statisticName << '|' <<
+            a_requirement.referenceFormID << '|' <<
+            a_requirement.referenceEditorID << '|' <<
+            a_requirement.graphVariableName << '|' <<
+            a_requirement.graphVariableType << '|' <<
             a_requirement.filtersRequireAll;
         const auto append = [&](const auto& a_filters) {
             for (const auto& filter : a_filters) {
                 AppendFilter(stream, filter);
             }
         };
-        append(a_requirement.creditedActorFilters);
+        append(a_requirement.playerPrerequisiteFilters);
         append(a_requirement.targetActorFilters);
         append(a_requirement.sourceFormFilters);
         append(a_requirement.environmentFilters);
@@ -208,6 +237,85 @@ namespace WIYT
             return "Highest Value";
         default:
             return "Unknown";
+        }
+    }
+
+    const char* ToString(const PrerequisiteMode a_value)
+    {
+        switch (a_value) {
+        case PrerequisiteMode::kRequiredToCount:
+            return "Required to Count Events";
+        case PrerequisiteMode::kRequiredToComplete:
+            return "Required to Complete";
+        default:
+            return "Unknown";
+        }
+    }
+
+    bool IsFilterAllowedForScope(
+        const FilterScope a_scope,
+        const ActivityType a_activity,
+        const std::string_view a_type)
+    {
+        const auto isEnvironment =
+            a_type == "Cell" ||
+            a_type == "Location" ||
+            a_type == "Worldspace" ||
+            a_type == "Location Keyword" ||
+            a_type == "Cell Type";
+        if (a_scope == FilterScope::kEnvironment) {
+            return isEnvironment;
+        }
+        if (a_scope == FilterScope::kPlayerPrerequisite ||
+            a_scope == FilterScope::kTargetActor) {
+            if (isEnvironment) {
+                return false;
+            }
+            // Quest state is a player prerequisite, not a property of a
+            // victim or another target actor.
+            return a_scope == FilterScope::kPlayerPrerequisite ||
+                a_type != "Quest";
+        }
+        if (a_scope != FilterScope::kSourceForm) {
+            return false;
+        }
+
+        if (a_type == "Source Plugin" || a_type == "Keyword") {
+            return a_activity != ActivityType::kGoldEarned &&
+                a_activity != ActivityType::kGoldSpent;
+        }
+        switch (a_activity) {
+        case ActivityType::kActorKilled:
+        case ActivityType::kActorDefeated:
+        case ActivityType::kDamageDealt:
+            return a_type == "Spell" ||
+                a_type == "Inventory Item" ||
+                a_type == "Equipped Item";
+        case ActivityType::kSpellDamageDealt:
+            return a_type == "Spell";
+        case ActivityType::kItemHarvested:
+        case ActivityType::kItemAcquired:
+        case ActivityType::kItemCrafted:
+            return a_type == "Inventory Item" ||
+                a_type == "Equipped Item";
+        case ActivityType::kLocationDiscovered:
+            return a_type == "Location";
+        case ActivityType::kQuestCompleted:
+            return a_type == "Quest";
+        case ActivityType::kGoldEarned:
+        case ActivityType::kGoldSpent:
+            return false;
+        case ActivityType::kCustom:
+            return a_type != "Actor Value" &&
+                a_type != "Inventory Count" &&
+                a_type != "Gold" &&
+                a_type != "Faction Rank" &&
+                a_type != "Relationship Rank" &&
+                a_type != "NPC Trait" &&
+                a_type != "Cell Type" &&
+                a_type != "Equipped Category";
+        default:
+            return false;
         }
     }
 }

@@ -79,6 +79,18 @@ namespace INLOS
             lootRecipientMode = static_cast<LootRecipientMode>(
                 std::clamp(found->value.GetInt(), 0, 2));
         }
+        if (const auto found =
+                document.FindMember("giveSpellTomeWhenKnown");
+            found != document.MemberEnd() &&
+            found->value.IsBool()) {
+            giveSpellTomeWhenKnown = found->value.GetBool();
+        }
+        if (const auto found =
+                document.FindMember("givePerkBookWhenOwned");
+            found != document.MemberEnd() &&
+            found->value.IsBool()) {
+            givePerkBookWhenOwned = found->value.GetBool();
+        }
         return true;
     }
 
@@ -118,6 +130,14 @@ namespace INLOS
         document.AddMember(
             "lootRecipientMode",
             static_cast<int>(lootRecipientMode),
+            allocator);
+        document.AddMember(
+            "giveSpellTomeWhenKnown",
+            giveSpellTomeWhenKnown,
+            allocator);
+        document.AddMember(
+            "givePerkBookWhenOwned",
+            givePerkBookWhenOwned,
             allocator);
 
         rapidjson::StringBuffer buffer;

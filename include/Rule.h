@@ -84,6 +84,11 @@ struct Reward {
     int functionOnType = 0;
     EquipmentContextMask equipContexts = ToMask(EquipmentContext::kNormal);
     bool isPersistent = true;
+    // Numeric payload used by the form-less EDF "Actor Value" reward.
+    // Kept separate from amount because physical rewards require an unsigned
+    // item count while Actor Value bonuses and penalties are signed floats.
+    std::string actorValueName;
+    float actorValueAmount = 0.0f;
     //bool lootable = true;
     // Helper to separate Plugin | FormID
     std::pair<std::string, RE::FormID> ParseFormID() const;
@@ -150,6 +155,7 @@ enum class EquippedCategoryFilter : int {
 RE::ActorValue ResolveActorValue(std::string_view a_name);
 bool IsMaximumActorValueSupported(RE::ActorValue a_actorValue);
 bool IsActorValueFilterValid(const BlacklistFilter& a_filter);
+bool IsActorValueRewardValid(const Reward& a_reward);
 bool IsNumericValueFilterType(std::string_view a_type);
 void NormalizeNumericValueFilter(BlacklistFilter& a_filter);
 

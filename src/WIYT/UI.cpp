@@ -41,8 +41,8 @@ namespace WIYT::UI
             const FilterScope a_scope)
         {
             switch (a_scope) {
-            case FilterScope::kCreditedActor:
-                return a_requirement.creditedActorFilters;
+            case FilterScope::kPlayerPrerequisite:
+                return a_requirement.playerPrerequisiteFilters;
             case FilterScope::kTargetActor:
                 return a_requirement.targetActorFilters;
             case FilterScope::kSourceForm:
@@ -56,8 +56,8 @@ namespace WIYT::UI
         const char* ScopeLabel(const FilterScope a_scope)
         {
             switch (a_scope) {
-            case FilterScope::kCreditedActor:
-                return "Credited Actor Filters";
+            case FilterScope::kPlayerPrerequisite:
+                return "Player Prerequisites";
             case FilterScope::kTargetActor:
                 return "Target / Victim Filters";
             case FilterScope::kSourceForm:
@@ -68,10 +68,54 @@ namespace WIYT::UI
             }
         }
 
+        const char* ScopeDescription(const FilterScope a_scope)
+        {
+            switch (a_scope) {
+            case FilterScope::kPlayerPrerequisite:
+                return "Conditions checked on the player.";
+            case FilterScope::kTargetActor:
+                return "Conditions checked on the event target or victim.";
+            case FilterScope::kSourceForm:
+                return "The item, spell, quest, or form that originated the event.";
+            case FilterScope::kEnvironment:
+            default:
+                return "The Cell, Location, Worldspace, or Location Keyword where the event occurred.";
+            }
+        }
+
         const char* RequirementSourceLabel(
             const Requirement& a_requirement)
         {
             return ToString(a_requirement.source);
+        }
+
+        bool RequirementDefinitionValid(
+            const Requirement& a_requirement)
+        {
+            const auto valid = [&](
+                                   const FilterScope a_scope,
+                                   const auto& a_filters) {
+                return std::ranges::all_of(
+                    a_filters,
+                    [&](const BlacklistFilter& a_filter) {
+                        return IsFilterAllowedForScope(
+                            a_scope,
+                            a_requirement.activity,
+                            a_filter.type);
+                    });
+            };
+            return valid(
+                       FilterScope::kPlayerPrerequisite,
+                       a_requirement.playerPrerequisiteFilters) &&
+                valid(
+                       FilterScope::kTargetActor,
+                       a_requirement.targetActorFilters) &&
+                valid(
+                       FilterScope::kSourceForm,
+                       a_requirement.sourceFormFilters) &&
+                valid(
+                       FilterScope::kEnvironment,
+                       a_requirement.environmentFilters);
         }
 
         std::string UniquePublicGlobalName(
@@ -263,6 +307,20 @@ namespace WIYT::UI
             filter.optionText = a_info.name;
             if (filter.type == "Source Plugin") {
                 filter.optionText = a_info.editorID;
+            }
+            else if (filter.type == "NPC Trait" ||
+                     filter.type == "Cell Type" ||
+                     filter.type == "Equipped Category") {
+                filter.optionMode = std::max(
+                    0,
+                    static_cast<int>(a_info.formID) - 1);
+            }
+            if (IsNumericValueFilterType(filter.type)) {
+                filter.comparison =
+                    NumericComparison::kGreaterOrEqual;
+                filter.minimumValue =
+                    filter.type == "Faction Rank" ? 0.0f : 1.0f;
+                filter.maximumValue = filter.minimumValue;
             }
             return filter;
         }
@@ -474,7 +532,9 @@ namespace WIYT::UI
 
         void DrawSelectionTable(
             std::vector<BlacklistFilter>* a_filters,
-            RewardGroup* a_group)
+            RewardGroup* a_group,
+            const std::optional<FilterScope> a_scope = std::nullopt,
+            const ActivityType a_activity = ActivityType::kCustom)
         {
             const auto rewardMode = a_group != nullptr;
             const auto descriptors = rewardMode ?
@@ -497,6 +557,13 @@ namespace WIYT::UI
                     { "Selected", "Selected" }
                 };
             for (const auto& descriptor : descriptors) {
+                if (!rewardMode && a_scope &&
+                    !IsFilterAllowedForScope(
+                        *a_scope,
+                        a_activity,
+                        descriptor.id)) {
+                    continue;
+                }
                 if (!Manager::GetSingleton()
                          ->GetList(descriptor.id)
                          .empty()) {
@@ -559,6 +626,13 @@ namespace WIYT::UI
             }
             else {
                 for (const auto& descriptor : descriptors) {
+                    if (!rewardMode && a_scope &&
+                        !IsFilterAllowedForScope(
+                            *a_scope,
+                            a_activity,
+                            descriptor.id)) {
+                        continue;
+                    }
                     if (g_selectionType != "All" &&
                         descriptor.id != g_selectionType) {
                         continue;
@@ -951,12 +1025,48 @@ namespace WIYT::UI
             a_requirement.targetAmount =
                 std::max(0.0001f, a_requirement.targetAmount);
 
+            ImGuiMCP::Separator();
+            ImGuiMCP::TextUnformatted("Player Prerequisites");
+            EnumCombo(
+                "Prerequisite Mode",
+                a_requirement.prerequisiteMode,
+                {
+                    {
+                        PrerequisiteMode::kRequiredToCount,
+                        "Required to Count Events"
+                    },
+                    {
+                        PrerequisiteMode::kRequiredToComplete,
+                        "Required to Complete"
+                    }
+                });
+            if (ImGuiMCP::Button(
+                    std::format(
+                        "Player Prerequisites ({})##PlayerPrerequisites",
+                        a_requirement.playerPrerequisiteFilters.size()).c_str())) {
+                g_filterScope =
+                    FilterScope::kPlayerPrerequisite;
+                g_filterPickerOpen = false;
+                ResetSelectionState();
+            }
+            ImGuiMCP::TextDisabled(
+                "Empty means no player prerequisite is required.");
+
             if (a_requirement.source ==
                 ProgressSource::kEventCounter) {
+                ImGuiMCP::TextUnformatted("Event Authorship");
+                ImGuiMCP::Checkbox(
+                    "Allow Active Followers",
+                    &a_requirement.allowFollowerActions);
+                ImGuiMCP::SameLine();
+                ImGuiMCP::Checkbox(
+                    "Allow Player Summons",
+                    &a_requirement.allowSummonActions);
+                ImGuiMCP::TextDisabled(
+                    "Direct player actions are always allowed. Global WIYT settings remain master switches.");
                 ImGuiMCP::Separator();
                 ImGuiMCP::TextUnformatted("Event Filters");
                 for (const auto scope : {
-                         FilterScope::kCreditedActor,
                          FilterScope::kTargetActor,
                          FilterScope::kSourceForm,
                          FilterScope::kEnvironment }) {
@@ -997,7 +1107,10 @@ namespace WIYT::UI
                     g_filterPickerOpen = false;
                 }
                 DrawSelectionTable(
-                    std::addressof(filters), nullptr);
+                    std::addressof(filters),
+                    nullptr,
+                    g_filterScope,
+                    a_requirement.activity);
                 return;
             }
 
@@ -1012,14 +1125,25 @@ namespace WIYT::UI
             ImGuiMCP::Checkbox(
                 "Require ALL filters (AND)",
                 &a_requirement.filtersRequireAll);
+            ImGuiMCP::TextDisabled(
+                ScopeDescription(*g_filterScope));
             ImGuiMCP::Separator();
 
             if (ImGuiMCP::Button("Add New Filter")) {
                 ResetSelectionState();
                 g_filterPickerOpen = true;
             }
-            ImGuiMCP::SameLine();
-            if (ImGuiMCP::Button("+ Actor Value")) {
+            if (IsFilterAllowedForScope(
+                    *g_filterScope,
+                    a_requirement.activity,
+                    "Actor Value")) {
+                ImGuiMCP::SameLine();
+            }
+            if (IsFilterAllowedForScope(
+                    *g_filterScope,
+                    a_requirement.activity,
+                    "Actor Value") &&
+                ImGuiMCP::Button("+ Actor Value")) {
                 BlacklistFilter filter;
                 filter.type = "Actor Value";
                 filter.actorValueName = "Health";
@@ -1036,6 +1160,10 @@ namespace WIYT::UI
                      DistributionCore::FilterRegistry().AvailableFor(
                          DistributionCore::Domain::kWIYT)) {
                     if (descriptor.id == "Actor Value" ||
+                        !IsFilterAllowedForScope(
+                            *g_filterScope,
+                            a_requirement.activity,
+                            descriptor.id) ||
                         !Manager::GetSingleton()
                              ->GetList(descriptor.id)
                              .empty()) {
@@ -1053,7 +1181,7 @@ namespace WIYT::UI
 
             if (!ImGuiMCP::BeginTable(
                     "WIYTFilters",
-                    5,
+                    6,
                     ImGuiMCP::ImGuiTableFlags_Borders |
                         ImGuiMCP::ImGuiTableFlags_RowBg |
                         ImGuiMCP::ImGuiTableFlags_Resizable |
@@ -1074,6 +1202,10 @@ namespace WIYT::UI
             ImGuiMCP::TableSetupColumn(
                 "Identifier",
                 ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
+            ImGuiMCP::TableSetupColumn(
+                "Status",
+                ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                150.0f);
             ImGuiMCP::TableSetupColumn(
                 "Action",
                 ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
@@ -1133,6 +1265,22 @@ namespace WIYT::UI
                         filter.editorID.c_str() :
                         filter.formIDStr.c_str());
                 ImGuiMCP::TableSetColumnIndex(4);
+                const auto compatible =
+                    IsFilterAllowedForScope(
+                        *g_filterScope,
+                        a_requirement.activity,
+                        filter.type);
+                if (compatible) {
+                    ImGuiMCP::TextColored(
+                        { 0.3f, 0.9f, 0.4f, 1.0f },
+                        "VALID");
+                }
+                else {
+                    ImGuiMCP::TextColored(
+                        { 1.0f, 0.4f, 0.3f, 1.0f },
+                        "INCOMPATIBLE SCOPE");
+                }
+                ImGuiMCP::TableSetColumnIndex(5);
                 if (ImGuiMCP::Button("X")) {
                     filters.erase(
                         filters.begin() +
@@ -1232,7 +1380,15 @@ namespace WIYT::UI
                 ImGuiMCP::PushID(requirement.id.c_str());
                 ImGuiMCP::TableNextRow();
                 ImGuiMCP::TableSetColumnIndex(0);
-                ImGuiMCP::TextUnformatted(requirement.name.c_str());
+                if (RequirementDefinitionValid(requirement)) {
+                    ImGuiMCP::TextUnformatted(requirement.name.c_str());
+                }
+                else {
+                    ImGuiMCP::TextColored(
+                        { 1.0f, 0.4f, 0.3f, 1.0f },
+                        "%s [INVALID FILTER SCOPE]",
+                        requirement.name.c_str());
+                }
                 ImGuiMCP::TableSetColumnIndex(1);
                 ImGuiMCP::TextUnformatted(
                     RequirementSourceLabel(requirement));
@@ -1256,7 +1412,7 @@ namespace WIYT::UI
                 ImGuiMCP::TableSetColumnIndex(6);
                 ImGuiMCP::Text(
                     "%zu",
-                    requirement.creditedActorFilters.size() +
+                    requirement.playerPrerequisiteFilters.size() +
                         requirement.targetActorFilters.size() +
                         requirement.sourceFormFilters.size() +
                         requirement.environmentFilters.size());
@@ -1621,14 +1777,23 @@ namespace WIYT::UI
             const auto progress =
                 State::GetSingleton()->GetTitleProgress(
                     a_title.id);
+            const auto waitingForPrerequisites =
+                progress && std::ranges::any_of(
+                    progress->requirements,
+                    [](const auto& a_entry) {
+                        return a_entry.second.
+                            waitingForPrerequisites;
+                    });
             ImGuiMCP::Text(
                 "Progress: %.1f%% | %s",
                 progress ?
-                    progress->overallProgress * 100.0f :
+                    progress->rawOverallProgress * 100.0f :
                     0.0f,
                 progress && progress->completed ?
                     "EARNED" :
-                    "IN PROGRESS");
+                    (waitingForPrerequisites ?
+                        "WAITING FOR PLAYER PREREQUISITES" :
+                        "IN PROGRESS"));
             ImGuiMCP::Separator();
             if (ImGuiMCP::Button("Manage Requirements")) {
                 g_activeTitle = a_title.id;
@@ -1804,6 +1969,7 @@ namespace WIYT::UI
             if (ImGuiMCP::Button("Save")) {
                 if (store->SaveAll()) {
                     RebuildRequirementIndex();
+                    RefreshProgressSources(true);
                     DFGBridge::GetSingleton()->
                         SynchronizeAll();
                 }
@@ -1942,35 +2108,147 @@ namespace WIYT::UI
                 continue;
             }
             ImGuiMCP::PushID(title.id.c_str());
-            ImGuiMCP::Text(
-                "%s - %.1f%% %s",
-                title.name.c_str(),
-                progress->overallProgress * 100.0f,
+            const auto header = std::format(
+                "{} - {:.1f}% {}##ProgressTitle",
+                title.name,
+                progress->rawOverallProgress * 100.0f,
                 progress->completed ? "[EARNED]" : "");
-            for (const auto& requirement :
-                 title.requirements) {
-                const auto found =
-                    progress->requirements.find(
-                        requirement.id);
-                const auto value =
-                    found != progress->requirements.end() ?
-                    found->second.value :
-                    0.0f;
-                ImGuiMCP::BulletText(
-                    "%s: %.2f / %.2f",
-                    requirement.name.c_str(),
-                    value,
-                    requirement.targetAmount);
+            if (ImGuiMCP::CollapsingHeader(
+                    header.c_str(),
+                    ImGuiMCP::ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (!title.description.empty()) {
+                    ImGuiMCP::TextWrapped(
+                        "%s", title.description.c_str());
+                }
+                ImGuiMCP::Text(
+                    "Overall Progress: %.1f%%",
+                    progress->rawOverallProgress * 100.0f);
+                if (ImGuiMCP::BeginTable(
+                        "RequirementProgress",
+                        7,
+                        ImGuiMCP::ImGuiTableFlags_Borders |
+                            ImGuiMCP::ImGuiTableFlags_RowBg |
+                            ImGuiMCP::ImGuiTableFlags_Resizable)) {
+                    ImGuiMCP::TableSetupColumn(
+                        "Requirement",
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
+                    ImGuiMCP::TableSetupColumn(
+                        "Current",
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                        100.0f);
+                    ImGuiMCP::TableSetupColumn(
+                        "Required",
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                        100.0f);
+                    ImGuiMCP::TableSetupColumn(
+                        "Progress",
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                        190.0f);
+                    ImGuiMCP::TableSetupColumn(
+                        "Player Prerequisites",
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                        180.0f);
+                    ImGuiMCP::TableSetupColumn(
+                        "Mode",
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                        190.0f);
+                    ImGuiMCP::TableSetupColumn(
+                        "Status",
+                        ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
+                        200.0f);
+                    ImGuiMCP::TableHeadersRow();
+                    for (const auto& requirement :
+                         title.requirements) {
+                        const auto found =
+                            progress->requirements.find(
+                                requirement.id);
+                        const auto value =
+                            found != progress->requirements.end() ?
+                                found->second.value :
+                                0.0f;
+                        const auto ratio = std::clamp(
+                            value / std::max(
+                                0.0001f,
+                                requirement.targetAmount),
+                            0.0f,
+                            1.0f);
+                        const auto prerequisitesMet =
+                            found != progress->requirements.end() ?
+                                found->second.prerequisitesMet :
+                                requirement.playerPrerequisiteFilters.empty();
+                        const auto waiting =
+                            found != progress->requirements.end() &&
+                                found->second.waitingForPrerequisites;
+                        const auto definitionValid =
+                            RequirementDefinitionValid(requirement);
+                        ImGuiMCP::TableNextRow();
+                        ImGuiMCP::TableSetColumnIndex(0);
+                        ImGuiMCP::TextUnformatted(
+                            requirement.name.c_str());
+                        ImGuiMCP::TableSetColumnIndex(1);
+                        ImGuiMCP::Text("%.2f", value);
+                        ImGuiMCP::TableSetColumnIndex(2);
+                        ImGuiMCP::Text(
+                            "%.2f", requirement.targetAmount);
+                        ImGuiMCP::TableSetColumnIndex(3);
+                        const auto overlay = std::format(
+                            "{:.1f}%", ratio * 100.0f);
+                        ImGuiMCP::ProgressBar(
+                            ratio,
+                            { -1.0f, 0.0f },
+                            overlay.c_str());
+                        ImGuiMCP::TableSetColumnIndex(4);
+                        if (requirement.playerPrerequisiteFilters.empty()) {
+                            ImGuiMCP::TextDisabled("Not Required");
+                        }
+                        else if (prerequisitesMet) {
+                            ImGuiMCP::TextColored(
+                                { 0.3f, 0.9f, 0.4f, 1.0f },
+                                "MET");
+                        }
+                        else {
+                            ImGuiMCP::TextColored(
+                                { 1.0f, 0.65f, 0.2f, 1.0f },
+                                "MISSING");
+                        }
+                        ImGuiMCP::TableSetColumnIndex(5);
+                        ImGuiMCP::TextUnformatted(
+                            ToString(requirement.prerequisiteMode));
+                        ImGuiMCP::TableSetColumnIndex(6);
+                        if (!definitionValid) {
+                            ImGuiMCP::TextColored(
+                                { 1.0f, 0.4f, 0.3f, 1.0f },
+                                "Invalid Definition");
+                        }
+                        else if (!title.enabled) {
+                            ImGuiMCP::TextDisabled("Disabled");
+                        }
+                        else if (progress->completed) {
+                            ImGuiMCP::TextColored(
+                                { 0.3f, 0.9f, 0.4f, 1.0f },
+                                "Completed");
+                        }
+                        else if (waiting) {
+                            ImGuiMCP::TextColored(
+                                { 1.0f, 0.65f, 0.2f, 1.0f },
+                                "Waiting for Player Prerequisites");
+                        }
+                        else {
+                            ImGuiMCP::TextUnformatted("In Progress");
+                        }
+                    }
+                    ImGuiMCP::EndTable();
+                }
+                if (ImGuiMCP::Button("Reset Progress")) {
+                    State::GetSingleton()->ResetTitle(title.id);
+                    State::GetSingleton()->ReconcileDefinitions(
+                        Store::GetSingleton()->Titles());
+                    RefreshProgressSources(true);
+                    DFGBridge::GetSingleton()->SynchronizeTitle(
+                        title.id,
+                        0.0f);
+                }
             }
-            if (ImGuiMCP::Button("Reset Progress")) {
-                State::GetSingleton()->ResetTitle(title.id);
-                State::GetSingleton()->ReconcileDefinitions(
-                    Store::GetSingleton()->Titles());
-                DFGBridge::GetSingleton()->SynchronizeTitle(
-                    title.id,
-                    0.0f);
-            }
-            ImGuiMCP::Separator();
             ImGuiMCP::PopID();
         }
     }
@@ -2023,15 +2301,15 @@ namespace WIYT::UI
                 "[WIYT] SKSEMenuFramework is not installed.");
             return;
         }
-        SKSEMenuFramework::SetSection("WIYT");
+        SKSEMenuFramework::SetSection("Distribution System");
         SKSEMenuFramework::AddSectionItem(
-            "Titles Manager",
+            "WIYT/Titles Manager",
             RenderTitles);
         SKSEMenuFramework::AddSectionItem(
-            "Title Progress",
+            "WIYT/Title Progress",
             RenderProgress);
         SKSEMenuFramework::AddSectionItem(
-            "Settings",
+            "WIYT/Settings",
             RenderSettings);
         logger::info("[WIYT] UI registered.");
     }

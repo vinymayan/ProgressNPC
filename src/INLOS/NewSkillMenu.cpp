@@ -1,6 +1,7 @@
 #include "INLOS/NewSkillMenu.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <windows.h>
@@ -71,6 +72,7 @@ namespace INLOS::NewSkillMenu
                 const char*,
                 float);
             SkillListView (*GetAvailableSkills)();
+            SkillListView (*GetAvailableResources)();
         };
 
         using GetInterface = void* (*)();
@@ -78,6 +80,29 @@ namespace INLOS::NewSkillMenu
         std::mutex g_lock;
         Interface* g_interface = nullptr;
         std::vector<std::string> g_skills;
+        std::vector<std::string> g_resources;
+        std::chrono::steady_clock::time_point g_nextSkillRefresh{};
+        std::chrono::steady_clock::time_point g_nextResourceRefresh{};
+
+        std::vector<std::string> CopyListView(
+            const SkillListView a_view)
+        {
+            std::vector<std::string> values;
+            values.reserve(a_view.count);
+            for (std::uint32_t index = 0;
+                 index < a_view.count;
+                 ++index) {
+                if (a_view.items && a_view.items[index] &&
+                    a_view.items[index][0] != '\0') {
+                    values.emplace_back(a_view.items[index]);
+                }
+            }
+            std::ranges::sort(values);
+            values.erase(
+                std::unique(values.begin(), values.end()),
+                values.end());
+            return values;
+        }
 
         bool HasSkillLocked(const std::string_view a_skillID)
         {
@@ -97,21 +122,30 @@ namespace INLOS::NewSkillMenu
             }
             const auto view =
                 g_interface->GetAvailableSkills();
-            std::vector<std::string> skills;
-            skills.reserve(view.count);
-            for (std::uint32_t index = 0;
-                 index < view.count;
-                 ++index) {
-                if (view.items && view.items[index] &&
-                    view.items[index][0] != '\0') {
-                    skills.emplace_back(view.items[index]);
-                }
+            g_skills = CopyListView(view);
+            g_nextSkillRefresh =
+                std::chrono::steady_clock::now() +
+                (g_skills.empty() ?
+                    std::chrono::seconds(1) :
+                    std::chrono::seconds(30));
+            return true;
+        }
+
+        bool RefreshResourcesLocked()
+        {
+            if (!g_interface ||
+                g_interface->interfaceVersion <
+                    kRequiredVersion ||
+                !g_interface->GetAvailableResources) {
+                return false;
             }
-            std::ranges::sort(skills);
-            skills.erase(
-                std::unique(skills.begin(), skills.end()),
-                skills.end());
-            g_skills = std::move(skills);
+            g_resources = CopyListView(
+                g_interface->GetAvailableResources());
+            g_nextResourceRefresh =
+                std::chrono::steady_clock::now() +
+                (g_resources.empty() ?
+                    std::chrono::seconds(1) :
+                    std::chrono::seconds(30));
             return true;
         }
     }
@@ -172,13 +206,27 @@ namespace INLOS::NewSkillMenu
             return false;
         }
         std::scoped_lock lock(g_lock);
-        return RefreshSkillsLocked();
+        const auto skillsRefreshed = RefreshSkillsLocked();
+        const auto resourcesRefreshed = RefreshResourcesLocked();
+        if (skillsRefreshed || resourcesRefreshed) {
+            logger::info(
+                "[INLOS] NSM lists refreshed ({} skills, {} resources).",
+                g_skills.size(),
+                g_resources.size());
+        }
+        return skillsRefreshed && resourcesRefreshed;
     }
 
     const std::vector<std::string>& AvailableSkills()
     {
         if (!IsAvailable()) {
             Initialize();
+        }
+        std::scoped_lock lock(g_lock);
+        if (g_interface && g_skills.empty() &&
+            std::chrono::steady_clock::now() >=
+                g_nextSkillRefresh) {
+            RefreshSkillsLocked();
         }
         return g_skills;
     }
@@ -193,6 +241,34 @@ namespace INLOS::NewSkillMenu
             RefreshSkillsLocked();
         }
         return HasSkillLocked(a_skillID);
+    }
+
+    const std::vector<std::string>& AvailableResources()
+    {
+        if (!IsAvailable()) {
+            Initialize();
+        }
+        std::scoped_lock lock(g_lock);
+        if (g_interface && g_resources.empty() &&
+            std::chrono::steady_clock::now() >=
+                g_nextResourceRefresh) {
+            RefreshResourcesLocked();
+        }
+        return g_resources;
+    }
+
+    bool HasResource(const std::string_view a_resourceID)
+    {
+        if (a_resourceID.empty() || !Initialize()) {
+            return false;
+        }
+        std::scoped_lock lock(g_lock);
+        if (g_resources.empty()) {
+            RefreshResourcesLocked();
+        }
+        return std::ranges::binary_search(
+            g_resources,
+            std::string(a_resourceID));
     }
 
     bool AddSkillExperience(
@@ -255,5 +331,26 @@ namespace INLOS::NewSkillMenu
             a_actorID,
             a_amount);
         return true;
+    }
+
+    bool AddResource(
+        const RE::FormID a_actorID,
+        const std::string_view a_resourceID,
+        const float a_amount)
+    {
+        if (!std::isfinite(a_amount) || a_amount <= 0.0f ||
+            !HasResource(a_resourceID)) {
+            return false;
+        }
+        std::scoped_lock lock(g_lock);
+        if (!g_interface ||
+            !g_interface->ModActorResource) {
+            return false;
+        }
+        const std::string resourceID(a_resourceID);
+        return g_interface->ModActorResource(
+            a_actorID,
+            resourceID.c_str(),
+            a_amount);
     }
 }

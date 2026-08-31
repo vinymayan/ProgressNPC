@@ -64,8 +64,14 @@ namespace WIYT
             RequirementFingerprint(a_requirement);
         if (progress.definitionFingerprint != fingerprint &&
             !title.completed) {
-            progress = {};
-            progress.definitionFingerprint = fingerprint;
+            if (progress.definitionFingerprint ==
+                LegacyRequirementFingerprintV1(a_requirement)) {
+                progress.definitionFingerprint = fingerprint;
+            }
+            else {
+                progress = {};
+                progress.definitionFingerprint = fingerprint;
+            }
         }
         else if (progress.definitionFingerprint.empty()) {
             progress.definitionFingerprint = fingerprint;
@@ -80,7 +86,10 @@ namespace WIYT
         for (const auto& title : a_titles) {
             auto& titleProgress = _titles[title.id];
             for (const auto& requirement : title.requirements) {
-                GetRequirementLocked(title, requirement);
+                auto& progress =
+                    GetRequirementLocked(title, requirement);
+                progress.prerequisitesMet =
+                    requirement.playerPrerequisiteFilters.empty();
             }
             RecomputeLocked(
                 title,
@@ -193,6 +202,32 @@ namespace WIYT
             std::abs(progress.value - previous) > 0.0001f);
     }
 
+    ProgressChange State::SetPrerequisiteState(
+        const TitleDefinition& a_title,
+        const Requirement& a_requirement,
+        const bool a_met)
+    {
+        std::scoped_lock lock(_lock);
+        auto& title = _titles[a_title.id];
+        if (title.completed) {
+            return {
+                false,
+                false,
+                title.overallProgress,
+                title.overallProgress
+            };
+        }
+        auto& progress =
+            GetRequirementLocked(a_title, a_requirement);
+        const auto changed =
+            progress.prerequisitesMet != a_met;
+        progress.prerequisitesMet = a_met;
+        return RecomputeLocked(
+            a_title,
+            title.overallProgress,
+            changed);
+    }
+
     ProgressChange State::RecomputeLocked(
         const TitleDefinition& a_title,
         const float a_previousOverall,
@@ -200,6 +235,12 @@ namespace WIYT
     {
         auto& title = _titles[a_title.id];
         if (title.completed) {
+            for (const auto& requirement : a_title.requirements) {
+                auto& progress = title.requirements[requirement.id];
+                progress.progressTargetReached = true;
+                progress.waitingForPrerequisites = false;
+            }
+            title.rawOverallProgress = 1.0f;
             title.overallProgress = 1.0f;
             return {
                 a_changed,
@@ -209,6 +250,7 @@ namespace WIYT
             };
         }
         if (a_title.requirements.empty()) {
+            title.rawOverallProgress = 0.0f;
             title.overallProgress = 0.0f;
             return {
                 a_changed,
@@ -230,14 +272,33 @@ namespace WIYT
                 value / std::max(0.0001f, requirement.targetAmount),
                 0.0f,
                 1.0f);
+            auto& requirementProgress =
+                title.requirements[requirement.id];
+            requirementProgress.progressTargetReached =
+                ratio >= 1.0f;
+            requirementProgress.waitingForPrerequisites =
+                requirementProgress.progressTargetReached &&
+                requirement.prerequisiteMode ==
+                    PrerequisiteMode::kRequiredToComplete &&
+                !requirementProgress.prerequisitesMet;
             total += ratio;
-            complete = complete && ratio >= 1.0f;
+            complete = complete &&
+                requirementProgress.progressTargetReached &&
+                !requirementProgress.waitingForPrerequisites;
         }
-        title.overallProgress =
+        title.rawOverallProgress =
             total / static_cast<float>(a_title.requirements.size());
         if (complete) {
             title.completed = true;
+            title.rawOverallProgress = 1.0f;
             title.overallProgress = 1.0f;
+        }
+        else {
+            // A public title Global reaches exactly 1.0 only when every
+            // completion prerequisite is satisfied.
+            title.overallProgress = std::min(
+                title.rawOverallProgress,
+                0.999f);
         }
         return {
             a_changed ||

@@ -325,6 +325,9 @@ RuleDependencyMask GetFilterDependencyMask(std::string_view a_type)
 
 RuleDependencyMask GetRewardDependencyMask(std::string_view a_type)
 {
+    if (a_type == "Actor Value") {
+        return ToMask(RuleDependency::kActorValue);
+    }
     if (a_type == "Keyword") {
         return ToMask(RuleDependency::kTag);
     }
@@ -508,6 +511,11 @@ namespace {
         AddInt(obj, alloc, "functionOnType", p.functionOnType);
         AddInt(obj, alloc, "equipContexts", p.equipContexts);
         AddBool(obj, alloc, "isPersistent", p.isPersistent);
+        // These fields are also consumed by Rule::CalculateHash. Packages use
+        // SQLite as their authoritative storage, but the internal hash still
+        // has to distinguish Actor Value names, bonuses and penalties.
+        AddString(obj, alloc, "actorValueName", p.actorValueName);
+        AddFloat(obj, alloc, "actorValueAmount", p.actorValueAmount);
         return obj;
     }
 
@@ -536,6 +544,8 @@ namespace {
                     ToMask(EquipmentContext::kNormal);
         }
         p.isPersistent = GetBool(value, "isPersistent", false);
+        p.actorValueName = GetString(value, "actorValueName");
+        p.actorValueAmount = GetFloat(value, "actorValueAmount", 0.0f);
         return p;
     }
 
@@ -2518,11 +2528,78 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
 
     std::map<std::string, std::set<std::string>> dependencyGraph;
     std::set<std::pair<std::string, std::string>> negativeEdges;
+    const auto actorValueRewardCanInvalidate = [](
+        const Reward& a_reward,
+        const Rule& a_consumer) {
+        if (a_reward.isPersistent ||
+            !IsActorValueRewardValid(a_reward)) {
+            return false;
+        }
+        const auto producedActorValue =
+            ResolveActorValue(a_reward.actorValueName);
+        const auto movesIntoInvalidState = [&](
+            const BlacklistFilter& a_filter,
+            const bool a_blacklist) {
+            if (a_filter.type != "Actor Value" ||
+                ResolveActorValue(a_filter.actorValueName) !=
+                    producedActorValue) {
+                return false;
+            }
+            const auto positive = a_reward.actorValueAmount > 0.0f;
+            switch (a_filter.comparison) {
+            case NumericComparison::kGreaterOrEqual:
+                return a_blacklist ? positive : !positive;
+            case NumericComparison::kLessOrEqual:
+                return a_blacklist ? !positive : positive;
+            case NumericComparison::kEqual:
+            case NumericComparison::kBetween:
+                // Whether the threshold is actually crossed depends on the
+                // actor's runtime value, so conservatively classify the edge.
+                return true;
+            default:
+                return true;
+            }
+        };
+        return std::ranges::any_of(
+                   a_consumer.targetFilters,
+                   [&](const BlacklistFilter& a_filter) {
+                       return movesIntoInvalidState(a_filter, false);
+                   }) ||
+            std::ranges::any_of(
+                   a_consumer.blacklistFilters,
+                   [&](const BlacklistFilter& a_filter) {
+                       return movesIntoInvalidState(a_filter, true);
+                   });
+    };
     for (const auto& producer : _rules) {
         for (const auto& group : producer.rewardGroups) {
             for (const auto& reward : group.rewards) {
                 const auto producedMask =
                     GetRewardDependencyMask(reward.typeReward);
+                if (reward.typeReward == "Actor Value") {
+                    if (!IsActorValueRewardValid(reward)) {
+                        continue;
+                    }
+                    const auto actorValue =
+                        ResolveActorValue(reward.actorValueName);
+                    const auto consumers =
+                        _rulesByActorValue.find(actorValue);
+                    if (consumers == _rulesByActorValue.end()) {
+                        continue;
+                    }
+                    dependencyGraph[producer.id].insert(
+                        consumers->second.begin(),
+                        consumers->second.end());
+                    for (const auto& consumerID : consumers->second) {
+                        const auto* consumer = FindRule(consumerID);
+                        if (consumer && actorValueRewardCanInvalidate(
+                                reward, *consumer)) {
+                            negativeEdges.emplace(
+                                producer.id, consumerID);
+                        }
+                    }
+                    continue;
+                }
                 const auto [plugin, formID] = reward.ParseFormID();
                 if (producedMask == ToMask(RuleDependency::kNone) ||
                     formID == 0) {
