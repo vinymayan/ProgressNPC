@@ -5,6 +5,7 @@
 #include "Manager.h"
 #include "Rule.h"
 #include "DistributionCore/Domain.h"
+#include "EDFAPI.h"
 
 namespace {
     bool hasDFG = false;
@@ -56,6 +57,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         LocationChangeHandler::Register();
         ActorCellChangeHandler::Register();
         SPIDUI::Register();
+        EDF::API::SetReady(true);
     }
     if (message->type == SKSE::MessagingInterface::kPreLoadGame) {
         SuspendRuleEvaluationForLoad();

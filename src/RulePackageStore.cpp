@@ -18,8 +18,7 @@ namespace
 {
     namespace fs = std::filesystem;
 
-    constexpr int SCHEMA_VERSION = 3;
-    constexpr std::size_t MAX_HISTORY = 100;
+    constexpr int SCHEMA_VERSION = 4;
     constexpr std::string_view LEGACY_RULES_DIR = "Data/Viny Mods/EDF/Rules";
     constexpr std::string_view LEGACY_SKSE_RULES_DIR = "Data/SKSE/Plugins/EDF/Rules";
     constexpr std::string_view LEGACY_BACKUP_DIR = "Data/Viny Mods/EDF/Legacy Backup";
@@ -289,6 +288,7 @@ namespace
                 "CREATE TABLE IF NOT EXISTS rules("
                 "rule_id TEXT PRIMARY KEY NOT NULL,"
                 "current_version INTEGER NOT NULL,"
+                "pending_delete INTEGER NOT NULL DEFAULT 0 CHECK(pending_delete IN(0,1)),"
                 "legacy_source TEXT,"
                 "created_at INTEGER NOT NULL DEFAULT(unixepoch()),"
                 "updated_at INTEGER NOT NULL DEFAULT(unixepoch())"
@@ -394,6 +394,9 @@ namespace
                 db, "rule_versions", "level_comparison",
                 "INTEGER NOT NULL DEFAULT 0 CHECK(level_comparison IN(0,1,2,3))", context) ||
             !EnsureColumn(
+                db, "rules", "pending_delete",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(pending_delete IN(0,1))", context) ||
+            !EnsureColumn(
                 db, "rule_versions", "maximum_level",
                 "INTEGER NOT NULL DEFAULT 1 CHECK(maximum_level >= 1)", context) ||
             !EnsureColumn(
@@ -437,7 +440,7 @@ namespace
         }
         if (!Exec(
                 db,
-                "UPDATE metadata SET value='3' WHERE key='schema_version';",
+                "UPDATE metadata SET value='4' WHERE key='schema_version';",
                 context)) {
             return false;
         }
@@ -467,7 +470,7 @@ namespace
         readMetadata.handle = nullptr;
         sqlite3_finalize(insertMetadata.handle);
         insertMetadata.handle = nullptr;
-        if (!Exec(db, "PRAGMA user_version=3;", context) ||
+        if (!Exec(db, "PRAGMA user_version=4;", context) ||
             !Exec(db, "COMMIT;", context)) {
             return false;
         }
@@ -707,15 +710,13 @@ namespace
         }
 
         std::unordered_set<int> versions;
-        std::size_t count = 0;
         for (const auto& version : history) {
-            if (count >= MAX_HISTORY || !versions.insert(version.version).second) {
+            if (!versions.insert(version.version).second) {
                 continue;
             }
             if (!InsertVersion(db, version, context)) {
                 return false;
             }
-            ++count;
         }
         if (versions.empty()) {
             return InsertVersion(db, latest, context);
@@ -872,7 +873,8 @@ namespace
         const RulePackage& package,
         std::vector<Rule>& rules,
         std::map<std::string, std::vector<Rule>>& histories,
-        std::map<std::string, std::string>& owners)
+        std::map<std::string, std::string>& owners,
+        std::set<std::string>& deletedRuleIDs)
     {
         SqliteDb db;
         if (!OpenPackage(package, db)) {
@@ -880,12 +882,14 @@ namespace
         }
 
         SqliteStatement ruleStatement;
-        if (!Prepare(db.handle, "SELECT rule_id,current_version FROM rules ORDER BY rule_id;", ruleStatement, package.id)) {
+        if (!Prepare(db.handle, "SELECT rule_id,current_version,pending_delete FROM rules ORDER BY rule_id;", ruleStatement, package.id)) {
             return false;
         }
         while (sqlite3_step(ruleStatement.handle) == SQLITE_ROW) {
             const auto ruleID = ColumnText(ruleStatement.handle, 0);
             const auto currentVersion = sqlite3_column_int(ruleStatement.handle, 1);
+            const bool pendingDelete =
+                sqlite3_column_int(ruleStatement.handle, 2) != 0;
             if (ruleID.empty()) {
                 continue;
             }
@@ -901,7 +905,7 @@ namespace
 
             SqliteStatement versions;
             if (!Prepare(db.handle,
-                    "SELECT version FROM rule_versions WHERE rule_id=?1 ORDER BY version DESC LIMIT 100;",
+                    "SELECT version FROM rule_versions WHERE rule_id=?1 ORDER BY version DESC;",
                     versions,
                     package.id)) {
                 continue;
@@ -921,9 +925,14 @@ namespace
                 logger::error("[RulePackageStore] Rule '{}' in package '{}' has no current version {}.", ruleID, package.id, currentVersion);
                 continue;
             }
-            rules.push_back(*current);
             histories[ruleID] = std::move(history);
             owners[ruleID] = package.id;
+            if (pendingDelete) {
+                deletedRuleIDs.insert(ruleID);
+            }
+            else {
+                rules.push_back(*current);
+            }
         }
         return true;
     }
@@ -1219,11 +1228,13 @@ namespace
 bool RulePackageStore::Load(
     std::vector<Rule>& rules,
     std::map<std::string, std::vector<Rule>>& histories,
-    std::map<std::string, std::string>& owners)
+    std::map<std::string, std::string>& owners,
+    std::set<std::string>& deletedRuleIDs)
 {
     rules.clear();
     histories.clear();
     owners.clear();
+    deletedRuleIDs.clear();
     _packages.clear();
 
     const auto packagesRoot = fs::path(PACKAGES_DIR);
@@ -1287,7 +1298,8 @@ bool RulePackageStore::Load(
 
     bool ok = true;
     for (const auto& package : _packages) {
-        ok = LoadPackageRules(package, rules, histories, owners) && ok;
+        ok = LoadPackageRules(
+            package, rules, histories, owners, deletedRuleIDs) && ok;
     }
     logger::info("[RulePackageStore] Loaded {} rules from {} packages.", rules.size(), _packages.size());
     return ok;
@@ -1313,8 +1325,8 @@ bool RulePackageStore::SaveRule(Rule& rule, std::vector<Rule>& history)
 
     SqliteStatement ruleStatement;
     if (!Prepare(db.handle,
-            "INSERT INTO rules(rule_id,current_version,updated_at) VALUES(?1,?2,unixepoch()) "
-            "ON CONFLICT(rule_id) DO UPDATE SET current_version=excluded.current_version,updated_at=unixepoch();",
+            "INSERT INTO rules(rule_id,current_version,pending_delete,updated_at) VALUES(?1,?2,0,unixepoch()) "
+            "ON CONFLICT(rule_id) DO UPDATE SET current_version=excluded.current_version,pending_delete=0,updated_at=unixepoch();",
             ruleStatement,
             packageID)) {
         Rollback(db.handle, packageID);
@@ -1327,18 +1339,7 @@ bool RulePackageStore::SaveRule(Rule& rule, std::vector<Rule>& history)
         return false;
     }
 
-    SqliteStatement prune;
-    if (!Prepare(db.handle,
-            "DELETE FROM rule_versions WHERE rule_id=?1 AND version NOT IN("
-            "SELECT version FROM rule_versions WHERE rule_id=?1 ORDER BY version DESC LIMIT 100"
-            ");",
-            prune,
-            packageID)) {
-        Rollback(db.handle, packageID);
-        return false;
-    }
-    BindText(prune.handle, 1, saved.id);
-    if (sqlite3_step(prune.handle) != SQLITE_DONE || !Commit(db.handle, packageID)) {
+    if (!Commit(db.handle, packageID)) {
         Rollback(db.handle, packageID);
         return false;
     }
@@ -1349,13 +1350,10 @@ bool RulePackageStore::SaveRule(Rule& rule, std::vector<Rule>& history)
         return value.version == saved.version;
     });
     history.insert(history.begin(), saved);
-    if (history.size() > MAX_HISTORY) {
-        history.resize(MAX_HISTORY);
-    }
     return true;
 }
 
-bool RulePackageStore::DeleteRule(const std::string_view ruleID, const std::string_view packageID)
+bool RulePackageStore::MarkRuleDeleted(const std::string_view ruleID, const std::string_view packageID)
 {
     const auto* package = FindPackage(_packages, packageID);
     if (!package) {
@@ -1366,7 +1364,11 @@ bool RulePackageStore::DeleteRule(const std::string_view ruleID, const std::stri
         return false;
     }
     SqliteStatement statement;
-    if (!Prepare(db.handle, "DELETE FROM rules WHERE rule_id=?1;", statement, packageID)) {
+    if (!Prepare(
+            db.handle,
+            "UPDATE rules SET pending_delete=1,updated_at=unixepoch() WHERE rule_id=?1;",
+            statement,
+            packageID)) {
         Rollback(db.handle, packageID);
         return false;
     }
@@ -1445,7 +1447,9 @@ bool RulePackageStore::DeletePackage(const std::string_view packageID)
     return true;
 }
 
-std::optional<std::string> RulePackageStore::CreatePackage(const std::string_view displayName)
+std::optional<std::string> RulePackageStore::CreatePackage(
+    const std::string_view displayName,
+    const std::string_view requestedID)
 {
     const std::string name(displayName);
     if (name.empty()) {
@@ -1460,9 +1464,22 @@ std::optional<std::string> RulePackageStore::CreatePackage(const std::string_vie
     }
 
     RulePackage package;
-    do {
-        package.id = GenerateUUID();
-    } while (FindPackage(_packages, package.id));
+    if (!requestedID.empty()) {
+        if (std::ranges::any_of(requestedID, [](const unsigned char ch) {
+                return !std::isalnum(ch) && ch != '.' && ch != '_' && ch != '-';
+            }) || FindPackage(_packages, requestedID)) {
+            logger::error(
+                "[RulePackageStore] Invalid or duplicate requested package ID '{}'.",
+                requestedID);
+            return std::nullopt;
+        }
+        package.id = requestedID;
+    }
+    else {
+        do {
+            package.id = GenerateUUID();
+        } while (FindPackage(_packages, package.id));
+    }
     package.displayName = name;
     package.path = PackageFolder(fs::path(PACKAGES_DIR), name, package.id);
     package.schemaVersion = SCHEMA_VERSION;

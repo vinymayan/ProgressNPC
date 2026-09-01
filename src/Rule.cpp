@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -782,6 +783,133 @@ Rule ProcessRuleVersion(const rapidjson::Value& j, const std::string& fallbackId
 
     p.lastSavedHash = p.CalculateHash();
     return p;
+}
+
+bool ParseRuleDefinition(
+    const std::string_view json,
+    Rule& rule,
+    std::string& error)
+{
+    rapidjson::Document document;
+    document.Parse(json.data(), json.size());
+    if (document.HasParseError() || !document.IsObject()) {
+        error = std::format(
+            "invalid rule JSON at byte {}",
+            document.GetErrorOffset());
+        return false;
+    }
+    rule = ProcessRuleVersion(document, {}, {}, true);
+    rule.lastSavedHash.clear();
+    return ValidateRuleDefinition(rule, error);
+}
+
+std::string SerializeRuleDefinition(const Rule& rule)
+{
+    rapidjson::Document document;
+    document.SetObject();
+    auto value = WriteCompactRule(
+        rule, true, document.GetAllocator());
+    return SerializeJson(value);
+}
+
+bool ValidateRuleDefinition(const Rule& rule, std::string& error)
+{
+    DistributionCore::RegisterBuiltInTypes();
+    if (rule.name.empty()) {
+        error = "rule name is required";
+        return false;
+    }
+    if (rule.level < 1 || rule.maximumLevel < 1) {
+        error = "rule levels must be positive";
+        return false;
+    }
+    const auto validateFilter = [&](const BlacklistFilter& filter) {
+        if (!DistributionCore::FilterRegistry().Supports(
+                filter.type, DistributionCore::Domain::kEDF)) {
+            error = std::format(
+                "unsupported EDF filter type '{}'", filter.type);
+            return false;
+        }
+        if (!IsActorValueFilterValid(filter)) {
+            error = std::format(
+                "invalid Actor Value filter '{}'",
+                filter.actorValueName);
+            return false;
+        }
+        const auto* descriptor =
+            DistributionCore::FilterRegistry().Find(filter.type);
+        if (descriptor &&
+            (descriptor->capabilities & DistributionCore::ToMask(
+                DistributionCore::TypeCapability::kRequiresForm)) != 0 &&
+            ResolveEDFFormID(
+                filter.type, filter.editorID, filter.formIDStr) == 0) {
+            error = std::format(
+                "filter '{}' does not resolve to a loaded form",
+                filter.type);
+            return false;
+        }
+        return true;
+    };
+    for (const auto& filter : rule.targetFilters) {
+        if (!validateFilter(filter)) return false;
+    }
+    for (const auto& filter : rule.blacklistFilters) {
+        if (!validateFilter(filter)) return false;
+    }
+    std::set<std::string> groupNames;
+    for (const auto& group : rule.rewardGroups) {
+        if (group.name.empty() || !groupNames.insert(group.name).second) {
+            error = "reward group names must be non-empty and unique";
+            return false;
+        }
+        if (!std::isfinite(group.chanceGroup) ||
+            group.chanceGroup < 0.0f || group.chanceGroup > 100.0f) {
+            error = std::format(
+                "reward group '{}' has an invalid chance", group.name);
+            return false;
+        }
+        for (const auto& reward : group.rewards) {
+            if (!DistributionCore::RewardRegistry().Supports(
+                    reward.typeReward,
+                    DistributionCore::Domain::kEDF)) {
+                error = std::format(
+                    "unsupported EDF reward type '{}'",
+                    reward.typeReward);
+                return false;
+            }
+            if (!std::isfinite(reward.chanceReward) ||
+                reward.chanceReward < 0.0f ||
+                reward.chanceReward > 100.0f) {
+                error = std::format(
+                    "reward '{}' has an invalid chance",
+                    reward.typeReward);
+                return false;
+            }
+            if (!IsActorValueRewardValid(reward)) {
+                error = std::format(
+                    "invalid Actor Value reward '{}'",
+                    reward.actorValueName);
+                return false;
+            }
+            const auto* descriptor =
+                DistributionCore::RewardRegistry().Find(
+                    reward.typeReward);
+            if (descriptor &&
+                (descriptor->capabilities & DistributionCore::ToMask(
+                    DistributionCore::TypeCapability::kRequiresForm)) != 0 &&
+                ResolveEDFFormID(
+                    reward.typeReward,
+                    reward.editorID,
+                    reward.formIDStr) == 0) {
+                error = std::format(
+                    "reward '{}' does not resolve to a loaded form",
+                    reward.typeReward);
+                return false;
+            }
+        }
+    }
+    error.clear();
+    return true;
 }
 
 bool ParseLegacyRuleFile(
@@ -1844,7 +1972,8 @@ void RuleManager::DeleteRule(const std::string& id) {
 
 void RuleManager::LoadRules() {
     _packagesToDelete.clear();
-    if (!RulePackageStore::GetSingleton()->Load(_rules, _ruleHistories, _ruleOwners)) {
+    if (!RulePackageStore::GetSingleton()->Load(
+            _rules, _ruleHistories, _ruleOwners, _deletedRuleIDs)) {
         logger::error("Rules were only partially loaded because one or more packages failed.");
     }
     RebuildDependencyIndex();
@@ -1909,6 +2038,7 @@ bool RuleManager::SaveRules() {
         for (const auto& ruleID : deletedRuleIDs) {
             _ruleHistories.erase(ruleID);
             _ruleOwners.erase(ruleID);
+            _deletedRuleIDs.erase(ruleID);
         }
         std::erase_if(
             _rules,
@@ -1926,6 +2056,29 @@ bool RuleManager::SaveRules() {
         InitializeAffectedNPCsDatabase();
     }
     return ok;
+}
+
+bool RuleManager::SaveRule(const std::string_view ruleID)
+{
+    auto* rule = FindRule(std::string(ruleID));
+    if (!rule || _packagesToDelete.contains(rule->packageID)) {
+        return false;
+    }
+    std::string error;
+    if (!ValidateRuleDefinition(*rule, error)) {
+        logger::error(
+            "Rule '{}' failed validation: {}", ruleID, error);
+        return false;
+    }
+    auto& history = _ruleHistories[rule->id];
+    if (!RulePackageStore::GetSingleton()->SaveRule(*rule, history)) {
+        return false;
+    }
+    _ruleOwners[rule->id] = rule->packageID;
+    _deletedRuleIDs.erase(rule->id);
+    RebuildDependencyIndex();
+    InitializeAffectedNPCsDatabase();
+    return true;
 }
 
 const std::vector<RulePackage>& RuleManager::GetPackages() const {
@@ -1948,8 +2101,11 @@ const Rule* RuleManager::FindRule(const std::string& ruleID) const {
     return std::addressof(_rules[found->second]);
 }
 
-std::optional<std::string> RuleManager::CreatePackage(const std::string_view displayName) {
-    return RulePackageStore::GetSingleton()->CreatePackage(displayName);
+std::optional<std::string> RuleManager::CreatePackage(
+    const std::string_view displayName,
+    const std::string_view requestedID) {
+    return RulePackageStore::GetSingleton()->CreatePackage(
+        displayName, requestedID);
 }
 
 bool RuleManager::MarkPackageForDeletion(const std::string_view packageID)
@@ -2061,16 +2217,34 @@ bool RuleManager::DeleteRule(const std::string& id) {
     if (found == _rules.end()) {
         return false;
     }
-    if (found->version > 0 &&
-        !RulePackageStore::GetSingleton()->DeleteRule(id, found->packageID)) {
+    const Rule deleted = *found;
+    if (deleted.version > 0 &&
+        !RulePackageStore::GetSingleton()->MarkRuleDeleted(
+            id, deleted.packageID)) {
         logger::error("Rule '{}' could not be deleted from package '{}'.", id, found->packageID);
         return false;
     }
-    _ruleHistories.erase(id);
-    _ruleOwners.erase(id);
+    if (deleted.version > 0) {
+        _deletedRuleIDs.insert(id);
+        auto& history = _ruleHistories[id];
+        if (std::ranges::none_of(history, [&](const Rule& version) {
+                return version.version == deleted.version;
+            })) {
+            history.insert(history.begin(), deleted);
+        }
+    }
+    else {
+        _ruleHistories.erase(id);
+        _ruleOwners.erase(id);
+        _deletedRuleIDs.erase(id);
+    }
     _rules.erase(found);
     RebuildDependencyIndex();
-    logger::info("Rule '{}' deleted.", id);
+    InitializeAffectedNPCsDatabase();
+    ScheduleAllLoadedRuleEvaluations();
+    logger::info(
+        "Rule '{}' logically deleted; retained history will reconcile "
+        "non-persistent rewards as actors load.", id);
     return true;
 }
 

@@ -600,8 +600,10 @@ namespace {
                     std::memory_order_acquire)) {
                 const auto& context =
                     SaveStateManager::GetSingleton()->GetCurrentContext();
+                auto* manager = RuleManager::GetSingleton();
                 if (context.isValid &&
-                    !RuleManager::GetSingleton()->GetRules().empty()) {
+                    (!manager->GetRules().empty() ||
+                        manager->HasPendingRuleDeletions())) {
                     pending.delta.Merge(
                         RuleManager::GetSingleton()->DetectBaseNPCChanges(actor));
                     pending.delta.Merge(
@@ -640,6 +642,32 @@ namespace {
             });
         }
     }
+}
+
+void ScheduleAllLoadedRuleEvaluations()
+{
+    std::set<RE::FormID> scheduled;
+    const auto schedule = [&](RE::Actor* actor) {
+        if (!actor || actor->IsDead() ||
+            !scheduled.insert(actor->GetFormID()).second) {
+            return;
+        }
+        ScheduleRuleEvaluation(actor, RuleEvaluationDelta::Full());
+    };
+    schedule(RE::PlayerCharacter::GetSingleton());
+    if (auto* processLists = RE::ProcessLists::GetSingleton()) {
+        const auto scheduleHandles = [&](auto& handles) {
+            for (auto& handle : handles) {
+                auto actorPtr = handle.get();
+                schedule(actorPtr ? actorPtr.get() : nullptr);
+            }
+        };
+        scheduleHandles(processLists->highActorHandles);
+        scheduleHandles(processLists->lowActorHandles);
+    }
+    logger::info(
+        "[RuleScheduler] Full evaluation queued for {} loaded actor(s).",
+        scheduled.size());
 }
 
 void ScheduleSleepOutfitUpdate(RE::Actor* a_actor, bool a_isEntering)
@@ -4298,4 +4326,46 @@ void ApplyRulesToInstance(
 void ApplyRulesToInstance(RE::Actor* a_actor, int a_forcedLevel)
 {
     ApplyRulesToInstance(a_actor, RuleEvaluationDelta::Full(), a_forcedLevel);
+}
+
+bool ResetRuleActivationForActor(
+    RE::Actor* actor,
+    const std::string_view ruleID)
+{
+    if (!actor || actor->IsDead() ||
+        !SaveStateManager::GetSingleton()->GetCurrentContext().isValid) {
+        return false;
+    }
+
+    auto& rulesByID = SaveStateManager::GetSingleton()->
+        GetSessionData().npcRuleVersions[
+            SaveStateManager::BuildNPCKey(actor)];
+    bool found = ruleID.empty();
+    for (auto& [appliedRuleID, state] : rulesByID) {
+        if (!ruleID.empty() && appliedRuleID != ruleID) {
+            continue;
+        }
+        found = true;
+        const Rule* definition = RuleManager::GetSingleton()->
+            GetRuleVersion(appliedRuleID, state.version);
+        if (!definition) {
+            definition = RuleManager::GetSingleton()->
+                FindRule(appliedRuleID);
+        }
+        if (definition &&
+            (!state.activationStateKnown || state.isActive)) {
+            RemoveAppliedActivationRewards(actor, *definition, state);
+        }
+        state.activationStateKnown = true;
+        state.isActive = false;
+        state.runtimeActivationToken = 0;
+        state.canRerollOnNextActivation = true;
+        state.activeRewardKeys.clear();
+        state.appliedGroups.clear();
+    }
+    if (!found) {
+        return false;
+    }
+    ApplyRulesToInstance(actor, RuleEvaluationDelta::Full());
+    return true;
 }

@@ -237,6 +237,10 @@ void ApplyRulesToInstance(
 void ScheduleRuleEvaluation(
     RE::Actor* a_actor,
     RuleEvaluationDelta a_delta = RuleEvaluationDelta::Full());
+void ScheduleAllLoadedRuleEvaluations();
+bool ResetRuleActivationForActor(
+    RE::Actor* actor,
+    std::string_view ruleID = {});
 void BeginInventoryInteraction(RE::Actor* a_targetActor);
 void EndInventoryInteraction();
 bool IsInventoryInteractionActive(RE::Actor* a_actor);

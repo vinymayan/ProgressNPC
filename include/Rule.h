@@ -301,13 +301,16 @@ public:
 
     void LoadRules();
     bool SaveRules();
+    bool SaveRule(std::string_view ruleID);
     bool ExportRule(const Rule& rule);
     bool ExportRulesPackage(const std::string& packageName, const std::set<std::string>& ruleIDs);
     std::vector<Rule>& GetRules() { return _rules; }
     Rule* FindRule(const std::string& ruleID);
     const Rule* FindRule(const std::string& ruleID) const;
     const std::vector<RulePackage>& GetPackages() const;
-    std::optional<std::string> CreatePackage(std::string_view displayName);
+    std::optional<std::string> CreatePackage(
+        std::string_view displayName,
+        std::string_view requestedID = {});
     bool MarkPackageForDeletion(std::string_view packageID);
     bool CancelPackageDeletion(std::string_view packageID);
     bool IsPackagePendingDeletion(std::string_view packageID) const;
@@ -322,6 +325,12 @@ public:
         std::string_view destinationPackageID,
         std::string_view copyName = {});
     bool  DeleteRule(const std::string& id);
+    bool IsRulePendingDeletion(std::string_view ruleID) const {
+        return _deletedRuleIDs.contains(std::string(ruleID));
+    }
+    bool HasPendingRuleDeletions() const {
+        return !_deletedRuleIDs.empty();
+    }
 
     bool CreateRulesPackageSnapshot(
         const std::string& packageName,
@@ -368,6 +377,9 @@ private:
     std::map<RE::FormID, AffectedNPC> _affectedNPCsDatabase;
     bool _affectedNPCsDatabaseValid = false;
     std::map<std::string, std::string> _ruleOwners;
+    // Logically deleted rules retain their version history so rewards already
+    // applied in any save can be reconciled when that actor is next loaded.
+    std::set<std::string> _deletedRuleIDs;
     std::set<std::string> _packagesToDelete;
     std::map<RuleDependencyMask, std::set<std::string>> _rulesByDependency;
     std::map<RuleDependencyMask, std::map<RE::FormID, std::set<std::string>>> _rulesByExactDependency;
@@ -403,6 +415,13 @@ bool ParseLegacyRuleFile(
     Rule& latest,
     std::vector<Rule>& history,
     std::string& error);
+
+bool ParseRuleDefinition(
+    std::string_view json,
+    Rule& rule,
+    std::string& error);
+std::string SerializeRuleDefinition(const Rule& rule);
+bool ValidateRuleDefinition(const Rule& rule, std::string& error);
 
 std::string FormatLocalFormID(uint32_t a_formID, const std::string& a_pluginName);
 RE::TESForm* ResolveEDFForm(const std::string& a_type, const std::string& a_editorID, const std::string& a_formIDStr);
