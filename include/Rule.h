@@ -55,6 +55,44 @@ enum class NumericComparison : std::uint8_t {
     kBetween = 3
 };
 
+enum class NumericRewardOperation : std::uint8_t {
+    kFlat = 0,
+    kPercent = 1
+};
+
+enum class NumericRewardSource : std::uint8_t {
+    kFixed = 0,
+    kGlobal = 1,
+    kActorValue = 2
+};
+
+enum class NumericRewardBinding : std::uint8_t {
+    kSnapshot = 0,
+    kLive = 1
+};
+
+constexpr float CalculateNumericRewardDelta(
+    const float a_baseline,
+    const float a_sourceValue,
+    const NumericRewardOperation a_operation)
+{
+    return a_operation == NumericRewardOperation::kPercent ?
+        a_baseline * a_sourceValue / 100.0f :
+        a_sourceValue;
+}
+
+constexpr float CalculateNumericRewardAdjustment(
+    const float a_desiredDelta,
+    const float a_previousDelta)
+{
+    return a_desiredDelta - a_previousDelta;
+}
+
+static_assert(CalculateNumericRewardDelta(
+                  200.0f, 10.0f,
+                  NumericRewardOperation::kPercent) == 20.0f);
+static_assert(CalculateNumericRewardAdjustment(-15.0f, 5.0f) == -20.0f);
+
 enum class EquipmentContext : std::uint8_t {
     kNormal = 1u << 0,
     kSleep = 1u << 1,
@@ -84,11 +122,24 @@ struct Reward {
     int functionOnType = 0;
     EquipmentContextMask equipContexts = ToMask(EquipmentContext::kNormal);
     bool isPersistent = true;
-    // Numeric payload used by the form-less EDF "Actor Value" reward.
+    // Numeric payload used by form-less EDF rewards such as Actor Value and
+    // Actor Scale.
     // Kept separate from amount because physical rewards require an unsigned
     // item count while Actor Value bonuses and penalties are signed floats.
     std::string actorValueName;
     float actorValueAmount = 0.0f;
+    NumericRewardOperation numericOperation =
+        NumericRewardOperation::kFlat;
+    NumericRewardSource numericSource =
+        NumericRewardSource::kFixed;
+    NumericRewardBinding numericBinding =
+        NumericRewardBinding::kSnapshot;
+    ActorValueMode percentBaseMode = ActorValueMode::kPermanent;
+    std::string sourceActorValueName;
+    ActorValueMode sourceActorValueMode = ActorValueMode::kCurrent;
+    std::string sourceGlobalFormID;
+    std::string sourceGlobalEditorID;
+    float sourceMultiplier = 1.0f;
     //bool lootable = true;
     // Helper to separate Plugin | FormID
     std::pair<std::string, RE::FormID> ParseFormID() const;
@@ -156,6 +207,7 @@ RE::ActorValue ResolveActorValue(std::string_view a_name);
 bool IsMaximumActorValueSupported(RE::ActorValue a_actorValue);
 bool IsActorValueFilterValid(const BlacklistFilter& a_filter);
 bool IsActorValueRewardValid(const Reward& a_reward);
+bool IsActorScaleRewardValid(const Reward& a_reward);
 bool IsNumericValueFilterType(std::string_view a_type);
 void NormalizeNumericValueFilter(BlacklistFilter& a_filter);
 

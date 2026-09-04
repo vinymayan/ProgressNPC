@@ -517,6 +517,23 @@ namespace {
         // has to distinguish Actor Value names, bonuses and penalties.
         AddString(obj, alloc, "actorValueName", p.actorValueName);
         AddFloat(obj, alloc, "actorValueAmount", p.actorValueAmount);
+        AddInt(obj, alloc, "numericOperation",
+            static_cast<int>(p.numericOperation));
+        AddInt(obj, alloc, "numericSource",
+            static_cast<int>(p.numericSource));
+        AddInt(obj, alloc, "numericBinding",
+            static_cast<int>(p.numericBinding));
+        AddInt(obj, alloc, "percentBaseMode",
+            static_cast<int>(p.percentBaseMode));
+        AddString(obj, alloc, "sourceActorValueName",
+            p.sourceActorValueName);
+        AddInt(obj, alloc, "sourceActorValueMode",
+            static_cast<int>(p.sourceActorValueMode));
+        AddString(obj, alloc, "sourceGlobalFormID",
+            p.sourceGlobalFormID);
+        AddString(obj, alloc, "sourceGlobalEditorID",
+            p.sourceGlobalEditorID);
+        AddFloat(obj, alloc, "sourceMultiplier", p.sourceMultiplier);
         return obj;
     }
 
@@ -547,6 +564,23 @@ namespace {
         p.isPersistent = GetBool(value, "isPersistent", false);
         p.actorValueName = GetString(value, "actorValueName");
         p.actorValueAmount = GetFloat(value, "actorValueAmount", 0.0f);
+        p.numericOperation = static_cast<NumericRewardOperation>(
+            std::clamp(GetInt(value, "numericOperation", 0), 0, 1));
+        p.numericSource = static_cast<NumericRewardSource>(
+            std::clamp(GetInt(value, "numericSource", 0), 0, 2));
+        p.numericBinding = static_cast<NumericRewardBinding>(
+            std::clamp(GetInt(value, "numericBinding", 0), 0, 1));
+        p.percentBaseMode = static_cast<ActorValueMode>(
+            std::clamp(GetInt(value, "percentBaseMode", 1), 0, 2));
+        p.sourceActorValueName =
+            GetString(value, "sourceActorValueName");
+        p.sourceActorValueMode = static_cast<ActorValueMode>(
+            std::clamp(GetInt(value, "sourceActorValueMode", 0), 0, 2));
+        p.sourceGlobalFormID =
+            GetString(value, "sourceGlobalFormID");
+        p.sourceGlobalEditorID =
+            GetString(value, "sourceGlobalEditorID");
+        p.sourceMultiplier = GetFloat(value, "sourceMultiplier", 1.0f);
         return p;
     }
 
@@ -890,6 +924,24 @@ bool ValidateRuleDefinition(const Rule& rule, std::string& error)
                     "invalid Actor Value reward '{}'",
                     reward.actorValueName);
                 return false;
+            }
+            if (!IsActorScaleRewardValid(reward)) {
+                error = "invalid Actor Scale reward";
+                return false;
+            }
+            if ((reward.typeReward == "Actor Value" ||
+                 reward.typeReward == "Actor Scale") &&
+                reward.numericSource == NumericRewardSource::kGlobal) {
+                const auto* global = ResolveEDFForm(
+                    "Global",
+                    reward.sourceGlobalEditorID,
+                    reward.sourceGlobalFormID);
+                if (!global || !global->As<RE::TESGlobal>()) {
+                    error = std::format(
+                        "{} reward source Global does not resolve",
+                        reward.typeReward);
+                    return false;
+                }
             }
             const auto* descriptor =
                 DistributionCore::RewardRegistry().Find(
@@ -2668,6 +2720,37 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
         }
         for (const auto& group : rule.rewardGroups) {
             for (const auto& reward : group.rewards) {
+                if (reward.typeReward == "Actor Value" &&
+                    IsActorValueRewardValid(reward)) {
+                    const auto target =
+                        ResolveActorValue(reward.actorValueName);
+                    if (target != RE::ActorValue::kNone) {
+                        const auto dependency =
+                            ToMask(RuleDependency::kActorValue);
+                        mask |= dependency;
+                        addDependency(rule, dependency);
+                        _rulesByActorValue[target].insert(rule.id);
+                        _watchedActorValues.emplace(
+                            target, ActorValueMode::kMaximum);
+                    }
+                }
+                if ((reward.typeReward == "Actor Value" ||
+                     reward.typeReward == "Actor Scale") &&
+                    reward.numericSource == NumericRewardSource::kActorValue &&
+                    IsActorValueRewardValid(reward) &&
+                    IsActorScaleRewardValid(reward)) {
+                    const auto source =
+                        ResolveActorValue(reward.sourceActorValueName);
+                    if (source != RE::ActorValue::kNone) {
+                        const auto dependency =
+                            ToMask(RuleDependency::kActorValue);
+                        mask |= dependency;
+                        addDependency(rule, dependency);
+                        _rulesByActorValue[source].insert(rule.id);
+                        _watchedActorValues.emplace(
+                            source, ActorValueMode::kMaximum);
+                    }
+                }
                 if (reward.typeReward == "Spell" &&
                     (reward.functionOnType == 1 ||
                     reward.functionOnType == 2)) {
@@ -2719,7 +2802,12 @@ void RuleManager::RebuildDependencyIndex(const bool invalidateActorSnapshots)
                     producedActorValue) {
                 return false;
             }
-            const auto positive = a_reward.actorValueAmount > 0.0f;
+            if (a_reward.numericSource != NumericRewardSource::kFixed ||
+                a_reward.numericOperation == NumericRewardOperation::kPercent) {
+                return true;
+            }
+            const auto positive =
+                a_reward.actorValueAmount * a_reward.sourceMultiplier > 0.0f;
             switch (a_filter.comparison) {
             case NumericComparison::kGreaterOrEqual:
                 return a_blacklist ? positive : !positive;

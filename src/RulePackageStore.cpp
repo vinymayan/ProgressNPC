@@ -18,7 +18,7 @@ namespace
 {
     namespace fs = std::filesystem;
 
-    constexpr int SCHEMA_VERSION = 4;
+    constexpr int SCHEMA_VERSION = 5;
     constexpr std::string_view LEGACY_RULES_DIR = "Data/Viny Mods/EDF/Rules";
     constexpr std::string_view LEGACY_SKSE_RULES_DIR = "Data/SKSE/Plugins/EDF/Rules";
     constexpr std::string_view LEGACY_BACKUP_DIR = "Data/Viny Mods/EDF/Legacy Backup";
@@ -372,6 +372,15 @@ namespace
                 "persistent INTEGER NOT NULL CHECK(persistent IN(0,1)),"
                 "actor_value_name TEXT NOT NULL DEFAULT '',"
                 "actor_value_amount REAL NOT NULL DEFAULT 0,"
+                "numeric_operation INTEGER NOT NULL DEFAULT 0 CHECK(numeric_operation IN(0,1)),"
+                "numeric_source INTEGER NOT NULL DEFAULT 0 CHECK(numeric_source IN(0,1,2)),"
+                "numeric_binding INTEGER NOT NULL DEFAULT 0 CHECK(numeric_binding IN(0,1)),"
+                "percent_base_mode INTEGER NOT NULL DEFAULT 1 CHECK(percent_base_mode IN(0,1,2)),"
+                "source_actor_value_name TEXT NOT NULL DEFAULT '',"
+                "source_actor_value_mode INTEGER NOT NULL DEFAULT 0 CHECK(source_actor_value_mode IN(0,1,2)),"
+                "source_global_form_id TEXT NOT NULL DEFAULT '',"
+                "source_global_editor_id TEXT NOT NULL DEFAULT '',"
+                "source_multiplier REAL NOT NULL DEFAULT 1,"
                 "PRIMARY KEY(rule_id,version,group_ordinal,reward_ordinal),"
                 "FOREIGN KEY(rule_id,version,group_ordinal) "
                 "REFERENCES reward_groups(rule_id,version,group_ordinal) ON DELETE CASCADE"
@@ -422,7 +431,25 @@ namespace
                 "TEXT NOT NULL DEFAULT ''", context) ||
             !EnsureColumn(
                 db, "rewards", "actor_value_amount",
-                "REAL NOT NULL DEFAULT 0", context)) {
+                "REAL NOT NULL DEFAULT 0", context) ||
+            !EnsureColumn(db, "rewards", "numeric_operation",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(numeric_operation IN(0,1))", context) ||
+            !EnsureColumn(db, "rewards", "numeric_source",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(numeric_source IN(0,1,2))", context) ||
+            !EnsureColumn(db, "rewards", "numeric_binding",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(numeric_binding IN(0,1))", context) ||
+            !EnsureColumn(db, "rewards", "percent_base_mode",
+                "INTEGER NOT NULL DEFAULT 1 CHECK(percent_base_mode IN(0,1,2))", context) ||
+            !EnsureColumn(db, "rewards", "source_actor_value_name",
+                "TEXT NOT NULL DEFAULT ''", context) ||
+            !EnsureColumn(db, "rewards", "source_actor_value_mode",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(source_actor_value_mode IN(0,1,2))", context) ||
+            !EnsureColumn(db, "rewards", "source_global_form_id",
+                "TEXT NOT NULL DEFAULT ''", context) ||
+            !EnsureColumn(db, "rewards", "source_global_editor_id",
+                "TEXT NOT NULL DEFAULT ''", context) ||
+            !EnsureColumn(db, "rewards", "source_multiplier",
+                "REAL NOT NULL DEFAULT 1", context)) {
             return false;
         }
 
@@ -440,7 +467,7 @@ namespace
         }
         if (!Exec(
                 db,
-                "UPDATE metadata SET value='4' WHERE key='schema_version';",
+                "UPDATE metadata SET value='5' WHERE key='schema_version';",
                 context)) {
             return false;
         }
@@ -470,7 +497,7 @@ namespace
         readMetadata.handle = nullptr;
         sqlite3_finalize(insertMetadata.handle);
         insertMetadata.handle = nullptr;
-        if (!Exec(db, "PRAGMA user_version=4;", context) ||
+        if (!Exec(db, "PRAGMA user_version=5;", context) ||
             !Exec(db, "COMMIT;", context)) {
             return false;
         }
@@ -632,8 +659,10 @@ namespace
                 "INSERT INTO rewards("
                 "rule_id,version,group_ordinal,reward_ordinal,type_reward,form_id,editor_id,"
                 "amount,chance,function_on_type,equip_contexts,persistent,"
-                "actor_value_name,actor_value_amount"
-                ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14);",
+                "actor_value_name,actor_value_amount,numeric_operation,numeric_source,"
+                "numeric_binding,percent_base_mode,source_actor_value_name,"
+                "source_actor_value_mode,source_global_form_id,source_global_editor_id,source_multiplier"
+                ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23);",
                 rewardStatement,
                 context)) {
             return false;
@@ -673,6 +702,24 @@ namespace
                 sqlite3_bind_double(
                     rewardStatement.handle, 14,
                     reward.actorValueAmount);
+                sqlite3_bind_int(rewardStatement.handle, 15,
+                    static_cast<int>(reward.numericOperation));
+                sqlite3_bind_int(rewardStatement.handle, 16,
+                    static_cast<int>(reward.numericSource));
+                sqlite3_bind_int(rewardStatement.handle, 17,
+                    static_cast<int>(reward.numericBinding));
+                sqlite3_bind_int(rewardStatement.handle, 18,
+                    static_cast<int>(reward.percentBaseMode));
+                BindText(rewardStatement.handle, 19,
+                    reward.sourceActorValueName);
+                sqlite3_bind_int(rewardStatement.handle, 20,
+                    static_cast<int>(reward.sourceActorValueMode));
+                BindText(rewardStatement.handle, 21,
+                    reward.sourceGlobalFormID);
+                BindText(rewardStatement.handle, 22,
+                    reward.sourceGlobalEditorID);
+                sqlite3_bind_double(rewardStatement.handle, 23,
+                    reward.sourceMultiplier);
                 if (sqlite3_step(rewardStatement.handle) != SQLITE_DONE) {
                     return false;
                 }
@@ -836,7 +883,9 @@ namespace
             SqliteStatement rewards;
             if (!Prepare(db,
                     "SELECT type_reward,form_id,editor_id,amount,chance,function_on_type,equip_contexts,persistent,"
-                    "actor_value_name,actor_value_amount "
+                    "actor_value_name,actor_value_amount,numeric_operation,numeric_source,"
+                    "numeric_binding,percent_base_mode,source_actor_value_name,source_actor_value_mode,"
+                    "source_global_form_id,source_global_editor_id,source_multiplier "
                     "FROM rewards WHERE rule_id=?1 AND version=?2 AND group_ordinal=?3 "
                     "ORDER BY reward_ordinal;",
                     rewards,
@@ -861,6 +910,21 @@ namespace
                 reward.actorValueName = ColumnText(rewards.handle, 8);
                 reward.actorValueAmount = static_cast<float>(
                     sqlite3_column_double(rewards.handle, 9));
+                reward.numericOperation = static_cast<NumericRewardOperation>(
+                    std::clamp(sqlite3_column_int(rewards.handle, 10), 0, 1));
+                reward.numericSource = static_cast<NumericRewardSource>(
+                    std::clamp(sqlite3_column_int(rewards.handle, 11), 0, 2));
+                reward.numericBinding = static_cast<NumericRewardBinding>(
+                    std::clamp(sqlite3_column_int(rewards.handle, 12), 0, 1));
+                reward.percentBaseMode = static_cast<ActorValueMode>(
+                    std::clamp(sqlite3_column_int(rewards.handle, 13), 0, 2));
+                reward.sourceActorValueName = ColumnText(rewards.handle, 14);
+                reward.sourceActorValueMode = static_cast<ActorValueMode>(
+                    std::clamp(sqlite3_column_int(rewards.handle, 15), 0, 2));
+                reward.sourceGlobalFormID = ColumnText(rewards.handle, 16);
+                reward.sourceGlobalEditorID = ColumnText(rewards.handle, 17);
+                reward.sourceMultiplier = static_cast<float>(
+                    sqlite3_column_double(rewards.handle, 18));
                 group.rewards.push_back(std::move(reward));
             }
             rule.rewardGroups.push_back(std::move(group));

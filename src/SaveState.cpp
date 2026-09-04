@@ -2,6 +2,7 @@
 #include "DistributionCore/Domain.h"
 #include "DistributionCore/RewardSelector.h"
 #include "DelayedDispatcher.h"
+#include "WhoEditThatAPI.h"
 #include <atomic>
 #include <limits>
 #include <mutex>
@@ -93,6 +94,92 @@ namespace {
     std::map<RE::FormID, RE::ACTOR_COMBAT_STATE> g_combatStates;
 
     constexpr char kRewardStateDelimiter = '\x1E';
+    constexpr std::string_view kLedgerPrefix = "edf/r/";
+
+    std::uint64_t StableHash(std::string_view value)
+    {
+        std::uint64_t result = 14695981039346656037ULL;
+        for (const auto character : value) {
+            result ^= static_cast<std::uint8_t>(character);
+            result *= 1099511628211ULL;
+        }
+        return result;
+    }
+
+    std::string BuildLedgerRulePrefix(std::string_view ruleID)
+    {
+        return std::format(
+            "{}{:016X}/", kLedgerPrefix, StableHash(ruleID));
+    }
+
+    std::string BuildLedgerMutationKey(
+        std::string_view ruleID,
+        std::string_view rewardKey)
+    {
+        return std::format(
+            "{}{:016X}", BuildLedgerRulePrefix(ruleID),
+            StableHash(rewardKey));
+    }
+
+    WhoEditThat::API::IWhoEditThatAPI* GetActorValueLedger()
+    {
+        static auto* api = WhoEditThat::API::GetAPI();
+        static WhoEditThat::API::ClientHandle client =
+            WhoEditThat::API::kInvalidClient;
+        if (!api) {
+            api = WhoEditThat::API::GetAPI();
+        }
+        if (!api || !api->IsReady()) {
+            return nullptr;
+        }
+        if (client == WhoEditThat::API::kInvalidClient) {
+            WhoEditThat::API::ClientRegistration registration;
+            registration.clientID = "viny.edf";
+            registration.displayName = "EDF";
+            client = api->RegisterClient(std::addressof(registration));
+        }
+        return client == WhoEditThat::API::kInvalidClient ? nullptr : api;
+    }
+
+    WhoEditThat::API::ClientHandle GetActorValueLedgerClient()
+    {
+        auto* api = GetActorValueLedger();
+        if (!api) {
+            return WhoEditThat::API::kInvalidClient;
+        }
+        WhoEditThat::API::ClientRegistration registration;
+        registration.clientID = "viny.edf";
+        registration.displayName = "EDF";
+        return api->RegisterClient(std::addressof(registration));
+    }
+
+    void LogLedgerResult(
+        const WhoEditThat::API::Result* result,
+        void*)
+    {
+        if (!result) {
+            return;
+        }
+        if (result->status == WhoEditThat::API::Status::kSuccess ||
+            result->status == WhoEditThat::API::Status::kNotFound) {
+            logger::debug(
+                "[ActorValueLedger] operation={} actor={:08X} key='{}' "
+                "delta={:+.3f} affected={} status={}",
+                std::to_underlying(result->operation),
+                result->actorFormID,
+                result->mutationKey,
+                result->appliedDelta,
+                result->affectedCount,
+                std::to_underlying(result->status));
+            return;
+        }
+        logger::warn(
+            "[ActorValueLedger] operation={} actor={:08X} status={} message='{}'",
+            std::to_underlying(result->operation),
+            result->actorFormID,
+            std::to_underlying(result->status),
+            result->message);
+    }
 
     std::string BuildRewardStateKey(
         const std::string& a_groupName,
@@ -117,53 +204,438 @@ namespace {
             append(std::to_string(a_reward.equipContexts));
         }
         append(a_reward.isPersistent ? "1" : "0");
-        if (a_reward.typeReward == "Actor Value") {
+        if (a_reward.typeReward == "Actor Value" ||
+            a_reward.typeReward == "Actor Scale") {
             append(a_reward.actorValueName);
             append(std::format(
                 "{:.9g}", a_reward.actorValueAmount));
+            const bool hasDynamicNumericPayload =
+                a_reward.numericOperation != NumericRewardOperation::kFlat ||
+                a_reward.numericSource != NumericRewardSource::kFixed ||
+                a_reward.numericBinding != NumericRewardBinding::kSnapshot ||
+                a_reward.percentBaseMode != ActorValueMode::kPermanent ||
+                !a_reward.sourceActorValueName.empty() ||
+                a_reward.sourceActorValueMode != ActorValueMode::kCurrent ||
+                !a_reward.sourceGlobalFormID.empty() ||
+                !a_reward.sourceGlobalEditorID.empty() ||
+                a_reward.sourceMultiplier != 1.0f;
+            if (hasDynamicNumericPayload) {
+                append(std::to_string(
+                    static_cast<int>(a_reward.numericOperation)));
+                append(std::to_string(
+                    static_cast<int>(a_reward.numericSource)));
+                append(std::to_string(
+                    static_cast<int>(a_reward.numericBinding)));
+                append(std::to_string(
+                    static_cast<int>(a_reward.percentBaseMode)));
+                append(a_reward.sourceActorValueName);
+                append(std::to_string(
+                    static_cast<int>(a_reward.sourceActorValueMode)));
+                append(a_reward.sourceGlobalFormID);
+                append(a_reward.sourceGlobalEditorID);
+                append(std::format(
+                    "{:.9g}", a_reward.sourceMultiplier));
+            }
         }
         return key;
     }
 
-    bool ModifyActorValueReward(
+    bool QueueActorValueReward(
+        RE::Actor* actor,
+        const Reward& reward,
+        std::string_view ruleID,
+        std::string_view rewardKey)
+    {
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!actor || !api || client == WhoEditThat::API::kInvalidClient) {
+            return false;
+        }
+
+        const auto mutationKey = BuildLedgerMutationKey(ruleID, rewardKey);
+        const auto targetValue = ResolveActorValue(reward.actorValueName);
+        const auto* targetName =
+            targetValue != RE::ActorValue::kNone ?
+                RE::ActorValueList::GetActorValueName(targetValue) :
+                nullptr;
+        if (!targetName || !*targetName) {
+            logger::error(
+                "[WhoEditThat] Cannot queue Actor Value reward '{}': "
+                "target '{}' is invalid",
+                mutationKey,
+                reward.actorValueName);
+            return false;
+        }
+
+        std::string sourceActorValueName;
+        if (reward.numericSource == NumericRewardSource::kActorValue) {
+            const auto sourceValue = ResolveActorValue(
+                reward.sourceActorValueName);
+            const auto* sourceName =
+                sourceValue != RE::ActorValue::kNone ?
+                    RE::ActorValueList::GetActorValueName(sourceValue) :
+                    nullptr;
+            if (!sourceName || !*sourceName) {
+                logger::error(
+                    "[WhoEditThat] Cannot queue Actor Value reward '{}': "
+                    "source '{}' is invalid",
+                    mutationKey,
+                    reward.sourceActorValueName);
+                return false;
+            }
+            sourceActorValueName = sourceName;
+        }
+
+        WhoEditThat::API::ActorValueContributionRequest request;
+        request.client = client;
+        request.actorFormID = actor->GetFormID();
+        request.mutationKey = mutationKey.c_str();
+        request.targetActorValue = targetName;
+        request.operation = static_cast<WhoEditThat::API::NumericOperation>(
+            reward.numericOperation);
+        request.source = static_cast<WhoEditThat::API::NumericSource>(
+            reward.numericSource);
+        request.channel = reward.isPersistent ?
+            WhoEditThat::API::ModifierChannel::kPermanent :
+            WhoEditThat::API::ModifierChannel::kTemporary;
+        request.fixedValue = reward.actorValueAmount;
+        request.sourceActorValue = sourceActorValueName.c_str();
+        request.sourceMultiplier = reward.sourceMultiplier;
+        if (reward.numericSource == NumericRewardSource::kGlobal) {
+            const auto* global = ResolveEDFForm(
+                "Global",
+                reward.sourceGlobalEditorID,
+                reward.sourceGlobalFormID);
+            if (!global || !global->As<RE::TESGlobal>()) {
+                return false;
+            }
+            request.sourceGlobalFormID = global->GetFormID();
+        }
+        return api->QueueUpsertActorValue(
+            std::addressof(request), LogLedgerResult, nullptr);
+    }
+
+    bool QueueActorScaleReward(
+        RE::Actor* actor,
+        const Reward& reward,
+        std::string_view ruleID,
+        std::string_view rewardKey)
+    {
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!actor || !api || client == WhoEditThat::API::kInvalidClient ||
+            !IsActorScaleRewardValid(reward)) {
+            return false;
+        }
+
+        const auto mutationKey = BuildLedgerMutationKey(ruleID, rewardKey);
+        std::string sourceActorValueName;
+        if (reward.numericSource == NumericRewardSource::kActorValue) {
+            const auto sourceValue = ResolveActorValue(
+                reward.sourceActorValueName);
+            const auto* sourceName = sourceValue != RE::ActorValue::kNone ?
+                RE::ActorValueList::GetActorValueName(sourceValue) : nullptr;
+            if (!sourceName || !*sourceName) {
+                return false;
+            }
+            sourceActorValueName = sourceName;
+        }
+
+        WhoEditThat::API::ActorScaleContributionRequest request;
+        request.client = client;
+        request.actorFormID = actor->GetFormID();
+        request.mutationKey = mutationKey.c_str();
+        request.operation = static_cast<WhoEditThat::API::NumericOperation>(
+            reward.numericOperation);
+        request.source = static_cast<WhoEditThat::API::NumericSource>(
+            reward.numericSource);
+        request.fixedValue = reward.actorValueAmount;
+        request.sourceActorValue = sourceActorValueName.c_str();
+        request.sourceMultiplier = reward.sourceMultiplier;
+        if (reward.numericSource == NumericRewardSource::kGlobal) {
+            const auto* global = ResolveEDFForm(
+                "Global",
+                reward.sourceGlobalEditorID,
+                reward.sourceGlobalFormID);
+            if (!global || !global->As<RE::TESGlobal>()) {
+                return false;
+            }
+            request.sourceGlobalFormID = global->GetFormID();
+        }
+        return api->QueueUpsertActorScale(
+            std::addressof(request), LogLedgerResult, nullptr);
+    }
+
+    bool QueueRemoveActorValueReward(
+        RE::Actor* actor,
+        std::string_view ruleID,
+        std::string_view rewardKey)
+    {
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!actor || !api || client == WhoEditThat::API::kInvalidClient) {
+            return false;
+        }
+        const auto mutationKey = BuildLedgerMutationKey(ruleID, rewardKey);
+        WhoEditThat::API::ContributionRequest request;
+        request.client = client;
+        request.actorFormID = actor->GetFormID();
+        request.mutationKey = mutationKey.c_str();
+        return api->QueueRemoveActorValue(
+            std::addressof(request), LogLedgerResult, nullptr);
+    }
+
+    bool QueueRemoveActorScaleReward(
+        RE::Actor* actor,
+        std::string_view ruleID,
+        std::string_view rewardKey)
+    {
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!actor || !api || client == WhoEditThat::API::kInvalidClient) {
+            return false;
+        }
+        const auto mutationKey = BuildLedgerMutationKey(ruleID, rewardKey);
+        WhoEditThat::API::ContributionRequest request;
+        request.client = client;
+        request.actorFormID = actor->GetFormID();
+        request.mutationKey = mutationKey.c_str();
+        return api->QueueRemoveActorScale(
+            std::addressof(request), LogLedgerResult, nullptr);
+    }
+
+    bool QueueRemoveActorValueRule(
+        RE::Actor* actor,
+        std::string_view ruleID)
+    {
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!actor || !api || client == WhoEditThat::API::kInvalidClient) {
+            return false;
+        }
+        const auto prefix = BuildLedgerRulePrefix(ruleID);
+        WhoEditThat::API::ContributionScopeRequest request;
+        request.client = client;
+        request.actorFormID = actor->GetFormID();
+        request.mutationKeyPrefix = prefix.c_str();
+        return api->QueueRemoveActorValuesByPrefix(
+            std::addressof(request), LogLedgerResult, nullptr);
+    }
+
+    bool QueueRemoveActorScaleRule(
+        RE::Actor* actor,
+        std::string_view ruleID)
+    {
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!actor || !api || client == WhoEditThat::API::kInvalidClient) {
+            return false;
+        }
+        const auto prefix = BuildLedgerRulePrefix(ruleID);
+        WhoEditThat::API::ContributionScopeRequest request;
+        request.client = client;
+        request.actorFormID = actor->GetFormID();
+        request.mutationKeyPrefix = prefix.c_str();
+        return api->QueueRemoveActorScalesByPrefix(
+            std::addressof(request), LogLedgerResult, nullptr);
+    }
+
+    struct LedgerReconcileContext
+    {
+        std::set<std::string> desired;
+    };
+
+    void ReconcileActorValueLedgerCallback(
+        const WhoEditThat::API::ActorValueListResult* result,
+        void* userData)
+    {
+        std::unique_ptr<LedgerReconcileContext> context(
+            static_cast<LedgerReconcileContext*>(userData));
+        if (!result || result->status != WhoEditThat::API::Status::kSuccess) {
+            return;
+        }
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!api || client == WhoEditThat::API::kInvalidClient) {
+            return;
+        }
+        for (std::uint32_t index = 0; index < result->entryCount; ++index) {
+            const auto& entry = result->entries[index];
+            if (context->desired.contains(entry.mutationKey)) {
+                continue;
+            }
+            WhoEditThat::API::ContributionRequest request;
+            request.client = client;
+            request.actorFormID = result->actorFormID;
+            request.mutationKey = entry.mutationKey;
+            api->QueueRemoveActorValue(
+                std::addressof(request), LogLedgerResult, nullptr);
+        }
+    }
+
+    void ReconcileActorScaleLedgerCallback(
+        const WhoEditThat::API::ActorScaleListResult* result,
+        void* userData)
+    {
+        std::unique_ptr<LedgerReconcileContext> context(
+            static_cast<LedgerReconcileContext*>(userData));
+        if (!result || result->status != WhoEditThat::API::Status::kSuccess) {
+            return;
+        }
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!api || client == WhoEditThat::API::kInvalidClient) {
+            return;
+        }
+        for (std::uint32_t index = 0; index < result->entryCount; ++index) {
+            const auto& entry = result->entries[index];
+            if (context->desired.contains(entry.mutationKey)) {
+                continue;
+            }
+            WhoEditThat::API::ContributionRequest request;
+            request.client = client;
+            request.actorFormID = result->actorFormID;
+            request.mutationKey = entry.mutationKey;
+            api->QueueRemoveActorScale(
+                std::addressof(request), LogLedgerResult, nullptr);
+        }
+    }
+
+    void ReconcileActorValueLedger(
+        RE::Actor* actor,
+        const std::map<std::string, AppliedRuleState>& rules)
+    {
+        auto* api = GetActorValueLedger();
+        const auto client = GetActorValueLedgerClient();
+        if (!actor || !api || client == WhoEditThat::API::kInvalidClient) {
+            return;
+        }
+        std::set<std::string> desired;
+        for (const auto& [ruleID, state] : rules) {
+            if (state.isActive) {
+                for (const auto& rewardKey : state.activeRewardKeys) {
+                    desired.insert(
+                        BuildLedgerMutationKey(ruleID, rewardKey));
+                }
+            }
+            for (const auto& rewardKey : state.persistentRewardKeys) {
+                desired.insert(
+                    BuildLedgerMutationKey(ruleID, rewardKey));
+            }
+        }
+        auto context = std::make_unique<LedgerReconcileContext>();
+        context->desired = desired;
+        WhoEditThat::API::ContributionScopeRequest request;
+        request.client = client;
+        request.actorFormID = actor->GetFormID();
+        request.mutationKeyPrefix = kLedgerPrefix.data();
+        if (api->QueueListActorValues(
+                std::addressof(request),
+                ReconcileActorValueLedgerCallback,
+                context.get())) {
+            context.release();
+        }
+        auto scaleContext = std::make_unique<LedgerReconcileContext>();
+        scaleContext->desired = std::move(desired);
+        if (api->QueueListActorScales(
+                std::addressof(request),
+                ReconcileActorScaleLedgerCallback,
+                scaleContext.get())) {
+            scaleContext.release();
+        }
+    }
+
+    float ReadActorValue(
+        RE::Actor* a_actor,
+        const RE::ActorValue a_actorValue,
+        const ActorValueMode a_mode)
+    {
+        auto* owner = a_actor ? a_actor->AsActorValueOwner() : nullptr;
+        if (!owner || a_actorValue == RE::ActorValue::kNone) {
+            return 0.0f;
+        }
+        switch (a_mode) {
+        case ActorValueMode::kPermanent:
+            return owner->GetPermanentActorValue(a_actorValue);
+        case ActorValueMode::kMaximum:
+            return IsMaximumActorValueSupported(a_actorValue) ?
+                a_actor->GetActorValueMax(a_actorValue) :
+                0.0f;
+        case ActorValueMode::kCurrent:
+        default:
+            return owner->GetActorValue(a_actorValue);
+        }
+    }
+
+    bool ApplyOrReconcileNumericReward(
         RE::Actor* a_actor,
         const Reward& a_reward,
-        const float a_direction)
+        const std::string& a_rewardKey,
+        std::string_view a_ruleID,
+        AppliedRuleState& a_state)
     {
-        if (!a_actor || !IsActorValueRewardValid(a_reward)) {
-            if (a_reward.typeReward == "Actor Value") {
-                logger::warn(
-                    "[ActorValueReward] Invalid reward '{}' amount {} for actor {:08X}.",
-                    a_reward.actorValueName,
-                    a_reward.actorValueAmount,
-                    a_actor ? a_actor->GetFormID() : 0);
+        if (!a_actor || !IsActorValueRewardValid(a_reward) ||
+            !IsActorScaleRewardValid(a_reward)) {
+            return false;
+        }
+        if (a_reward.typeReward == "Actor Scale") {
+            return QueueActorScaleReward(
+                a_actor, a_reward, a_ruleID, a_rewardKey);
+        }
+        // One-time migration: old EDF saves own this delta directly. Remove
+        // it before handing the same reward to WhoEditThat.
+        if (const auto existing =
+                a_state.numericRewardStates.find(a_rewardKey);
+            existing != a_state.numericRewardStates.end()) {
+            const auto target = ResolveActorValue(
+                existing->second.targetActorValueName.empty() ?
+                    a_reward.actorValueName :
+                    existing->second.targetActorValueName);
+            if (target != RE::ActorValue::kNone) {
+                a_actor->AsActorValueOwner()->ModActorValue(
+                    RE::ACTOR_VALUE_MODIFIERS::kPermanent,
+                    target,
+                    -existing->second.appliedDelta);
             }
+            a_state.numericRewardStates.erase(existing);
+        }
+        return QueueActorValueReward(
+            a_actor, a_reward, a_ruleID, a_rewardKey);
+    }
+
+    bool RemoveNumericReward(
+        RE::Actor* a_actor,
+        const Reward& a_reward,
+        const std::string& a_rewardKey,
+        std::string_view a_ruleID,
+        AppliedRuleState& a_state)
+    {
+        if (!a_actor) {
             return false;
         }
-        const auto actorValue =
-            ResolveActorValue(a_reward.actorValueName);
-        auto* owner = a_actor->AsActorValueOwner();
-        if (!owner || actorValue == RE::ActorValue::kNone) {
-            return false;
+        if (a_reward.typeReward == "Actor Scale") {
+            return QueueRemoveActorScaleReward(
+                a_actor, a_ruleID, a_rewardKey);
         }
-
-        const auto delta = a_reward.actorValueAmount * a_direction;
-        owner->ModActorValue(
-            RE::ACTOR_VALUE_MODIFIERS::kPermanent,
-            actorValue,
-            delta);
-
-        RuleEvaluationDelta evaluation;
-        evaluation.mask = ToMask(RuleDependency::kActorValue);
-        evaluation.changedActorValues.insert(actorValue);
-        ScheduleRuleEvaluation(a_actor, std::move(evaluation));
-        logger::debug(
-            "[ActorValueReward] Modified '{}' by {:+.3f} on '{}' ({:08X}).",
-            a_reward.actorValueName,
-            delta,
-            a_actor->GetName(),
-            a_actor->GetFormID());
-        return true;
+        const auto found = a_state.numericRewardStates.find(a_rewardKey);
+        bool removedLegacy = false;
+        if (found != a_state.numericRewardStates.end()) {
+            const auto target = ResolveActorValue(
+                found->second.targetActorValueName.empty() ?
+                    a_reward.actorValueName :
+                    found->second.targetActorValueName);
+            if (target != RE::ActorValue::kNone) {
+                a_actor->AsActorValueOwner()->ModActorValue(
+                    RE::ACTOR_VALUE_MODIFIERS::kPermanent,
+                    target,
+                    -found->second.appliedDelta);
+                removedLegacy = true;
+            }
+            a_state.numericRewardStates.erase(found);
+        }
+        return QueueRemoveActorValueReward(
+                   a_actor, a_ruleID, a_rewardKey) ||
+            removedLegacy;
     }
 
     std::string BuildRewardOwnerKey(
@@ -941,7 +1413,10 @@ std::vector<SaveHistoryEntry>& SaveStateManager::GetCharacterHistory(uint32_t ch
     return _characterHistory[characterID];
 }
 
-void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) {
+void SaveStateManager::SetCurrentContext(
+    uint32_t a_charID,
+    uint32_t a_saveNum,
+    std::string_view a_saveName) {
     logger::info("[SaveManager] Definindo contexto: CharID {:08X}, Save #{}", a_charID, a_saveNum);
     ResetRuleEvaluationRuntimeState();
     _virtualKeywordOwners.clear();
@@ -951,10 +1426,13 @@ void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) 
 
     _currentContext.charID = a_charID;
     _currentContext.saveNumber = a_saveNum;
+    _currentContext.saveName =
+        std::filesystem::path(a_saveName).filename().string();
     _currentContext.isValid = true; // Só é válido se tivermos um ID de personagem
 
     _sessionData = SaveHistoryEntry{};
     _sessionData.saveNumber = a_saveNum;
+    _sessionData.saveName = _currentContext.saveName;
 
     if (a_charID != 0) {
         if (!_characterHistory.contains(a_charID)) {
@@ -964,12 +1442,29 @@ void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) 
         auto& history = _characterHistory[a_charID];
         SaveHistoryEntry* bestSnapshot = nullptr;
 
+        const auto restore = [&](const SaveHistoryEntry& a_entry) {
+            _sessionData = a_entry;
+            _sessionData.saveNumber = a_saveNum;
+            _sessionData.saveName = _currentContext.saveName;
+        };
+        if (!_currentContext.saveName.empty()) {
+            const auto exact = std::ranges::find_if(
+                history, [&](const SaveHistoryEntry& a_entry) {
+                    return a_entry.saveNumber == a_saveNum &&
+                        a_entry.saveName == _currentContext.saveName;
+                });
+            if (exact != history.end()) {
+                restore(*exact);
+                logger::info(
+                    "[SaveManager] Contexto restaurado pela identidade '{}' / #{}.",
+                    _currentContext.saveName, a_saveNum);
+                return;
+            }
+        }
         for (auto& entry : history) {
-            if (entry.saveNumber == a_saveNum) {
-                _sessionData.npcRuleVersions = entry.npcRuleVersions;
-                _sessionData.persistentItems = entry.persistentItems;
-                _sessionData.virtualKeywords = entry.virtualKeywords;
-                _sessionData.addedFactions = entry.addedFactions;
+            if (entry.saveNumber == a_saveNum &&
+                (_currentContext.saveName.empty() || entry.saveName.empty())) {
+                restore(entry);
                 logger::info("[SaveManager] Contexto restaurado com sucesso do save #{}", a_saveNum);
                 return;
             }
@@ -979,10 +1474,7 @@ void SaveStateManager::SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum) 
         }
 
         if (bestSnapshot) {
-            _sessionData.npcRuleVersions = bestSnapshot->npcRuleVersions;
-            _sessionData.persistentItems = bestSnapshot->persistentItems;
-            _sessionData.virtualKeywords = bestSnapshot->virtualKeywords;
-            _sessionData.addedFactions = bestSnapshot->addedFactions;
+            restore(*bestSnapshot);
             logger::info("[SaveManager] Contexto herdado do save anterior #{}", bestSnapshot->saveNumber);
         }
     }
@@ -1044,11 +1536,14 @@ void SaveStateManager::PersistCurrentSave(const std::string& a_saveName) {
     }
 
     _sessionData.saveNumber = newSaveNumber;
+    _sessionData.saveName =
+        std::filesystem::path(a_saveName).filename().string();
     logger::info("[SaveManager] Sincronizando dados para o Save #{}...", newSaveNumber);
 
     RefreshPersistentItemsForLoadedActors();
     UpdateSaveEntry(context.charID, _sessionData);
     context.saveNumber = newSaveNumber; // Atualiza o contexto para o novo número
+    context.saveName = _sessionData.saveName;
 }
 
 void SaveStateManager::ClearContext()
@@ -1058,6 +1553,7 @@ void SaveStateManager::ClearContext()
     _currentContext.isValid = false;
     _currentContext.saveNumber = 0;
     _currentContext.charID = 0;
+    _currentContext.saveName.clear();
     _sessionData = SaveHistoryEntry{};
     _virtualKeywordOwners.clear();
     _virtualKeywordOwnersReady.clear();
@@ -1524,15 +2020,31 @@ void SaveStateManager::LoadCharacterData(uint32_t characterID) {
     std::string path = GetCharacterPath(characterID);
     logger::info("[SaveManager] Tentando carregar arquivo: {}", path);
 
-    std::ifstream i(path);
-    if (!i.is_open()) return;
-
     try {
-        rapidjson::IStreamWrapper stream(i);
         rapidjson::Document doc;
-        doc.ParseStream(stream);
+        const auto parseFile = [&](const std::filesystem::path& a_path) {
+            std::ifstream input(a_path, std::ios::binary);
+            if (!input.is_open()) return false;
+            rapidjson::IStreamWrapper stream(input);
+            doc.ParseStream(stream);
+            return !doc.HasParseError();
+        };
+        if (!parseFile(path)) {
+            const auto backupPath = std::filesystem::path(path).concat(".bak");
+            logger::warn(
+                "[SaveManager] Save lateral principal ausente ou inválido; tentando '{}'.",
+                backupPath.string());
+            if (!parseFile(backupPath)) {
+                logger::error(
+                    "[SaveManager] Não foi possível carregar '{}' nem seu backup.",
+                    path);
+                return;
+            }
+            logger::info(
+                "[SaveManager] Histórico recuperado do backup '{}'.",
+                backupPath.string());
+        }
         if (doc.HasParseError()) {
-            logger::error("[SaveManager] JSON inválido em {}.", path);
             return;
         }
 
@@ -1598,6 +2110,10 @@ void SaveStateManager::LoadCharacterData(uint32_t characterID) {
             if (auto saveNumber = FindMember(h, "sn")) {
                 entry.saveNumber = GetJsonUint(*saveNumber);
             }
+            if (const auto saveName = FindMember(h, "sk");
+                saveName && saveName->IsString()) {
+                entry.saveName = saveName->GetString();
+            }
 
             auto npcsJson = FindMember(h, "npcs");
             if (!npcsJson || !npcsJson->IsArray()) continue;
@@ -1645,6 +2161,38 @@ void SaveStateManager::LoadCharacterData(uint32_t characterID) {
                             if (rewardIdx >= 0 && static_cast<size_t>(rewardIdx) < rewardKeys.size()) {
                                 state.persistentRewardKeys.insert(rewardKeys[rewardIdx]);
                             }
+                        }
+                    }
+                    if (rData.Size() >= 8 && rData[7].IsObject()) {
+                        for (auto numericIt = rData[7].MemberBegin();
+                             numericIt != rData[7].MemberEnd();
+                             ++numericIt) {
+                            if (!numericIt->name.IsString() ||
+                                !numericIt->value.IsArray() ||
+                                numericIt->value.Size() < 4) {
+                                continue;
+                            }
+                            const auto rewardIndex =
+                                std::stoi(numericIt->name.GetString());
+                            if (rewardIndex < 0 ||
+                                static_cast<std::size_t>(rewardIndex) >=
+                                    rewardKeys.size()) {
+                                continue;
+                            }
+                            const auto& value = numericIt->value;
+                            if (!value[0].IsString() ||
+                                !value[1].IsNumber() ||
+                                !value[2].IsNumber() ||
+                                !value[3].IsNumber()) {
+                                continue;
+                            }
+                            state.numericRewardStates[
+                                rewardKeys[rewardIndex]] = {
+                                value[0].GetString(),
+                                value[1].GetFloat(),
+                                value[2].GetFloat(),
+                                value[3].GetFloat()
+                            };
                         }
                     }
                     entry.npcRuleVersions[npcKey][rules[rIdx]] = state;
@@ -1710,7 +2258,9 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
 
     // Atualiza cache em memória
     auto it = std::find_if(history.begin(), history.end(), [&](const SaveHistoryEntry& e) {
-        return e.saveNumber == newEntry.saveNumber;
+        return e.saveNumber == newEntry.saveNumber &&
+            (newEntry.saveName.empty() || e.saveName.empty() ||
+             e.saveName == newEntry.saveName);
         });
     if (it != history.end()) {
         *it = newEntry;
@@ -1730,11 +2280,20 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
         rapidjson::Document doc;
         doc.SetObject();
         auto& alloc = doc.GetAllocator();
+        doc.AddMember("schemaVersion", 2, alloc);
 
         rapidjson::Value jHistory(rapidjson::kArrayType);
         for (const auto& entry : history) {
             rapidjson::Value jEntry(rapidjson::kObjectType);
             jEntry.AddMember("sn", entry.saveNumber, alloc);
+            if (!entry.saveName.empty()) {
+                rapidjson::Value saveName;
+                saveName.SetString(
+                    entry.saveName.c_str(),
+                    static_cast<rapidjson::SizeType>(entry.saveName.size()),
+                    alloc);
+                jEntry.AddMember("sk", saveName, alloc);
+            }
 
             rapidjson::Value jNPCs(rapidjson::kArrayType);
             for (auto const& [npcKey, ruleMap] : entry.npcRuleVersions) {
@@ -1770,6 +2329,34 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
                         jPersistentRewards.PushBack(GetPoolIndex(p_rewards, rewardKey), alloc);
                     }
                     jState.PushBack(jPersistentRewards, alloc);
+
+                    rapidjson::Value jNumericRewards(rapidjson::kObjectType);
+                    for (const auto& [rewardKey, numeric] :
+                         state.numericRewardStates) {
+                        const auto rewardIndex = std::to_string(
+                            GetPoolIndex(p_rewards, rewardKey));
+                        rapidjson::Value rewardJsonKey;
+                        rewardJsonKey.SetString(
+                            rewardIndex.c_str(),
+                            static_cast<rapidjson::SizeType>(rewardIndex.size()),
+                            alloc);
+                        rapidjson::Value numericData(rapidjson::kArrayType);
+                        rapidjson::Value targetName;
+                        targetName.SetString(
+                            numeric.targetActorValueName.c_str(),
+                            static_cast<rapidjson::SizeType>(
+                                numeric.targetActorValueName.size()),
+                            alloc);
+                        numericData.PushBack(targetName, alloc);
+                        numericData.PushBack(
+                            numeric.baselineAtActivation, alloc);
+                        numericData.PushBack(
+                            numeric.resolvedSourceValue, alloc);
+                        numericData.PushBack(numeric.appliedDelta, alloc);
+                        jNumericRewards.AddMember(
+                            rewardJsonKey, numericData, alloc);
+                    }
+                    jState.PushBack(jNumericRewards, alloc);
 
                     const auto ruleIndex = std::to_string(GetPoolIndex(p_rules, ruleID));
                     rapidjson::Value ruleKey;
@@ -1832,18 +2419,92 @@ void SaveStateManager::UpdateSaveEntry(uint32_t characterID, const SaveHistoryEn
         doc.AddMember("p_rewards", WriteStringArray(p_rewards, alloc), alloc);
         doc.AddMember("history", jHistory, alloc);
 
-        std::string path = GetCharacterPath(characterID);
-        std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+        const auto started = std::chrono::steady_clock::now();
+        const auto serialized = SerializeJson(doc);
+        rapidjson::Document verification;
+        verification.Parse(serialized.c_str(), serialized.size());
+        if (verification.HasParseError() || !verification.IsObject()) {
+            throw std::runtime_error(
+                "generated save JSON failed validation");
+        }
 
-        std::ofstream o(path);
-        if (o.is_open()) {
-            o << SerializeJson(doc);
-            o.close();
-            logger::info("[SaveManager] Arquivo de histórico atualizado com sucesso: {}", path);
+        const auto path = std::filesystem::path(
+            GetCharacterPath(characterID));
+        const auto temporaryPath =
+            std::filesystem::path(path).concat(".tmp");
+        const auto backupPath =
+            std::filesystem::path(path).concat(".bak");
+        std::filesystem::create_directories(path.parent_path());
+
+        {
+            std::ofstream output(
+                temporaryPath,
+                std::ios::binary | std::ios::trunc);
+            if (!output.is_open()) {
+                throw std::runtime_error(
+                    "could not open temporary save file");
+            }
+            output.write(
+                serialized.data(),
+                static_cast<std::streamsize>(serialized.size()));
+            output.flush();
+            if (!output.good()) {
+                throw std::runtime_error(
+                    "could not flush temporary save file");
+            }
         }
-        else {
-            logger::error("[SaveManager] Erro crítico: Não foi possível abrir o arquivo para escrita: {}", path);
+        {
+            std::ifstream input(temporaryPath, std::ios::binary);
+            rapidjson::IStreamWrapper stream(input);
+            rapidjson::Document temporaryVerification;
+            temporaryVerification.ParseStream(stream);
+            if (!input.is_open() ||
+                temporaryVerification.HasParseError() ||
+                !temporaryVerification.IsObject()) {
+                throw std::runtime_error(
+                    "temporary save file failed validation");
+            }
         }
+
+        std::error_code ec;
+        if (std::filesystem::exists(path)) {
+            std::filesystem::copy_file(
+                path,
+                backupPath,
+                std::filesystem::copy_options::overwrite_existing,
+                ec);
+            if (ec) {
+                throw std::runtime_error(std::format(
+                    "could not create save backup: {}", ec.message()));
+            }
+        }
+        if (!MoveFileExW(
+                temporaryPath.c_str(),
+                path.c_str(),
+                MOVEFILE_REPLACE_EXISTING |
+                    MOVEFILE_WRITE_THROUGH)) {
+            const auto replaceError = std::error_code(
+                static_cast<int>(GetLastError()),
+                std::system_category());
+            std::error_code restoreError;
+            if (!std::filesystem::exists(path) &&
+                std::filesystem::exists(backupPath)) {
+                std::filesystem::copy_file(
+                    backupPath,
+                    path,
+                    std::filesystem::copy_options::overwrite_existing,
+                    restoreError);
+            }
+            throw std::runtime_error(std::format(
+                "could not promote temporary save: {}",
+                replaceError.message()));
+        }
+        const auto elapsed = std::chrono::duration_cast<
+            std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started);
+        logger::info(
+            "[SaveManager] Histórico atualizado: {} bytes em {} ms ('{}').",
+            serialized.size(), elapsed.count(), path.string());
     }
     catch (const std::exception& e) {
         logger::error("[SaveManager] Exceção durante a compressão/escrita do JSON: {}", e.what());
@@ -2754,8 +3415,17 @@ void RemoveRuleRewards(RE::Actor* a_actor, const Rule& a_rule) {
     for (const auto& group : a_rule.rewardGroups) {
         for (const auto& reward : group.rewards) {
             if (reward.isPersistent) continue;
-            if (reward.typeReward == "Actor Value") {
-                ModifyActorValueReward(a_actor, reward, -1.0f);
+            if (reward.typeReward == "Actor Value" ||
+                reward.typeReward == "Actor Scale") {
+                const auto rewardKey =
+                    BuildRewardStateKey(group.name, reward);
+                if (reward.typeReward == "Actor Scale") {
+                    QueueRemoveActorScaleReward(
+                        a_actor, a_rule.id, rewardKey);
+                } else {
+                    QueueRemoveActorValueReward(
+                        a_actor, a_rule.id, rewardKey);
+                }
                 continue;
             }
             auto [plugin, fID] = reward.ParseFormID();
@@ -3177,8 +3847,17 @@ void ApplyRewardPhysical(
     int a_ruleVersion,
     std::uint64_t a_activationToken,
     const std::string& a_groupName) {
-    if (reward.typeReward == "Actor Value") {
-        ModifyActorValueReward(a_actor, reward, 1.0f);
+    if (reward.typeReward == "Actor Value" ||
+        reward.typeReward == "Actor Scale") {
+        const auto rewardKey =
+            BuildRewardStateKey(a_groupName, reward);
+        if (reward.typeReward == "Actor Scale") {
+            QueueActorScaleReward(
+                a_actor, reward, a_ruleID, rewardKey);
+        } else {
+            QueueActorValueReward(
+                a_actor, reward, a_ruleID, rewardKey);
+        }
         return;
     }
     auto [plugin, fID] = reward.ParseFormID();
@@ -3634,12 +4313,36 @@ void MigrateLegacyActivationState(
         if (groupIt == a_rule.rewardGroups.end()) continue;
 
         for (const auto& reward : groupIt->rewards) {
-            if (!IsRewardRepresentedInCurrentState(a_actor, reward, a_rule.id, groupIt->name)) continue;
+            if (reward.typeReward != "Actor Value" &&
+                reward.typeReward != "Actor Scale" &&
+                !IsRewardRepresentedInCurrentState(
+                    a_actor, reward, a_rule.id, groupIt->name)) {
+                continue;
+            }
+            if (!IsActorValueRewardValid(reward) ||
+                !IsActorScaleRewardValid(reward)) {
+                continue;
+            }
 
             const auto rewardKey = BuildRewardStateKey(groupIt->name, reward);
             a_state.activeRewardKeys.push_back(rewardKey);
             if (reward.isPersistent) {
                 a_state.persistentRewardKeys.insert(rewardKey);
+            }
+            if (reward.typeReward == "Actor Value" &&
+                reward.numericSource == NumericRewardSource::kFixed &&
+                reward.numericOperation == NumericRewardOperation::kFlat) {
+                const auto target =
+                    ResolveActorValue(reward.actorValueName);
+                const auto delta =
+                    reward.actorValueAmount * reward.sourceMultiplier;
+                a_state.numericRewardStates[rewardKey] = {
+                    reward.actorValueName,
+                    ReadActorValue(
+                        a_actor, target, reward.percentBaseMode) - delta,
+                    delta,
+                    delta
+                };
             }
         }
     }
@@ -3673,6 +4376,16 @@ void RemoveAppliedActivationRewards(
                 continue;
             }
 
+            if (reward->typeReward == "Actor Value" ||
+                reward->typeReward == "Actor Scale") {
+                if (!RemoveNumericReward(
+                        a_actor, *reward, rewardKey,
+                        a_rule.id, a_state)) {
+                    hasOutstandingRewards = true;
+                }
+                continue;
+            }
+
             auto targetGroup = std::ranges::find_if(removalRule.rewardGroups, [&](const RewardGroup& a_group) {
                 return a_group.name == group->name;
             });
@@ -3693,6 +4406,8 @@ void RemoveAppliedActivationRewards(
             const RewardGroup* group = nullptr;
             const Reward* reward = nullptr;
             if (!ResolveRewardState(a_rule, rewardKey, group, reward) || !group || !reward) continue;
+            if (reward->typeReward == "Actor Value" ||
+                reward->typeReward == "Actor Scale") continue;
             if (HasOutstandingNonPersistentReward(
                     a_actor, *reward, a_rule.id, group->name)) {
                 hasOutstandingRewards = true;
@@ -3776,21 +4491,36 @@ void StartRuleActivation(
             if (reward->isPersistent &&
                 ContainsRewardStateKey(
                     a_state.persistentRewardKeys, group.name, *reward)) {
+                if (reward->typeReward == "Actor Value" ||
+                    reward->typeReward == "Actor Scale") {
+                    ApplyOrReconcileNumericReward(
+                        a_actor, *reward, rewardKey,
+                        a_rule.id, a_state);
+                    continue;
+                }
                 RestorePersistentRewardIfNeeded(
                     a_actor, *reward, a_isPlayer, a_equipQueue, a_rule.id, group.name);
                 QueuePersistentOutfitForNormalUse(a_actor, *reward, a_isPlayer, a_equipQueue);
                 continue;
             }
 
-            ApplyRewardPhysicalTracked(
-                a_actor,
-                *reward,
-                a_isPlayer,
-                a_equipQueue,
-                a_rule.id,
-                a_rule.version,
-                a_state.runtimeActivationToken,
-                group.name);
+            if (reward->typeReward == "Actor Value" ||
+                reward->typeReward == "Actor Scale") {
+                ApplyOrReconcileNumericReward(
+                    a_actor, *reward, rewardKey,
+                    a_rule.id, a_state);
+            }
+            else {
+                ApplyRewardPhysicalTracked(
+                    a_actor,
+                    *reward,
+                    a_isPlayer,
+                    a_equipQueue,
+                    a_rule.id,
+                    a_rule.version,
+                    a_state.runtimeActivationToken,
+                    group.name);
+            }
             if (reward->isPersistent) {
                 a_state.persistentRewardKeys.insert(rewardKey);
             }
@@ -3965,6 +4695,25 @@ static void ApplyRulesToInstancePass(
     }
 
     std::string npcKey = fileNameStr + "|" + FormatLocalFormID(actorID, fileNameStr);
+    auto& actorRuleStates = session.npcRuleVersions[npcKey];
+
+    // Saves anteriores ao ledger numérico já têm o ModAV gravado no .ess.
+    // Documentamos esse delta antes de observar os baselines para não aplicá-lo
+    // novamente nem incorporá-lo à base de um reward percentual.
+    for (auto& [ruleID, state] : actorRuleStates) {
+        if (state.activationStateKnown || state.version <= 0) {
+            continue;
+        }
+        const auto* historicalRule =
+            ruleManager->GetRuleVersion(ruleID, state.version);
+        if (!historicalRule) {
+            historicalRule = ruleManager->FindRule(ruleID);
+        }
+        if (historicalRule) {
+            MigrateLegacyActivationState(
+                a_actor, *historicalRule, state);
+        }
+    }
 
     // --- LÓGICA DE REMOÇÃO DE REGRAS INVÁLIDAS ---
     if (session.npcRuleVersions.contains(npcKey)) {
@@ -3977,6 +4726,22 @@ static void ApplyRulesToInstancePass(
             bool shouldRemove = false;
             if (!ruleDef) {
                 shouldRemove = true;
+                QueueRemoveActorValueRule(a_actor, ruleID);
+                QueueRemoveActorScaleRule(a_actor, ruleID);
+                for (const auto& [rewardKey, numeric] :
+                     state.numericRewardStates) {
+                    (void)rewardKey;
+                    const auto target = ResolveActorValue(
+                        numeric.targetActorValueName);
+                    if (target != RE::ActorValue::kNone) {
+                        a_actor->AsActorValueOwner()->ModActorValue(
+                            RE::ACTOR_VALUE_MODIFIERS::kPermanent,
+                            target,
+                            -numeric.appliedDelta);
+                    }
+                }
+                state.numericRewardStates.clear();
+                state.persistentRewardKeys.clear();
             }
             else {
                 const Rule& rule = *ruleDef;
@@ -4058,6 +4823,7 @@ static void ApplyRulesToInstancePass(
         actorName, rulesToProcess.size(), a_delta.mask, a_delta.changedForms.size());
 
     if (rulesToProcess.empty()) {
+        ReconcileActorValueLedger(a_actor, actorRuleStates);
         if (!isPlayer &&
             (equipmentReconciliationNeeded ||
              ShouldReconcileEquipmentForDelta(
@@ -4140,10 +4906,26 @@ static void ApplyRulesToInstancePass(
             }
 
             if (oldVersion > 0 && oldVersion != currentRule.version) {
+                QueueRemoveActorValueRule(a_actor, ruleID);
+                QueueRemoveActorScaleRule(a_actor, ruleID);
                 if (state.isActive) {
                     RemoveAppliedActivationRewards(
                         a_actor, previousRule ? *previousRule : currentRule, state);
                 }
+                for (const auto& [rewardKey, numeric] :
+                     state.numericRewardStates) {
+                    (void)rewardKey;
+                    const auto target = ResolveActorValue(
+                        numeric.targetActorValueName);
+                    if (target != RE::ActorValue::kNone) {
+                        a_actor->AsActorValueOwner()->ModActorValue(
+                            RE::ACTOR_VALUE_MODIFIERS::kPermanent,
+                            target,
+                            -numeric.appliedDelta);
+                    }
+                }
+                state.numericRewardStates.clear();
+                state.persistentRewardKeys.clear();
                 state.isActive = false;
                 state.runtimeActivationToken = 0;
                 state.canRerollOnNextActivation = true;
@@ -4176,9 +4958,18 @@ static void ApplyRulesToInstancePass(
                     const RewardGroup* group = nullptr;
                     const Reward* reward = nullptr;
                     if (!ResolveRewardState(currentRule, rewardKey, group, reward) ||
-                        !group || !reward || !reward->isPersistent) {
+                        !group || !reward) {
                         continue;
                     }
+
+                    if (reward->typeReward == "Actor Value" ||
+                        reward->typeReward == "Actor Scale") {
+                        ApplyOrReconcileNumericReward(
+                            a_actor, *reward, rewardKey,
+                            ruleID, state);
+                        continue;
+                    }
+                    if (!reward->isPersistent) continue;
 
                     RestorePersistentRewardIfNeeded(
                         a_actor, *reward, isPlayer, equipQueue, ruleID, group->name);
@@ -4207,6 +4998,7 @@ static void ApplyRulesToInstancePass(
          ShouldReconcileEquipmentForDelta(a_actor, a_delta))) {
         ReconcileEquipmentContext(a_actor);
     }
+    ReconcileActorValueLedger(a_actor, actorRuleStates);
 }
 
 void ApplyRulesToInstance(
@@ -4237,6 +5029,11 @@ void ApplyRulesToInstance(
                 combine(state.canRerollOnNextActivation);
                 for (const auto& rewardKey : state.activeRewardKeys) {
                     combine(rewardKey);
+                }
+                for (const auto& [rewardKey, numeric] :
+                     state.numericRewardStates) {
+                    combine(rewardKey);
+                    combine(numeric.appliedDelta);
                 }
             }
         }
@@ -4346,6 +5143,8 @@ bool ResetRuleActivationForActor(
             continue;
         }
         found = true;
+        QueueRemoveActorValueRule(actor, appliedRuleID);
+        QueueRemoveActorScaleRule(actor, appliedRuleID);
         const Rule* definition = RuleManager::GetSingleton()->
             GetRuleVersion(appliedRuleID, state.version);
         if (!definition) {
@@ -4356,6 +5155,20 @@ bool ResetRuleActivationForActor(
             (!state.activationStateKnown || state.isActive)) {
             RemoveAppliedActivationRewards(actor, *definition, state);
         }
+        for (const auto& [rewardKey, numeric] :
+             state.numericRewardStates) {
+            (void)rewardKey;
+            const auto target = ResolveActorValue(
+                numeric.targetActorValueName);
+            if (target != RE::ActorValue::kNone) {
+                actor->AsActorValueOwner()->ModActorValue(
+                    RE::ACTOR_VALUE_MODIFIERS::kPermanent,
+                    target,
+                    -numeric.appliedDelta);
+            }
+        }
+        state.numericRewardStates.clear();
+        state.persistentRewardKeys.clear();
         state.activationStateKnown = true;
         state.isActive = false;
         state.runtimeActivationToken = 0;

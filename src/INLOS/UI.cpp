@@ -666,7 +666,7 @@ namespace INLOS::UI
                 g_selectionPlugin = "All";
             }
             ImGuiMCP::SameLine();
-            ImGuiMCP::SetNextItemWidth(150.0f);
+            ImGuiMCP::SetNextItemWidth(300.0f);
             DistributionCore::UI::DrawSearchableCombo(
                 "##Plugin",
                 g_selectionPlugin == "All" ?

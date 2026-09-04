@@ -14,6 +14,13 @@ struct SaveFileRoot {
     std::string denseHistoryJson;
 };
 
+struct AppliedNumericRewardState {
+    std::string targetActorValueName;
+    float baselineAtActivation = 0.0f;
+    float resolvedSourceValue = 0.0f;
+    float appliedDelta = 0.0f;
+};
+
 struct AppliedRuleState {
     int version = 0;
     std::vector<std::string> appliedGroups; // Nomes dos grupos que passaram no sorteio
@@ -22,6 +29,8 @@ struct AppliedRuleState {
     bool canRerollOnNextActivation = true;
     std::vector<std::string> activeRewardKeys;
     std::set<std::string> persistentRewardKeys;
+    std::map<std::string, AppliedNumericRewardState>
+        numericRewardStates;
     // Runtime-only identity used to cancel deferred work from an older
     // activation. It is deliberately not serialized into character saves.
     std::uint64_t runtimeActivationToken = 0;
@@ -46,7 +55,8 @@ struct PersistentItemState {
 //}
 
 struct SaveHistoryEntry {
-    uint32_t saveNumber;
+    uint32_t saveNumber = 0;
+    std::string saveName;
     std::map<std::string, std::map<std::string, AppliedRuleState>> npcRuleVersions;
     std::map<std::string, std::map<std::string, PersistentItemState>> persistentItems;
     std::map<std::string, std::set<std::string>> virtualKeywords;
@@ -56,6 +66,7 @@ struct SaveHistoryEntry {
 struct CurrentSaveContext {
     uint32_t charID = 0;
     uint32_t saveNumber = 0;
+    std::string saveName;
     bool isValid = false;
 
 };
@@ -68,7 +79,10 @@ public:
 
     void LoadCharacterData(uint32_t characterID);
     void UpdateSaveEntry(uint32_t characterID, const SaveHistoryEntry& newEntry);
-    void SetCurrentContext(uint32_t a_charID, uint32_t a_saveNum);
+    void SetCurrentContext(
+        uint32_t a_charID,
+        uint32_t a_saveNum,
+        std::string_view a_saveName = {});
     void PersistCurrentSave(const std::string& a_saveName);
     void ClearContext();
     std::vector<SaveHistoryEntry>& GetCharacterHistory(uint32_t characterID);

@@ -6,6 +6,7 @@
 #include "Rule.h"
 #include "DistributionCore/Domain.h"
 #include "EDFAPI.h"
+#include "WhoEditThatAPI.h"
 
 namespace {
     bool hasDFG = false;
@@ -20,6 +21,12 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
     }
 
     if (message->type == SKSE::MessagingInterface::kDataLoaded) {
+		if (WhoEditThat::API::GetAPI()) {
+			logger::info("WhoEditThat API v1 found; Actor Value rewards use the shared ledger.");
+		}
+		else {
+			logger::error("WhoEditThat API v1 is required for Actor Value rewards.");
+		}
 		Hooks::Install();
         // Init Rules
         RuleManager::GetSingleton()->LoadRules();
@@ -102,7 +109,8 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
                 charID = tempEntry.characterID;
             }
             // Isso minimiza o tempo em que o isValid fica false durante a transição
-            SaveStateManager::GetSingleton()->SetCurrentContext(charID, tempEntry.saveNumber);
+            SaveStateManager::GetSingleton()->SetCurrentContext(
+                charID, tempEntry.saveNumber, saveName);
             logger::info("Contexto carregado: Personagem {:X}, Save {}", charID, tempEntry.saveNumber);
         }
         else {

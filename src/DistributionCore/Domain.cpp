@@ -137,6 +137,10 @@ namespace DistributionCore
                     ToMask(Domain::kEDF),
                     ToMask(TypeCapability::kNumeric) });
             RewardRegistry().Register(
+                { "Actor Scale", "Actor Scale",
+                    ToMask(Domain::kEDF),
+                    ToMask(TypeCapability::kNumeric) });
+            RewardRegistry().Register(
                 { "Skill Experience", "Vanilla Skill Experience",
                     ToMask(Domain::kINLOS) |
                         ToMask(Domain::kWIYT),

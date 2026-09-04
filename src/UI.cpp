@@ -1476,7 +1476,7 @@ namespace SPIDUI {
         }
 
         ImGuiMCP::SameLine();
-        ImGuiMCP::SetNextItemWidth(150.0f);
+        ImGuiMCP::SetNextItemWidth(300.0f);
         static std::vector<SearchableComboOption> pluginOptions;
         static std::uint64_t pluginOptionsRevision = 0;
         static std::uint64_t pluginManagerRevision = static_cast<std::uint64_t>(-1);
@@ -1730,16 +1730,17 @@ namespace SPIDUI {
         }
     }
 
-    void RenderActorValueRewards(
+    void RenderNumericRewards(
         RewardGroup& a_group,
         const std::size_t a_groupIndex)
     {
-        const auto hasActorValueRewards = std::ranges::any_of(
+        const auto hasNumericRewards = std::ranges::any_of(
             a_group.rewards,
             [](const Reward& a_reward) {
-                return a_reward.typeReward == "Actor Value";
+                return a_reward.typeReward == "Actor Value" ||
+                    a_reward.typeReward == "Actor Scale";
             });
-        if (!hasActorValueRewards) {
+        if (!hasNumericRewards) {
             return;
         }
 
@@ -1748,80 +1749,231 @@ namespace SPIDUI {
             ImGuiMCP::ImGuiTableFlags_RowBg |
             ImGuiMCP::ImGuiTableFlags_Resizable;
         if (!ImGuiMCP::BeginTable(
-                "ActorValueRewards", 7, tableFlags)) {
+                "NumericRewards", 7, tableFlags)) {
             return;
         }
         ImGuiMCP::TableSetupColumn(
-            GetLoc("auto.actor_value", "Actor Value"),
+            GetLoc("auto.target", "Target"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 220.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.calculation", "Calculation"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 145.0f);
+        ImGuiMCP::TableSetupColumn(
+            GetLoc("auto.source", "Source"),
             ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
         ImGuiMCP::TableSetupColumn(
-            GetLoc("auto.known_values", "Known Values"),
-            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 170.0f);
-        ImGuiMCP::TableSetupColumn(
-            GetLoc("auto.value", "Value"),
-            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 110.0f);
+            GetLoc("auto.multiplier", "Multiplier"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 125.0f);
         ImGuiMCP::TableSetupColumn(
             GetLoc("auto.chance", "Chance"),
-            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 115.0f);
         ImGuiMCP::TableSetupColumn(
-            GetLoc("auto.persist", "Persist"),
-            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGuiMCP::TableSetupColumn(
-            GetLoc("auto.status", "Status"),
-            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            GetLoc("auto.persist_status", "Persist / Status"),
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 145.0f);
         ImGuiMCP::TableSetupColumn(
             GetLoc("auto.action", "Action"),
             ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 55.0f);
         ImGuiMCP::TableHeadersRow();
 
         const auto& actorValueOptions = GetActorValueOptions();
+        const auto& globals = Manager::GetSingleton()->GetList("Global");
+        std::vector<SearchableComboOption> globalOptions;
+        globalOptions.reserve(globals.size());
+        for (const auto& global : globals) {
+            const auto internalID = GetInternalFormID(global);
+            const auto value = global.editorID.empty() ?
+                internalID : global.editorID;
+            const auto label = global.editorID.empty() ?
+                internalID :
+                std::format("{} [{}]", global.editorID, internalID);
+            globalOptions.push_back({ value, label });
+        }
+
         for (std::size_t rewardIndex = 0;
              rewardIndex < a_group.rewards.size();
              ++rewardIndex) {
             auto& reward = a_group.rewards[rewardIndex];
-            if (reward.typeReward != "Actor Value") {
+            if (reward.typeReward != "Actor Value" &&
+                reward.typeReward != "Actor Scale") {
                 continue;
             }
+
+            const bool isScale = reward.typeReward == "Actor Scale";
 
             ImGuiMCP::PushID(static_cast<int>(rewardIndex));
             ImGuiMCP::TableNextRow();
             ImGuiMCP::TableSetColumnIndex(0);
-            char nameBuffer[128]{};
-            strncpy_s(
-                nameBuffer,
-                reward.actorValueName.c_str(),
-                _TRUNCATE);
-            ImGuiMCP::SetNextItemWidth(-1.0f);
-            if (ImGuiMCP::InputText(
-                    "##ActorValueRewardName",
+            if (isScale) {
+                ImGuiMCP::TextUnformatted(GetLoc(
+                    "auto.actor_scale", "Actor Scale"));
+                if (ImGuiMCP::IsItemHovered()) {
+                    ImGuiMCP::SetTooltip(GetLoc(
+                        "auto.actor_scale_help",
+                        "Changes this actor reference's scale. The final scale must remain between 0.10 and 10.00."));
+                }
+            } else {
+                char nameBuffer[128]{};
+                strncpy_s(
                     nameBuffer,
-                    sizeof(nameBuffer))) {
-                reward.actorValueName = nameBuffer;
+                    reward.actorValueName.c_str(),
+                    _TRUNCATE);
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                if (ImGuiMCP::InputText(
+                        "##ActorValueRewardName",
+                        nameBuffer,
+                        sizeof(nameBuffer))) {
+                    reward.actorValueName = nameBuffer;
+                }
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                DrawLocalizedSearchableCombo(
+                    "##KnownActorValueReward",
+                    reward.actorValueName.empty() ?
+                        GetLoc("auto.select", "Select...") :
+                        reward.actorValueName.c_str(),
+                    std::format(
+                        "actor-value-reward-{}-{}",
+                        a_groupIndex,
+                        rewardIndex),
+                    actorValueOptions,
+                    reward.actorValueName,
+                    1);
             }
 
             ImGuiMCP::TableSetColumnIndex(1);
+            const char* operationLabels[]{
+                GetLoc("auto.flat", "Flat"),
+                GetLoc("auto.percent", "Percent") };
+            int operation = static_cast<int>(reward.numericOperation);
             ImGuiMCP::SetNextItemWidth(-1.0f);
-            DrawLocalizedSearchableCombo(
-                "##KnownActorValueReward",
-                GetLoc("auto.select", "Select..."),
-                std::format(
-                    "actor-value-reward-{}-{}",
-                    a_groupIndex,
-                    rewardIndex),
-                actorValueOptions,
-                reward.actorValueName,
-                1);
+            if (ImGuiMCP::Combo(
+                    "##NumericOperation", &operation,
+                    operationLabels, 2)) {
+                reward.numericOperation =
+                    static_cast<NumericRewardOperation>(operation);
+            }
+            if (reward.numericOperation == NumericRewardOperation::kPercent &&
+                ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(isScale ?
+                    GetLoc("auto.actor_scale_percent_help",
+                        "Percent is calculated from the external reference scale before EDF contributions.") :
+                    GetLoc("auto.actor_value_percent_help",
+                        "Percent is calculated from the external maximum value."));
+            }
 
             ImGuiMCP::TableSetColumnIndex(2);
+            const char* sourceLabels[]{
+                GetLoc("auto.fixed", "Fixed"),
+                GetLoc("auto.global", "Global"),
+                GetLoc("auto.actor_value", "Actor Value") };
+            int sourceType = static_cast<int>(reward.numericSource);
             ImGuiMCP::SetNextItemWidth(-1.0f);
-            ImGuiMCP::InputFloat(
-                "##ActorValueRewardAmount",
-                &reward.actorValueAmount,
-                0.0f,
-                0.0f,
-                "%+.2f");
+            if (ImGuiMCP::Combo(
+                    "##NumericSource", &sourceType,
+                    sourceLabels, 3)) {
+                reward.numericSource =
+                    static_cast<NumericRewardSource>(sourceType);
+            }
+            if (reward.numericSource == NumericRewardSource::kFixed) {
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                ImGuiMCP::InputFloat(
+                    "##ActorValueRewardAmount",
+                    &reward.actorValueAmount,
+                    0.0f, 0.0f, "%+.2f");
+            }
+            else if (reward.numericSource == NumericRewardSource::kGlobal) {
+                std::string selectedGlobal =
+                    reward.sourceGlobalEditorID.empty() ?
+                    reward.sourceGlobalFormID :
+                    reward.sourceGlobalEditorID;
+                const auto selectedOption = std::ranges::find_if(
+                    globalOptions,
+                    [&](const SearchableComboOption& a_option) {
+                        return a_option.value == selectedGlobal;
+                    });
+                const auto globalPreview =
+                    selectedOption != globalOptions.end() ?
+                    selectedOption->label :
+                    selectedGlobal.empty() ?
+                    std::string(GetLoc("auto.select", "Select...")) :
+                    selectedGlobal;
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                if (DrawLocalizedSearchableCombo(
+                        "##KnownGlobalSource",
+                        globalPreview.c_str(),
+                        std::format("numeric-global-{}-{}",
+                            a_groupIndex, rewardIndex),
+                        globalOptions,
+                        selectedGlobal,
+                        globals.size())) {
+                    const auto selected = std::ranges::find_if(
+                        globals, [&](const InternalFormInfo& a_info) {
+                            return EditorIDMatches(
+                                       a_info.editorID, selectedGlobal) ||
+                                GetInternalFormID(a_info) == selectedGlobal;
+                        });
+                    if (selected != globals.end()) {
+                        reward.sourceGlobalEditorID = selected->editorID;
+                        reward.sourceGlobalFormID = GetInternalFormID(*selected);
+                    }
+                }
+                char editorBuffer[128]{};
+                strncpy_s(editorBuffer,
+                    reward.sourceGlobalEditorID.c_str(), _TRUNCATE);
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                if (ImGuiMCP::InputText(
+                        "##GlobalEditorID", editorBuffer,
+                        sizeof(editorBuffer))) {
+                    reward.sourceGlobalEditorID = editorBuffer;
+                }
+                char formBuffer[128]{};
+                strncpy_s(formBuffer,
+                    reward.sourceGlobalFormID.c_str(), _TRUNCATE);
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                if (ImGuiMCP::InputText(
+                        "##GlobalFormID", formBuffer,
+                        sizeof(formBuffer))) {
+                    reward.sourceGlobalFormID = formBuffer;
+                }
+            }
+            else {
+                char sourceBuffer[128]{};
+                strncpy_s(sourceBuffer,
+                    reward.sourceActorValueName.c_str(), _TRUNCATE);
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                if (ImGuiMCP::InputText(
+                        "##SourceActorValue", sourceBuffer,
+                        sizeof(sourceBuffer))) {
+                    reward.sourceActorValueName = sourceBuffer;
+                }
+                ImGuiMCP::SetNextItemWidth(-1.0f);
+                DrawLocalizedSearchableCombo(
+                    "##KnownSourceActorValue",
+                    reward.sourceActorValueName.empty() ?
+                        GetLoc("auto.select", "Select...") :
+                        reward.sourceActorValueName.c_str(),
+                    std::format("source-actor-value-{}-{}",
+                        a_groupIndex, rewardIndex),
+                    actorValueOptions,
+                    reward.sourceActorValueName,
+                    1);
+                if (ImGuiMCP::IsItemHovered()) {
+                    ImGuiMCP::SetTooltip(
+                        "Actor Value sources use their maximum value.");
+                }
+            }
 
             ImGuiMCP::TableSetColumnIndex(3);
+            ImGuiMCP::SetNextItemWidth(-1.0f);
+            ImGuiMCP::InputFloat(
+                "##SourceMultiplier", &reward.sourceMultiplier,
+                0.0f, 0.0f, "%+.3f");
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(GetLoc(
+                    "auto.source_multiplier_help",
+                    "Multiplies the resolved source before Flat or Percent is calculated. 1 keeps it unchanged, 0.5 halves it, 2 doubles it, and -1 reverses its sign."));
+            }
+
+            ImGuiMCP::TableSetColumnIndex(4);
             ImGuiMCP::SetNextItemWidth(-1.0f);
             if (ImGuiMCP::InputFloat(
                     "##ActorValueRewardChance",
@@ -1833,7 +1985,7 @@ namespace SPIDUI {
                     reward.chanceReward, 0.0f, 100.0f);
             }
 
-            ImGuiMCP::TableSetColumnIndex(4);
+            ImGuiMCP::TableSetColumnIndex(5);
             ImGuiMCP::Checkbox(
                 "##ActorValueRewardPersistent",
                 &reward.isPersistent);
@@ -1842,9 +1994,9 @@ namespace SPIDUI {
                     "auto.actor_value_reward_persistent_help",
                     "If checked, the modifier won't be removed when the rule becomes invalid."));
             }
-
-            ImGuiMCP::TableSetColumnIndex(5);
-            if (IsActorValueRewardValid(reward)) {
+            ImGuiMCP::SameLine();
+            if (IsActorValueRewardValid(reward) &&
+                IsActorScaleRewardValid(reward)) {
                 ImGuiMCP::TextColored(
                     { 0.3f, 0.9f, 0.4f, 1.0f },
                     "%s",
@@ -1858,7 +2010,7 @@ namespace SPIDUI {
             }
 
             ImGuiMCP::TableSetColumnIndex(6);
-            if (ImGuiMCP::Button("X##ActorValueReward")) {
+            if (ImGuiMCP::Button("X##NumericReward")) {
                 a_group.rewards.erase(
                     a_group.rewards.begin() + rewardIndex);
                 ImGuiMCP::PopID();
@@ -1980,6 +2132,16 @@ namespace SPIDUI {
                     group.rewards.push_back(std::move(reward));
                 }
                 ImGuiMCP::SameLine();
+                if (ImGuiMCP::Button(GetLoc(
+                        "auto.add_actor_scale_reward",
+                        "+ Actor Scale"))) {
+                    Reward reward;
+                    reward.typeReward = "Actor Scale";
+                    reward.actorValueAmount = 0.10f;
+                    reward.isPersistent = false;
+                    group.rewards.push_back(std::move(reward));
+                }
+                ImGuiMCP::SameLine();
                 ImGuiMCP::Checkbox(GetLoc("auto.exclusive_picks_only_one_from_list", "Exclusive (Picks only one from list)"), &group.isExclusive);
 
                 if (group.isExclusive) {
@@ -1994,7 +2156,7 @@ namespace SPIDUI {
                 ImGuiMCP::Spacing();
                 ImGuiMCP::Text(GetLoc("auto.rewards_in_group", "Rewards in Group:"));
 
-                RenderActorValueRewards(group, gIdx);
+                RenderNumericRewards(group, gIdx);
 
                 // --- Tabela de Visualização de Rewards ---
                 auto tableFlags = ImGuiMCP::ImGuiTableFlags_Borders | ImGuiMCP::ImGuiTableFlags_RowBg | ImGuiMCP::ImGuiTableFlags_Resizable;
@@ -2010,7 +2172,8 @@ namespace SPIDUI {
 
                     for (size_t rIdx = 0; rIdx < group.rewards.size(); ++rIdx) {
                         auto& r = group.rewards[rIdx];
-                        if (r.typeReward == "Actor Value") {
+                        if (r.typeReward == "Actor Value" ||
+                            r.typeReward == "Actor Scale") {
                             continue;
                         }
                         ImGuiMCP::TableNextRow();
@@ -2044,10 +2207,34 @@ namespace SPIDUI {
                         }
 
                         // Coluna 2: Quantidade
-                        ImGuiMCP::TableSetColumnIndex(2); ImGuiMCP::Text("%d", r.amount);
+                        ImGuiMCP::TableSetColumnIndex(2);
+                        auto amount = static_cast<int>(r.amount);
+                        ImGuiMCP::SetNextItemWidth(-1.0f);
+                        if (ImGuiMCP::InputInt(
+                                ("##groupAmount" +
+                                 std::to_string(gIdx) + "_" +
+                                 std::to_string(rIdx)).c_str(),
+                                &amount,
+                                0,
+                                0)) {
+                            r.amount = static_cast<std::uint32_t>(
+                                std::max(1, amount));
+                        }
 
                         // Coluna 3: Chance
-                        ImGuiMCP::TableSetColumnIndex(3); ImGuiMCP::Text("%.1f%%", r.chanceReward);
+                        ImGuiMCP::TableSetColumnIndex(3);
+                        ImGuiMCP::SetNextItemWidth(-1.0f);
+                        if (ImGuiMCP::InputFloat(
+                                ("##groupChance" +
+                                 std::to_string(gIdx) + "_" +
+                                 std::to_string(rIdx)).c_str(),
+                                &r.chanceReward,
+                                0.0f,
+                                0.0f,
+                                "%.1f")) {
+                            r.chanceReward = std::clamp(
+                                r.chanceReward, 0.0f, 100.0f);
+                        }
 
                         ImGuiMCP::TableSetColumnIndex(4);
                         std::string persistID = "##p" + std::to_string(gIdx) + "_" + std::to_string(rIdx);

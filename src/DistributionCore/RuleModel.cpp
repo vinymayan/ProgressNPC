@@ -7,21 +7,26 @@
 
 namespace
 {
-    bool EqualInsensitive(
-        const std::string_view a_lhs,
-        const std::string_view a_rhs)
+    bool IsValidActorValue(const RE::ActorValue a_actorValue)
     {
-        return a_lhs.size() == a_rhs.size() &&
-            std::equal(
-                a_lhs.begin(),
-                a_lhs.end(),
-                a_rhs.begin(),
-                [](const unsigned char a_left,
-                   const unsigned char a_right) {
-                    return std::tolower(a_left) ==
-                        std::tolower(a_right);
-                });
+        const auto value = std::to_underlying(a_actorValue);
+        return value >= 0 &&
+            value < std::to_underlying(RE::ActorValue::kTotal);
     }
+
+    std::string NormalizeActorValueName(const std::string_view a_name)
+    {
+        std::string normalized;
+        normalized.reserve(a_name.size());
+        for (const auto character : a_name) {
+            const auto value = static_cast<unsigned char>(character);
+            if (std::isalnum(value)) {
+                normalized.push_back(static_cast<char>(std::tolower(value)));
+            }
+        }
+        return normalized;
+    }
+
 }
 
 RE::ActorValue ResolveActorValue(const std::string_view a_name)
@@ -33,10 +38,11 @@ RE::ActorValue ResolveActorValue(const std::string_view a_name)
     const std::string name(a_name);
     if (const auto resolved =
             RE::ActorValueList::LookupActorValueByName(name.c_str());
-        resolved != RE::ActorValue::kNone) {
+        IsValidActorValue(resolved)) {
         return resolved;
     }
 
+    const auto normalized = NormalizeActorValueName(name);
     for (auto index = 0;
          index < std::to_underlying(RE::ActorValue::kTotal);
          ++index) {
@@ -45,7 +51,7 @@ RE::ActorValue ResolveActorValue(const std::string_view a_name)
         const auto* actorValueName =
             RE::ActorValueList::GetActorValueName(actorValue);
         if (actorValueName &&
-            EqualInsensitive(name, actorValueName)) {
+            NormalizeActorValueName(actorValueName) == normalized) {
             return actorValue;
         }
     }
@@ -74,11 +80,59 @@ bool IsActorValueFilterValid(const BlacklistFilter& a_filter)
 
 bool IsActorValueRewardValid(const Reward& a_reward)
 {
-    return a_reward.typeReward != "Actor Value" ||
-        (ResolveActorValue(a_reward.actorValueName) !=
-             RE::ActorValue::kNone &&
-         std::isfinite(a_reward.actorValueAmount) &&
-         a_reward.actorValueAmount != 0.0f);
+    if (a_reward.typeReward != "Actor Value") {
+        return true;
+    }
+
+    const auto target = ResolveActorValue(a_reward.actorValueName);
+    if (target == RE::ActorValue::kNone ||
+        !std::isfinite(a_reward.sourceMultiplier) ||
+        a_reward.sourceMultiplier == 0.0f ||
+        (a_reward.numericOperation == NumericRewardOperation::kPercent &&
+         a_reward.percentBaseMode == ActorValueMode::kMaximum &&
+         !IsMaximumActorValueSupported(target))) {
+        return false;
+    }
+
+    switch (a_reward.numericSource) {
+    case NumericRewardSource::kFixed:
+        return std::isfinite(a_reward.actorValueAmount) &&
+            a_reward.actorValueAmount != 0.0f;
+    case NumericRewardSource::kGlobal:
+        return !a_reward.sourceGlobalFormID.empty() ||
+            !a_reward.sourceGlobalEditorID.empty();
+    case NumericRewardSource::kActorValue: {
+        const auto source =
+            ResolveActorValue(a_reward.sourceActorValueName);
+        return source != RE::ActorValue::kNone && source != target;
+    }
+    default:
+        return false;
+    }
+}
+
+bool IsActorScaleRewardValid(const Reward& a_reward)
+{
+    if (a_reward.typeReward != "Actor Scale") {
+        return true;
+    }
+    if (!std::isfinite(a_reward.sourceMultiplier) ||
+        a_reward.sourceMultiplier == 0.0f) {
+        return false;
+    }
+    switch (a_reward.numericSource) {
+    case NumericRewardSource::kFixed:
+        return std::isfinite(a_reward.actorValueAmount) &&
+            a_reward.actorValueAmount != 0.0f;
+    case NumericRewardSource::kGlobal:
+        return !a_reward.sourceGlobalFormID.empty() ||
+            !a_reward.sourceGlobalEditorID.empty();
+    case NumericRewardSource::kActorValue:
+        return ResolveActorValue(a_reward.sourceActorValueName) !=
+            RE::ActorValue::kNone;
+    default:
+        return false;
+    }
 }
 
 bool IsNumericValueFilterType(const std::string_view a_type)
