@@ -131,7 +131,9 @@ namespace
             type == "NPC Trait" ||
             type == "Relationship Rank" ||
             type == "Cell Type" ||
-            type == "Equipped Category";
+            type == "Equipped Category" ||
+            type == "Height" ||
+            type == "Weight";
     }
 
     bool HasActorDependentFilters(const Rule& rule)

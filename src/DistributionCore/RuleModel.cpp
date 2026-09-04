@@ -139,12 +139,21 @@ bool IsNumericValueFilterType(const std::string_view a_type)
 {
     return a_type == "Inventory Count" ||
         a_type == "Gold" ||
-        a_type == "Faction Rank";
+        a_type == "Faction Rank" ||
+        a_type == "Height" ||
+        a_type == "Weight";
 }
 
 void NormalizeNumericValueFilter(BlacklistFilter& a_filter)
 {
     if (!IsNumericValueFilterType(a_filter.type)) {
+        return;
+    }
+
+    if (a_filter.type == "Height" || a_filter.type == "Weight") {
+        if (a_filter.comparison != NumericComparison::kBetween) {
+            a_filter.maximumValue = a_filter.minimumValue;
+        }
         return;
     }
 

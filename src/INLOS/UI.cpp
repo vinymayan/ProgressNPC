@@ -328,6 +328,7 @@ namespace INLOS::UI
 
         void DrawNumericComparison(BlacklistFilter& a_filter)
         {
+            ImGuiMCP::SetNextItemWidth(120.0f);
             EnumCombo(
                 "Operator",
                 a_filter.comparison,
@@ -1033,7 +1034,7 @@ namespace INLOS::UI
             ImGuiMCP::TableSetupColumn(
                 "Condition",
                 ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
-                250.0f);
+                330.0f);
             ImGuiMCP::TableSetupColumn(
                 "Identifier",
                 ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
@@ -1117,6 +1118,7 @@ namespace INLOS::UI
                                     TypeCapability::kNumeric)) != 0) ||
                     IsNumericValueFilterType(filter.type);
                 if (numeric) {
+                    ImGuiMCP::SetNextItemWidth(120.0f);
                     EnumCombo(
                         "##Operator",
                         filter.comparison,
@@ -1489,18 +1491,6 @@ namespace INLOS::UI
                 }
                 ImGuiMCP::EndCombo();
             }
-            ImGuiMCP::SameLine();
-            ImGuiMCP::Checkbox(
-                a_blacklist ?
-                    "Require ALL filters to invalidate (AND)" :
-                    "Require ALL filters (AND)",
-                &requiresAll);
-            if (ImGuiMCP::IsItemHovered()) {
-                ImGuiMCP::SetTooltip(
-                    a_blacklist ?
-                        "If unchecked, any matching filter invalidates the rule." :
-                        "If unchecked, any matching filter validates the rule.");
-            }
 
             if (!a_blacklist) {
                 ImGuiMCP::TextUnformatted("Summoned Status:");
@@ -1540,6 +1530,18 @@ namespace INLOS::UI
                     });
             }
 
+            ImGuiMCP::Checkbox(
+                a_blacklist ?
+                    "Require ALL filters to invalidate (AND)" :
+                    "Require ALL filters (AND)",
+                &requiresAll);
+            if (ImGuiMCP::IsItemHovered()) {
+                ImGuiMCP::SetTooltip(
+                    a_blacklist ?
+                        "If unchecked, any matching filter invalidates the rule." :
+                        "If unchecked, any matching filter validates the rule.");
+            }
+
             ImGuiMCP::Separator();
             if (ImGuiMCP::Button(
                     a_blacklist ?
@@ -1559,6 +1561,26 @@ namespace INLOS::UI
                     NumericComparison::kGreaterOrEqual;
                 filter.minimumValue = 100.0f;
                 filter.maximumValue = 100.0f;
+                filters.push_back(std::move(filter));
+            }
+            ImGuiMCP::SameLine();
+            if (ImGuiMCP::Button("+ Height")) {
+                BlacklistFilter filter;
+                filter.type = "Height";
+                filter.optionText = "Height";
+                filter.comparison = NumericComparison::kGreaterOrEqual;
+                filter.minimumValue = 1.0f;
+                filter.maximumValue = 1.0f;
+                filters.push_back(std::move(filter));
+            }
+            ImGuiMCP::SameLine();
+            if (ImGuiMCP::Button("+ Weight")) {
+                BlacklistFilter filter;
+                filter.type = "Weight";
+                filter.optionText = "Weight";
+                filter.comparison = NumericComparison::kGreaterOrEqual;
+                filter.minimumValue = 50.0f;
+                filter.maximumValue = 50.0f;
                 filters.push_back(std::move(filter));
             }
 
@@ -1602,7 +1624,7 @@ namespace INLOS::UI
                 ImGuiMCP::TableSetupColumn(
                     "Operator",
                     ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
-                    100.0f);
+                    200.0f);
                 ImGuiMCP::TableSetupColumn(
                     "Value",
                     ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
@@ -1809,7 +1831,7 @@ namespace INLOS::UI
                     ImGuiMCP::TableSetColumnIndex(2);
                     if (IsNumericValueFilterType(
                             filter.type)) {
-                        ImGuiMCP::SetNextItemWidth(60.0f);
+                        ImGuiMCP::SetNextItemWidth(120.0f);
                         EnumCombo(
                             "##Comparison",
                             filter.comparison,
@@ -2529,6 +2551,7 @@ namespace INLOS::UI
                 "Require Player Killer",
                 &a_lootRule.requirePlayerKiller);
 
+            ImGuiMCP::SetNextItemWidth(170.0f);
             EnumCombo(
                 "Level Operator",
                 rule.levelComparison,
@@ -2664,7 +2687,7 @@ namespace INLOS::UI
 
             ImGuiMCP::TextUnformatted("Actor Level:");
             ImGuiMCP::SameLine();
-            ImGuiMCP::SetNextItemWidth(85.0f);
+            ImGuiMCP::SetNextItemWidth(170.0f);
             EnumCombo(
                 "##LevelComparison",
                 rule.levelComparison,

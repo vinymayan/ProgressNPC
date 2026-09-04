@@ -261,6 +261,12 @@ namespace DistributionCore
         if (a_filter.type == "Actor Value") {
             return Result(MatchesActorValue(a_actor, a_filter));
         }
+        if (a_filter.type == "Height") {
+            return Result(a_npc && MatchesNumeric(a_npc->height, a_filter));
+        }
+        if (a_filter.type == "Weight") {
+            return Result(a_npc && MatchesNumeric(a_npc->weight, a_filter));
+        }
         if (a_filter.type == "Source Plugin") {
             const auto* file = a_npc ? a_npc->GetFile(0) : nullptr;
             const auto source = file ?

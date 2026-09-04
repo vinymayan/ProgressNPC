@@ -557,6 +557,9 @@ namespace SPIDUI {
     const char* GetSpecialFilterName(
         const BlacklistFilter& filter)
     {
+        if (filter.type == "Height" || filter.type == "Weight") {
+            return filter.type.c_str();
+        }
         if (!filter.optionText.empty()) {
             return filter.optionText.c_str();
         }
@@ -574,7 +577,7 @@ namespace SPIDUI {
             };
             auto comparison = std::clamp(
                 static_cast<int>(filter.comparison), 0, 3);
-            ImGuiMCP::SetNextItemWidth(60.0f);
+            ImGuiMCP::SetNextItemWidth(120.0f);
             if (ImGuiMCP::BeginCombo(
                     "##NumericFilterComparison",
                     comparisons[comparison])) {
@@ -587,6 +590,29 @@ namespace SPIDUI {
                     }
                 }
                 ImGuiMCP::EndCombo();
+            }
+
+            const auto isNPCBodyValue =
+                filter.type == "Height" || filter.type == "Weight";
+            if (isNPCBodyValue) {
+                ImGuiMCP::SameLine();
+                ImGuiMCP::SetNextItemWidth(320.0f);
+                ImGuiMCP::InputFloat(
+                    "##NumericFilterMinimum",
+                    &filter.minimumValue,
+                    0.01f, 0.1f, "%.2f");
+                if (filter.comparison == NumericComparison::kBetween) {
+                    ImGuiMCP::SameLine();
+                    ImGuiMCP::SetNextItemWidth(80.0f);
+                    ImGuiMCP::InputFloat(
+                        "##NumericFilterMaximum",
+                        &filter.maximumValue,
+                        0.01f, 0.1f, "%.2f");
+                }
+                else {
+                    filter.maximumValue = filter.minimumValue;
+                }
+                return;
             }
 
             auto minimum = static_cast<int>(
@@ -709,7 +735,7 @@ namespace SPIDUI {
             };
             auto comparison = std::clamp(
                 static_cast<int>(filter.comparison), 0, 3);
-            ImGuiMCP::SetNextItemWidth(60.0f);
+            ImGuiMCP::SetNextItemWidth(120.0f);
             if (ImGuiMCP::BeginCombo(
                     "##RelationshipComparison",
                     comparisons[comparison])) {
@@ -812,7 +838,7 @@ namespace SPIDUI {
             ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 135.0f);
         ImGuiMCP::TableSetupColumn(
             GetLoc("auto.operator", "Operator"),
-            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 200.0f);
         ImGuiMCP::TableSetupColumn(
             GetLoc("auto.minimum", "Value"),
             ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 120.0f);
@@ -1068,11 +1094,6 @@ namespace SPIDUI {
             }
             ImGuiMCP::EndCombo();
         }
-        ImGuiMCP::SameLine();
-        ImGuiMCP::Checkbox(checkLabel, &requiresAll);
-        if (ImGuiMCP::IsItemHovered()) {
-            ImGuiMCP::SetTooltip(tooltip);
-        }
         if (!isBlacklist) {
             const char* actorScopeOptions[] = {
                 GetLoc("auto.both", "Both"),
@@ -1240,12 +1261,35 @@ namespace SPIDUI {
             }
         }
 
+        ImGuiMCP::Checkbox(checkLabel, &requiresAll);
+        if (ImGuiMCP::IsItemHovered()) {
+            ImGuiMCP::SetTooltip(tooltip);
+        }
+
         ImGuiMCP::Separator();
         if (ImGuiMCP::Button(buttonLabel)) {
             ResetSelectionState();
             isPickingBlacklist = true;
         }
         RenderActorValueFilters(filters, isBlacklist);
+        ImGuiMCP::SameLine();
+        if (ImGuiMCP::Button("+ Height")) {
+            BlacklistFilter filter;
+            filter.type = "Height";
+            filter.comparison = NumericComparison::kGreaterOrEqual;
+            filter.minimumValue = 1.0f;
+            filter.maximumValue = 1.0f;
+            filters.push_back(std::move(filter));
+        }
+        ImGuiMCP::SameLine();
+        if (ImGuiMCP::Button("+ Weight")) {
+            BlacklistFilter filter;
+            filter.type = "Weight";
+            filter.comparison = NumericComparison::kGreaterOrEqual;
+            filter.minimumValue = 50.0f;
+            filter.maximumValue = 50.0f;
+            filters.push_back(std::move(filter));
+        }
 
         if (ImGuiMCP::BeginTable(tableName, 5, ImGuiMCP::ImGuiTableFlags_Borders)) {
             ImGuiMCP::TableSetupColumn(GetLoc("auto.type", "Type"), ImGuiMCP::ImGuiTableColumnFlags_WidthFixed, 120.0f);
@@ -1269,7 +1313,9 @@ namespace SPIDUI {
                     f.type == "NPC Trait" ||
                     f.type == "Relationship Rank" ||
                     f.type == "Cell Type" ||
-                    f.type == "Equipped Category") {
+                    f.type == "Equipped Category" ||
+                    f.type == "Height" ||
+                    f.type == "Weight") {
                     resolvedName = GetSpecialFilterName(f);
                 }
                 else if (auto form = ResolveEDFForm(
@@ -2406,7 +2452,7 @@ namespace SPIDUI {
         };
         auto levelComparison = std::clamp(
             static_cast<int>(rule.levelComparison), 0, 3);
-        ImGuiMCP::SetNextItemWidth(85.0f);
+        ImGuiMCP::SetNextItemWidth(170.0f);
         if (ImGuiMCP::BeginCombo(
                 "##RuleLevelComparison",
                 levelComparisons[levelComparison])) {

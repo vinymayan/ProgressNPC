@@ -307,6 +307,8 @@ namespace WIYT
             return false;
         case ActivityType::kCustom:
             return a_type != "Actor Value" &&
+                a_type != "Height" &&
+                a_type != "Weight" &&
                 a_type != "Inventory Count" &&
                 a_type != "Gold" &&
                 a_type != "Faction Rank" &&

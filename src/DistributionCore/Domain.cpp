@@ -96,7 +96,7 @@ namespace DistributionCore
                     { type, type, kAllDomains, form });
             }
             for (const auto* type : {
-                     "Actor Value", "Inventory Count", "Gold",
+                     "Actor Value", "Inventory Count", "Gold", "Height", "Weight",
                      "Faction Rank", "Relationship Rank" }) {
                 FilterRegistry().Register(
                     { type, type, kAllDomains, numeric });

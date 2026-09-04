@@ -367,6 +367,7 @@ namespace WIYT::UI
 
         void DrawNumericComparison(BlacklistFilter& a_filter)
         {
+            ImGuiMCP::SetNextItemWidth(120.0f);
             EnumCombo(
                 "Operator",
                 a_filter.comparison,
@@ -1121,12 +1122,11 @@ namespace WIYT::UI
             ImGuiMCP::SameLine();
             ImGuiMCP::TextUnformatted(
                 ScopeLabel(*g_filterScope));
-            ImGuiMCP::SameLine();
+            ImGuiMCP::TextDisabled(
+                ScopeDescription(*g_filterScope));
             ImGuiMCP::Checkbox(
                 "Require ALL filters (AND)",
                 &a_requirement.filtersRequireAll);
-            ImGuiMCP::TextDisabled(
-                ScopeDescription(*g_filterScope));
             ImGuiMCP::Separator();
 
             if (ImGuiMCP::Button("Add New Filter")) {
@@ -1153,6 +1153,34 @@ namespace WIYT::UI
                 filter.minimumValue = 100.0f;
                 filters.push_back(std::move(filter));
             }
+            if (IsFilterAllowedForScope(
+                    *g_filterScope,
+                    a_requirement.activity,
+                    "Height")) {
+                ImGuiMCP::SameLine();
+                if (ImGuiMCP::Button("+ Height")) {
+                    BlacklistFilter filter;
+                    filter.type = "Height";
+                    filter.comparison = NumericComparison::kGreaterOrEqual;
+                    filter.minimumValue = 1.0f;
+                    filter.maximumValue = 1.0f;
+                    filters.push_back(std::move(filter));
+                }
+            }
+            if (IsFilterAllowedForScope(
+                    *g_filterScope,
+                    a_requirement.activity,
+                    "Weight")) {
+                ImGuiMCP::SameLine();
+                if (ImGuiMCP::Button("+ Weight")) {
+                    BlacklistFilter filter;
+                    filter.type = "Weight";
+                    filter.comparison = NumericComparison::kGreaterOrEqual;
+                    filter.minimumValue = 50.0f;
+                    filter.maximumValue = 50.0f;
+                    filters.push_back(std::move(filter));
+                }
+            }
             ImGuiMCP::SameLine();
             if (ImGuiMCP::BeginCombo(
                     "+ Special Filter", "Select...")) {
@@ -1160,6 +1188,8 @@ namespace WIYT::UI
                      DistributionCore::FilterRegistry().AvailableFor(
                          DistributionCore::Domain::kWIYT)) {
                     if (descriptor.id == "Actor Value" ||
+                        descriptor.id == "Height" ||
+                        descriptor.id == "Weight" ||
                         !IsFilterAllowedForScope(
                             *g_filterScope,
                             a_requirement.activity,
@@ -1198,7 +1228,7 @@ namespace WIYT::UI
             ImGuiMCP::TableSetupColumn(
                 "Condition",
                 ImGuiMCP::ImGuiTableColumnFlags_WidthFixed,
-                290.0f);
+                400.0f);
             ImGuiMCP::TableSetupColumn(
                 "Identifier",
                 ImGuiMCP::ImGuiTableColumnFlags_WidthStretch);
@@ -1243,6 +1273,9 @@ namespace WIYT::UI
                     ImGuiMCP::SetNextItemWidth(-1.0f);
                     InputString(
                         "##ActorValue", filter.actorValueName);
+                }
+                else if (filter.type == "Height" || filter.type == "Weight") {
+                    ImGuiMCP::TextUnformatted("NPC base value");
                 }
                 else {
                     ImGuiMCP::SetNextItemWidth(-1.0f);
